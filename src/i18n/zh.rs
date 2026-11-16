@@ -264,4 +264,6 @@ pub const T: &[(&str, &str)] = &[
     ("Up next", "接下来"),
     ("Your queue", "你的队列"),
     ("Your queue and YouTube's suggestions", "你的队列和 YouTube 推荐"),
+    ("Previously played", "之前播放过"),
+    ("Now playing", "正在播放"),
 ];

@@ -264,4 +264,6 @@ pub const T: &[(&str, &str)] = &[
     ("Up next", "Sıradaki"),
     ("Your queue", "Sıranız"),
     ("Your queue and YouTube's suggestions", "Sıranız ve YouTube önerileri"),
+    ("Previously played", "Daha önce oynatılanlar"),
+    ("Now playing", "Şimdi oynatılıyor"),
 ];

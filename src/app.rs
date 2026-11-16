@@ -286,6 +286,10 @@ pub struct App {
     up_next: std::collections::VecDeque<Video>,
     /// Played this session, for Previous.
     played: Vec<Video>,
+    /// The video playing now, as it was clicked (title, channel, duration).
+    now: Option<Video>,
+    /// Up next was last scrolled to "Now playing" for this video id.
+    up_next_anchor: String,
     /// YouTube's suggestions for the playing video: (video id, list).
     related: (String, Vec<Video>),
     /// The list the queue context came from, for the panel's heading.
@@ -423,6 +427,8 @@ impl App {
             queue_pos: None,
             up_next: std::collections::VecDeque::new(),
             played: Vec::new(),
+            now: None,
+            up_next_anchor: String::new(),
             related: (String::new(), Vec::new()),
             queue_label: String::new(),
             eof_at: None,
@@ -1174,6 +1180,7 @@ impl App {
     /// Play `v` now from the Up next panel.
     fn jump_to(&mut self, v: &Video) {
         self.up_next.retain(|x| x.id != v.id);
+        self.played.retain(|x| x.id != v.id);
         if let Some(i) = self.queue_ctx.iter().position(|x| x.id == v.id) {
             self.queue_pos = Some(i);
         }
@@ -1203,11 +1210,23 @@ impl App {
 
     fn current_video(&self) -> Option<Video> {
         let id = self.playing_id()?;
-        self.queue_ctx
+        self.now
             .iter()
+            .chain(self.queue_ctx.iter())
             .chain(self.played.iter())
             .find(|v| v.id == id)
             .cloned()
+            .map(|mut v| {
+                // opened by link / id: take the title the player learned
+                if v.title.is_none() {
+                    v.title = self
+                        .embedded
+                        .as_ref()
+                        .map(|p| p.title.clone())
+                        .filter(|t| !t.is_empty());
+                }
+                v
+            })
             .or_else(|| {
                 self.embedded.as_ref().map(|p| Video {
                     id: p.id.clone(),
@@ -1241,6 +1260,7 @@ impl App {
     }
 
     fn play(&mut self, video: &Video) {
+        self.now = Some(video.clone());
         self.eof_at = None;
         self.autoplay_cancelled = false;
         self.stop_player();
@@ -3164,9 +3184,32 @@ impl App {
     fn up_next_body(&mut self, ui: &mut egui::Ui) -> Option<Video> {
         let mut play: Option<Video> = None;
         let cur = self.playing_id().map(str::to_string);
+        let now_v = self
+            .current_video()
+            .filter(|v| self.now.as_ref().is_some_and(|n| n.id == v.id));
         let thumbs = &mut self.thumbs;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 4.0;
+                    // --- what you played before this, oldest first ---
+                    if !self.played.is_empty() {
+                        ui.label(RichText::new(t("Previously played")).size(15.0).strong().color(text()));
+                        for v in &self.played {
+                            if up_next_row(ui, thumbs, v, false).clicked {
+                                play = Some(v.clone());
+                            }
+                        }
+                        ui.add_space(10.0);
+                    }
+                    if let Some(now) = now_v.as_ref() {
+                        let head = ui.label(RichText::new(t("Now playing")).size(15.0).strong().color(text()));
+                        // open on "Now playing" with history above it
+                        if self.up_next_anchor != now.id {
+                            head.scroll_to_me(Some(Align::TOP));
+                            self.up_next_anchor = now.id.clone();
+                        }
+                        up_next_row(ui, thumbs, now, true);
+                        ui.add_space(10.0);
+                    }
                     // --- your queue ---
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(t("Your queue")).size(15.0).strong().color(text()));
@@ -3258,7 +3301,7 @@ impl App {
                     }
                     let mut add: Option<Video> = None;
                     for v in suggestions {
-                        let r = up_next_row(ui, thumbs, v, true);
+                        let r = up_next_row(ui, thumbs, v, false);
                         if r.clicked {
                             play = Some(v.clone());
                         }
@@ -3436,6 +3479,7 @@ impl App {
             go_prev |= act.prev;
             if act.toggle_panel {
                 self.up_next_open = !self.up_next_open;
+                self.up_next_anchor.clear();
             }
             video_rect = act.video_rect.unwrap_or(egui::Rect::NOTHING);
             if act.cancel_autoplay {
@@ -4547,7 +4591,7 @@ struct RowResp {
 }
 
 /// A compact video row for the Up next panel: thumbnail, title, channel.
-fn up_next_row(ui: &mut egui::Ui, thumbs: &mut Thumbs, v: &Video, _suggested: bool) -> RowResp {
+fn up_next_row(ui: &mut egui::Ui, thumbs: &mut Thumbs, v: &Video, current: bool) -> RowResp {
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 64.0), Sense::click());
     let hovered = ui.rect_contains_pointer(rect);
@@ -4559,7 +4603,9 @@ fn up_next_row(ui: &mut egui::Ui, thumbs: &mut Thumbs, v: &Video, _suggested: bo
         };
     }
     let painter = ui.painter_at(rect);
-    if hovered {
+    if current {
+        painter.rect_filled(rect, 8, accent().gamma_multiply(0.22));
+    } else if hovered {
         painter.rect_filled(rect, 8, card_hover());
     }
     let thumb = egui::Rect::from_min_size(rect.min + Vec2::new(2.0, 2.0), Vec2::new(107.0, 60.0));

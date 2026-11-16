@@ -1588,7 +1588,10 @@ impl Embedded {
             let c = un.center();
             for dy in [-5.0f32, 0.0, 5.0] {
                 painter.line_segment(
-                    [Pos2::new(c.x - 8.0, c.y + dy), Pos2::new(c.x + 3.0, c.y + dy)],
+                    [
+                        Pos2::new(c.x - 8.0, c.y + dy),
+                        Pos2::new(c.x + 3.0, c.y + dy),
+                    ],
                     Stroke::new(2.0, Color32::WHITE),
                 );
             }

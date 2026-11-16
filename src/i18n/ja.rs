@@ -264,4 +264,6 @@ pub const T: &[(&str, &str)] = &[
     ("Up next", "次の動画"),
     ("Your queue", "キュー"),
     ("Your queue and YouTube's suggestions", "キューと YouTube のおすすめ"),
+    ("Previously played", "再生済み"),
+    ("Now playing", "再生中"),
 ];

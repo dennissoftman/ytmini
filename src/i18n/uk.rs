@@ -264,4 +264,6 @@ pub const T: &[(&str, &str)] = &[
     ("Up next", "Далі"),
     ("Your queue", "Ваша черга"),
     ("Your queue and YouTube's suggestions", "Ваша черга й рекомендації YouTube"),
+    ("Previously played", "Уже переглянуто"),
+    ("Now playing", "Зараз грає"),
 ];
