@@ -6,5 +6,8 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 dirs = "5"
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
