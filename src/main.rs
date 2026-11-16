@@ -9,6 +9,7 @@ mod chapters;
 mod dearrow;
 mod deps;
 mod downloads;
+mod i18n;
 mod innertube;
 mod links;
 mod mpv;

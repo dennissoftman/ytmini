@@ -21,6 +21,9 @@ pub struct Client {
     sapisid: Option<String>,
     agent: ureq::Agent,
     jar: std::path::PathBuf,
+    /// Ask for English replies whatever the interface language: for the few
+    /// actions that find things by YouTube's English wording.
+    english: bool,
 }
 
 /// Serialises cookies.txt rewrites across tab threads.
@@ -56,6 +59,7 @@ impl Client {
             sapisid,
             agent,
             jar: cookies.to_path_buf(),
+            english: false,
         })
     }
 
@@ -72,6 +76,7 @@ impl Client {
             sapisid: None,
             agent,
             jar: std::path::PathBuf::new(),
+            english: false,
         }
     }
 
@@ -81,7 +86,9 @@ impl Client {
 
     /// POST /youtubei/v1/<endpoint> with `body` merged into the client context.
     pub fn post(&self, endpoint: &str, mut body: Value) -> Result<Value> {
-        body["context"] = json!({"client": {"clientName": "WEB", "clientVersion": CLIENT_VERSION, "hl": "en", "gl": "US"}});
+        let (hl, gl) = crate::i18n::youtube_locale();
+        let hl = if self.english { "en".to_string() } else { hl };
+        body["context"] = json!({"client": {"clientName": "WEB", "clientVersion": CLIENT_VERSION, "hl": hl, "gl": gl}});
         let mut req = self
             .agent
             .post(format!("{ORIGIN}/youtubei/v1/{endpoint}?prettyPrint=false"))
@@ -439,8 +446,9 @@ mod chips_live {
     fn dump_feed() {
         let cookies = crate::yt::config_dir().unwrap().join("cookies.txt");
         let c = super::Client::new(&cookies).unwrap();
+        let id = std::env::var("YTMINI_BROWSE").unwrap_or_else(|_| "FEwhat_to_watch".into());
         let v = c
-            .post("browse", serde_json::json!({"browseId": "FEwhat_to_watch"}))
+            .post("browse", serde_json::json!({ "browseId": id }))
             .unwrap();
         std::fs::write(std::env::var("YTMINI_DUMP_FEED").unwrap(), v.to_string()).unwrap();
     }
@@ -479,6 +487,64 @@ mod topics_live {
             );
             assert!(!a.is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod locale_live {
+    /// How completely each tab parses in the language set by YTMINI_HL.
+    /// Read-only tabs (no search, which would land in search history).
+    #[test]
+    #[ignore]
+    fn locale_parse() {
+        use crate::yt::Source;
+        let cookies = crate::yt::config_dir().unwrap().join("cookies.txt");
+        for src in [
+            Source::Feed,
+            Source::Subscriptions,
+            Source::WatchLater,
+            Source::History,
+        ] {
+            let mut p = super::Pager::new(&cookies, &src).unwrap();
+            let v = p.next_page().unwrap().unwrap_or_default();
+            let n = v.iter().filter(|v| !v.is_short && !v.is_playlist).count();
+            let c = |f: &dyn Fn(&crate::yt::Video) -> bool| {
+                v.iter()
+                    .filter(|v| !v.is_short && !v.is_playlist && f(v))
+                    .count()
+            };
+            eprintln!(
+                "{:14} {n:3} videos: channel {:3} views {:3} age {:3} duration {:3} | e.g. {:?}",
+                src.label(),
+                c(&|v| v.channel.is_some()),
+                c(&|v| v.views_label().is_some()),
+                c(&|v| v.age.is_some()),
+                c(&|v| v.duration.is_some()),
+                v.iter()
+                    .find(|v| !v.is_short)
+                    .map(|v| (v.views_label(), v.age.clone()))
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod related_live {
+    /// `cargo test -- --ignored related_videos --nocapture`
+    #[test]
+    #[ignore]
+    fn related_videos() {
+        let cookies = crate::yt::config_dir().unwrap().join("cookies.txt");
+        let r = super::related(&cookies, "aqz-KE-bpKQ").unwrap();
+        eprintln!(
+            "{} suggestions; first: {:?}",
+            r.len(),
+            r.iter()
+                .take(3)
+                .map(|v| (v.title(), v.channel(), v.views_label()))
+                .collect::<Vec<_>>()
+        );
+        assert!(r.len() >= 5);
     }
 }
 
@@ -576,6 +642,19 @@ pub fn player_extras(cookies: &Path, video_id: &str) -> Result<Extras> {
     })
 }
 
+/// YouTube's suggestions for a video (the column beside the player on the
+/// website), personalised like there. Reads only; nothing is recorded.
+pub fn related(cookies: &Path, video_id: &str) -> Result<Vec<Video>> {
+    let r = Client::new(cookies)?.post("next", json!({ "videoId": video_id }))?;
+    let results = r
+        .pointer("/contents/twoColumnWatchNextResults/secondaryResults/secondaryResults/results")
+        .context("no suggestions in the reply")?;
+    let mut out = Vec::new();
+    collect(results, &mut out, &mut None);
+    out.retain(|v| v.id != video_id && !v.is_short);
+    Ok(out)
+}
+
 /// The chapters YouTube shows on the seek bar (the uploader's, else its
 /// automatic ones). Asked signed out: chapters are public, and the watch-page
 /// request shouldn't count toward anything on the account.
@@ -612,7 +691,8 @@ pub fn chapters(video_id: &str) -> Result<Vec<crate::chapters::Chapter>> {
 /// "Remove from watch history" does). Looks through the first few pages of
 /// History for it. Returns false if it isn't there. Blocking.
 pub fn remove_from_history(cookies: &Path, video_id: &str) -> Result<bool> {
-    let client = Client::new(cookies)?;
+    let mut client = Client::new(cookies)?;
+    client.english = true; // the menu item is found by its English title
     let mut body = json!({ "browseId": "FEhistory" });
     let mut endpoint = "browse";
     for _ in 0..5 {
@@ -969,6 +1049,7 @@ fn lockup(x: &Value) -> Option<Video> {
         return None; // channels etc.
     }
     // metadata rows: [channel], [views, age] (order and presence vary)
+    let mut other: Vec<String> = Vec::new();
     if let Some(rows) = meta
         .pointer("/metadata/contentMetadataViewModel/metadataRows")
         .and_then(Value::as_array)
@@ -994,9 +1075,16 @@ fn lockup(x: &Value) -> Option<Video> {
                     v.channel = Some(content.to_string());
                     let nav = t.and_then(|t| t.pointer("/commandRuns/0/onTap/innertubeCommand"));
                     v.channel_url = channel_from_nav(nav);
+                } else if !v.is_playlist {
+                    other.push(content.to_string());
                 }
             }
         }
+    }
+    // Not English (the interface language): which part is views and which is
+    // age differs by language, so show YouTube's own wording as one line.
+    if v.views.is_none() && v.age.is_none() && !other.is_empty() {
+        v.views_text = Some(other.join(" · "));
     }
     if !v.is_playlist {
         let mut badges = Vec::new();
@@ -1010,7 +1098,12 @@ fn lockup(x: &Value) -> Option<Video> {
             .filter_map(|b| b.get("text")?.as_str())
             .collect();
         v.duration = texts.iter().find_map(|t| parse_duration(t));
-        v.is_live = v.duration.is_none() && texts.iter().any(|t| is_live_badge(t));
+        let styled_live = badges.iter().any(|b| {
+            b.get("badgeStyle")
+                .and_then(Value::as_str)
+                .is_some_and(|s| s.contains("LIVE"))
+        });
+        v.is_live = v.duration.is_none() && (styled_live || texts.iter().any(|t| is_live_badge(t)));
     }
     Some(v)
 }
@@ -1044,15 +1137,24 @@ fn renderer(x: &Value) -> Option<Video> {
     if let Some(runs) = x.pointer("/videoInfo/runs").and_then(Value::as_array) {
         infos.extend(
             runs.iter()
-                .filter_map(|r| r.get("text")?.as_str().map(str::to_string)),
+                .filter_map(|r| r.get("text")?.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| s.chars().any(char::is_alphanumeric)),
         );
     }
+    let mut other = Vec::new();
     for i in infos {
+        let i = i.trim().to_string();
         if let Some(n) = parse_views(&i) {
             v.views = Some(n);
-        } else if is_age(i.trim()) {
-            v.age = Some(i.trim().to_string());
+        } else if is_age(&i) {
+            v.age = Some(i);
+        } else if !i.is_empty() {
+            other.push(i);
         }
+    }
+    // not English: YouTube's own wording, in its order (see lockup)
+    if v.views.is_none() && v.age.is_none() && !other.is_empty() {
+        v.views_text = Some(other.join(" · "));
     }
     v.is_live = v.duration.is_none()
         && (x.get("upcomingEventData").is_some()
@@ -1073,11 +1175,13 @@ fn short(x: &Value) -> Option<Video> {
         .as_str()?
         .to_string();
     let title = text(x.pointer("/overlayMetadata/primaryText"));
-    let views = text(x.pointer("/overlayMetadata/secondaryText")).and_then(|s| parse_views(&s));
+    let secondary = text(x.pointer("/overlayMetadata/secondaryText"));
+    let views = secondary.as_deref().and_then(parse_views);
     Some(Video {
         id,
         title,
         views,
+        views_text: secondary.filter(|_| views.is_none()),
         is_short: true,
         ..Default::default()
     })

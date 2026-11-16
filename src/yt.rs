@@ -4,6 +4,7 @@
 //! Nothing in here touches the UI; it is all plain blocking functions that the
 //! app runs on worker threads.
 
+use crate::i18n::t;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::{
@@ -473,15 +474,15 @@ pub enum Source {
 impl Source {
     pub fn label(&self) -> String {
         match self {
-            Source::Feed => "Feed".into(),
-            Source::Subscriptions => "Subscriptions".into(),
-            Source::WatchLater => "Watch later".into(),
-            Source::History => "History".into(),
-            Source::Playlists => "Playlists".into(),
-            Source::Search(_) => "Search".into(),
+            Source::Feed => t("Feed").into(),
+            Source::Subscriptions => t("Subscriptions").into(),
+            Source::WatchLater => t("Watch later").into(),
+            Source::History => t("History").into(),
+            Source::Playlists => t("Playlists").into(),
+            Source::Search(_) => t("Search").into(),
             Source::Channel { name, .. } | Source::ChannelPlaylists { name, .. } => name.clone(),
             Source::Playlist { title, .. } => title.clone(),
-            Source::Downloads => "Downloads".into(),
+            Source::Downloads => t("Downloads").into(),
             Source::Topic { title, .. } => title.clone(),
         }
     }
@@ -578,6 +579,7 @@ impl RawEntry {
             is_playlist,
             thumb_id,
             views: self.view_count,
+            views_text: None,
             // search results carry a ~150-char snippet; keep it short
             description: self.description.map(|d| d.chars().take(200).collect()),
             age: None,
@@ -604,6 +606,10 @@ pub struct Video {
     pub thumb_id: Option<String>,
     #[serde(default)]
     pub views: Option<u64>,
+    /// YouTube's own wording of the view count when it isn't English
+    /// ("1,3 млн просмотров"); shown as is.
+    #[serde(default)]
+    pub views_text: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     /// "3 days ago" (only from the native API)
@@ -656,17 +662,12 @@ impl Video {
     }
     /// "1.2M views"
     pub fn views_label(&self) -> Option<String> {
-        let n = self.views? as f64;
-        let s = if n >= 1e9 {
-            format!("{:.1}B", n / 1e9)
-        } else if n >= 1e6 {
-            format!("{:.1}M", n / 1e6)
-        } else if n >= 1e3 {
-            format!("{:.0}K", n / 1e3)
-        } else {
-            format!("{n}")
+        let Some(n) = self.views else {
+            return self.views_text.clone();
         };
-        Some(format!("{} views", s.replace(".0", "")))
+        // plural form follows the exact count; the number shown is compact
+        let s = crate::i18n::tn("{} view", "{} views", n);
+        Some(s.replacen(&n.to_string(), &crate::i18n::compact(n), 1))
     }
 
     /// `H:MM:SS` / `M:SS`, or `LIVE` when there's no duration.
@@ -1103,9 +1104,9 @@ pub const TIERS: [u32; 6] = [2160, 1440, 1080, 720, 480, 360];
 impl Quality {
     pub fn label(self) -> String {
         match self {
-            Quality::Auto => "Auto (screen + power aware)".into(),
+            Quality::Auto => t("Auto (screen + power aware)").into(),
             Quality::Max(h) => format!("{h}p"),
-            Quality::AudioOnly => "Audio only".into(),
+            Quality::AudioOnly => t("Audio only").into(),
         }
     }
 
@@ -1175,14 +1176,22 @@ pub fn profile(q: Quality, p: Power, screen_cap: u32) -> Profile {
             ytdl_format: "ba/b".into(),
             fast: true,
             audio_only: true,
-            label: "audio only".into(),
+            label: t("audio only").into(),
         },
         // Manual pick, still never above the screen (window may have moved).
         Quality::Max(h) => mk(h.min(screen_cap), false, ""),
         // Power-aware Auto: 1080p30 VP9. Higher frame rates and resolutions
         // are where the real cost is; 1080p itself is nearly free.
-        Quality::Auto if p.saver => mk(screen_cap.min(1080), true, " · battery saver"),
-        Quality::Auto if p.on_battery => mk(screen_cap.min(1080), true, " · on battery"),
+        Quality::Auto if p.saver => mk(
+            screen_cap.min(1080),
+            true,
+            &format!(" · {}", t("battery saver")),
+        ),
+        Quality::Auto if p.on_battery => mk(
+            screen_cap.min(1080),
+            true,
+            &format!(" · {}", t("on battery")),
+        ),
         Quality::Auto => mk(screen_cap, false, ""),
     }
 }

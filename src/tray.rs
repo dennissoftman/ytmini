@@ -28,9 +28,9 @@ mod imp {
         /// Must be called on the main thread after the event loop started
         /// (i.e. from `App::new`).
         pub fn new(ctx: &egui::Context, tx: Sender<TrayEvent>) -> Result<Tray, String> {
-            let show = MenuItem::new("Show ytmini", true, None);
-            let play_pause = MenuItem::new("Pause", false, None);
-            let quit = MenuItem::new("Quit ytmini", true, None);
+            let show = MenuItem::new(crate::i18n::t("Show ytmini"), true, None);
+            let play_pause = MenuItem::new(crate::i18n::t("Pause"), false, None);
+            let quit = MenuItem::new(crate::i18n::t("Quit ytmini"), true, None);
             let menu =
                 Menu::with_items(&[&show, &play_pause, &PredefinedMenuItem::separator(), &quit])
                     .map_err(|e| e.to_string())?;
@@ -78,9 +78,9 @@ mod imp {
         /// Reflect player state in the menu (`None` = nothing playing).
         pub fn set_playing(&mut self, paused: Option<bool>) {
             let label = match paused {
-                None => "Play / Pause",
-                Some(true) => "Play",
-                Some(false) => "Pause",
+                None => crate::i18n::t("Play / pause"),
+                Some(true) => crate::i18n::t("Play"),
+                Some(false) => crate::i18n::t("Pause"),
             };
             if self.last_label != Some(label) {
                 self.play_pause.set_text(label);

@@ -31,8 +31,19 @@ pub fn default_categories() -> Vec<String> {
     vec!["sponsor".into(), "selfpromo".into(), "interaction".into()]
 }
 
+/// In the interface language.
 pub fn label(cat: &str) -> &str {
-    CATEGORIES.iter().find(|c| c.0 == cat).map_or(cat, |c| c.1)
+    use crate::i18n::t;
+    match cat {
+        "sponsor" => t("Sponsor"),
+        "selfpromo" => t("Self-promotion"),
+        "interaction" => t("Like/subscribe reminder"),
+        "intro" => t("Intro animation"),
+        "outro" => t("End cards / credits"),
+        "preview" => t("Preview / recap"),
+        "music_offtopic" => t("Non-music part (music videos)"),
+        _ => CATEGORIES.iter().find(|c| c.0 == cat).map_or(cat, |c| c.1),
+    }
 }
 
 pub fn color(cat: &str) -> [u8; 3] {

@@ -43,6 +43,16 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key>     <string>11.0</string>
   <key>LSApplicationCategoryType</key>  <string>public.app-category.video</string>
   <key>NSHighResolutionCapable</key>    <true/>
+  <!-- Interface languages (src/i18n): lets macOS offer ytmini under
+       System Settings → Language & Region → Applications. -->
+  <key>CFBundleDevelopmentRegion</key>  <string>en</string>
+  <key>CFBundleLocalizations</key>
+  <array>
+    <string>en</string><string>ru</string><string>uk</string><string>de</string>
+    <string>fr</string><string>es</string><string>pt</string><string>it</string>
+    <string>pl</string><string>tr</string><string>ja</string><string>zh-Hans</string>
+    <string>ko</string>
+  </array>
   <key>NSPrincipalClass</key>           <string>NSApplication</string>
   <!-- Right-click a YouTube link (or selected text) → Services → Open in ytmini. src/links.rs -->
   <key>NSServices</key>

@@ -6,6 +6,7 @@
 //! texture registered with egui once for the app's lifetime), then we restore
 //! the framebuffer binding and viewport so egui's own painting is unaffected.
 
+use crate::i18n::{t, tf};
 use crate::mpv::{self, Mpv, Render};
 use crate::yt::{self, Profile, Tools, Video};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
@@ -249,23 +250,25 @@ pub const VOLUME_MAX: f64 = 150.0;
 pub const SPEEDS: [f64; 8] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
 /// The `?` overlay.
-pub const SHORTCUTS: [(&str, &str); 15] = [
-    ("Space / K", "Play / pause"),
-    ("J / L", "Back / forward 10 s"),
-    ("← / →", "Back / forward 5 s"),
-    ("↑ / ↓", "Volume"),
-    ("M", "Mute"),
-    ("F", "Fullscreen"),
-    ("⇧N / ⇧P", "Next / previous video"),
-    ("< / >", "Slower / faster"),
-    (", / .", "Frame back / forward (paused)"),
-    ("0 – 9", "Jump to 0 % – 90 %"),
-    ("Home / End", "Start / end"),
-    ("C", "Next chapter"),
-    ("⇧C", "Previous chapter"),
-    ("?", "These shortcuts"),
-    ("Esc", "Exit fullscreen / back"),
-];
+pub fn shortcuts() -> [(&'static str, &'static str); 15] {
+    [
+        ("Space / K", t("Play / pause")),
+        ("J / L", t("Back / forward 10 s")),
+        ("← / →", t("Back / forward 5 s")),
+        ("↑ / ↓", t("Volume")),
+        ("M", t("Mute")),
+        ("F", t("Fullscreen")),
+        ("⇧N / ⇧P", t("Next / previous video")),
+        ("< / >", t("Slower / faster")),
+        (", / .", t("Frame back / forward (paused)")),
+        ("0 – 9", t("Jump to 0 % – 90 %")),
+        ("Home / End", t("Start / end")),
+        ("C", t("Next chapter")),
+        ("⇧C", t("Previous chapter")),
+        ("?", t("These shortcuts")),
+        ("Esc", t("Exit fullscreen / back")),
+    ]
+}
 /// Dragging within this many pixels of the 100% notch lands on it.
 const VOLUME_SNAP_PX: f32 = 7.0;
 /// Wheel travel (points) needed to push through the 100% notch.
@@ -512,7 +515,7 @@ impl Embedded {
                         self.error = Some(
                             self.last_log_error
                                 .clone()
-                                .unwrap_or_else(|| "playback failed (mpv error)".into()),
+                                .unwrap_or_else(|| t("playback failed (mpv error)").into()),
                         );
                         self.buffering = false;
                     } else if e.reason == mpv::END_FILE_REASON_EOF {
@@ -1008,6 +1011,7 @@ pub struct Actions {
     pub next: bool,
     pub prev: bool,
     pub cancel_autoplay: bool,
+    pub toggle_panel: bool,
 }
 
 pub struct ViewCtx<'a> {
@@ -1022,6 +1026,8 @@ pub struct ViewCtx<'a> {
     pub next: Option<String>,
     /// Autoplay countdown (seconds left) shown on the end card.
     pub autoplay_in: Option<f32>,
+    /// The Up next panel's state for the header toggle (`None`: no toggle).
+    pub panel_open: Option<bool>,
 }
 
 const CONTROLS_H: f32 = 64.0;
@@ -1037,16 +1043,36 @@ impl Embedded {
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
                 if ui
-                    .add(egui::Button::new(egui::RichText::new("←  Back").size(15.0)).frame(false))
+                    .add(
+                        egui::Button::new(egui::RichText::new(t("←  Back")).size(15.0))
+                            .frame(false),
+                    )
                     .clicked()
                 {
                     act.back = true;
                 }
                 ui.add_space(8.0);
-                ui.add(
-                    egui::Label::new(egui::RichText::new(&self.title).size(16.0).strong())
-                        .truncate(),
-                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(8.0);
+                    if let Some(open) = v.panel_open {
+                        if ui
+                            .add(egui::Button::selectable(
+                                open,
+                                egui::RichText::new(t("Up next")).size(14.0),
+                            ))
+                            .on_hover_text(t("Your queue and YouTube's suggestions"))
+                            .clicked()
+                        {
+                            act.toggle_panel = true;
+                        }
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&self.title).size(16.0).strong())
+                                .truncate(),
+                        );
+                    });
+                });
             });
             ui.add_space(6.0);
         }
@@ -1098,7 +1124,7 @@ impl Embedded {
                     .inner_margin(14)
                     .show(ui, |ui| {
                         ui.label(
-                            egui::RichText::new("Couldn't play this video")
+                            egui::RichText::new(t("Couldn't play this video"))
                                 .strong()
                                 .color(Color32::WHITE),
                         );
@@ -1111,10 +1137,10 @@ impl Embedded {
                             .wrap(),
                         );
                         ui.horizontal(|ui| {
-                            if ui.button("Try in separate window").clicked() {
+                            if ui.button(t("Try in separate window")).clicked() {
                                 act.open_in_window = true;
                             }
-                            if ui.button("Back").clicked() {
+                            if ui.button(t("Back")).clicked() {
                                 act.back = true;
                             }
                         });
@@ -1142,9 +1168,9 @@ impl Embedded {
                             .show(ui, |ui| {
                                 ui.set_width(r.width() - 32.0);
                                 ui.label(
-                                    egui::RichText::new(format!(
+                                    egui::RichText::new(tf(
                                         "Up next in {}",
-                                        left.ceil() as u32
+                                        &[&(left.ceil() as u32)],
                                     ))
                                     .size(13.0)
                                     .color(Color32::LIGHT_GRAY),
@@ -1161,13 +1187,13 @@ impl Embedded {
                                 ui.add_space(8.0);
                                 ui.horizontal(|ui| {
                                     if ui
-                                        .button(egui::RichText::new("▶  Play now").size(14.0))
+                                        .button(egui::RichText::new(t("▶  Play now")).size(14.0))
                                         .clicked()
                                     {
                                         act.next = true;
                                     }
                                     if ui
-                                        .button(egui::RichText::new("Cancel").size(14.0))
+                                        .button(egui::RichText::new(t("Cancel")).size(14.0))
                                         .clicked()
                                     {
                                         act.cancel_autoplay = true;
@@ -1183,14 +1209,14 @@ impl Embedded {
                     ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
                         ui.horizontal_centered(|ui| {
                             if ui
-                                .button(egui::RichText::new("↻  Replay").size(16.0))
+                                .button(egui::RichText::new(t("↻  Replay")).size(16.0))
                                 .clicked()
                             {
                                 self.replay();
                             }
                             if v.next.is_some()
                                 && ui
-                                    .button(egui::RichText::new("Next  ⏭").size(16.0))
+                                    .button(egui::RichText::new(t("Next  ⏭")).size(16.0))
                                     .clicked()
                             {
                                 act.next = true;
@@ -1209,14 +1235,14 @@ impl Embedded {
                     .inner_margin(16)
                     .show(ui, |ui| {
                         ui.label(
-                            egui::RichText::new("Keyboard shortcuts")
+                            egui::RichText::new(t("Keyboard shortcuts"))
                                 .size(16.0)
                                 .strong()
                                 .color(Color32::WHITE),
                         );
                         ui.add_space(6.0);
                         egui::Grid::new("keys").spacing([18.0, 5.0]).show(ui, |ui| {
-                            for (k, what) in SHORTCUTS {
+                            for (k, what) in shortcuts() {
                                 ui.label(egui::RichText::new(k).monospace().color(Color32::WHITE));
                                 ui.label(egui::RichText::new(what).color(Color32::LIGHT_GRAY));
                                 ui.end_row();
@@ -1242,10 +1268,13 @@ impl Embedded {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new(format!("Resumed at {}", fmt_time(t)))
-                                    .color(Color32::WHITE),
+                                egui::RichText::new(crate::i18n::tf(
+                                    "Resumed at {}",
+                                    &[&fmt_time(t)],
+                                ))
+                                .color(Color32::WHITE),
                             );
-                            if ui.link("Start over").clicked() {
+                            if ui.link(crate::i18n::t("Start over")).clicked() {
                                 self.seek_absolute(0.0, true);
                                 self.resumed_from = None;
                             }
@@ -1268,7 +1297,7 @@ impl Embedded {
             let what = self
                 .segments
                 .get(i)
-                .map_or("segment", |s| crate::sponsorblock::label(&s.category))
+                .map_or(t("segment"), |s| crate::sponsorblock::label(&s.category))
                 .to_lowercase();
             ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
                 egui::Frame::new()
@@ -1278,10 +1307,10 @@ impl Embedded {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new(format!("Skipped {what}"))
+                                egui::RichText::new(tf("Skipped {}", &[&what]))
                                     .color(Color32::WHITE),
                             );
-                            if ui.link("Undo").clicked() {
+                            if ui.link(t("Undo")).clicked() {
                                 if let Some(s) = self.segments.get(i) {
                                     self.seek_absolute(s.start, true);
                                 }
@@ -1456,7 +1485,11 @@ impl Embedded {
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .on_hover_text(format!(
                         "{}: {t}  ({})",
-                        if fwd { "Next" } else { "Previous" },
+                        if fwd {
+                            crate::i18n::t("Next")
+                        } else {
+                            crate::i18n::t("Previous")
+                        },
                         if fwd { "⇧N" } else { "⇧P" }
                     ));
                 if resp.clicked() {
@@ -1498,7 +1531,7 @@ impl Embedded {
         let time = if self.duration > 0.0 {
             format!("{} / {}", fmt_time(shown), fmt_time(self.duration))
         } else {
-            format!("{}  · LIVE", fmt_time(shown))
+            format!("{}  · {}", fmt_time(shown), t("LIVE"))
         };
         let time_r = painter.text(
             Pos2::new(next_r.right() + 8.0, c.y),
@@ -1528,7 +1561,7 @@ impl Embedded {
             let resp = ui
                 .interact(r.expand(3.0), ui.scope_id().with("chapter"), Sense::click())
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text("Next chapter (C)");
+                .on_hover_text(crate::i18n::t("Next chapter (C)"));
             if resp.hovered() {
                 painter.rect_filled(r.expand(4.0), 6, Color32::from_white_alpha(25));
             }
@@ -1639,7 +1672,7 @@ impl Embedded {
         let ir = ui
             .interact(icon, ui.scope_id().with("vol-icon"), Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(if vol > 0.0 { "Mute" } else { "Unmute" });
+            .on_hover_text(if vol > 0.0 { t("Mute") } else { t("Unmute") });
         if ir.hovered() {
             painter.rect_filled(icon, 6, Color32::from_white_alpha(25));
         }

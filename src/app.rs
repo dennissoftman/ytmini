@@ -3,6 +3,7 @@
 
 use crate::cache::{self, Limits};
 use crate::deps::{self, Dep};
+use crate::i18n::{t, tf, tn};
 use crate::mpv;
 use crate::player::{self, Embedded, Surface};
 use crate::positions::Positions;
@@ -96,6 +97,7 @@ struct DepsState {
 }
 
 enum Msg {
+    Related(String, Vec<Video>),
     TopicShelf(String, String, Vec<Video>),
     Chapters(String, Vec<crate::chapters::Chapter>),
     /// Videos streamed in for a tab. `first`: part of the first page of this
@@ -284,6 +286,10 @@ pub struct App {
     up_next: std::collections::VecDeque<Video>,
     /// Played this session, for Previous.
     played: Vec<Video>,
+    /// YouTube's suggestions for the playing video: (video id, list).
+    related: (String, Vec<Video>),
+    /// The list the queue context came from, for the panel's heading.
+    queue_label: String,
     /// When the current video ended (autoplay countdown), and whether the
     /// countdown was cancelled for it.
     eof_at: Option<std::time::Instant>,
@@ -306,6 +312,8 @@ pub struct App {
     /// Home's category rows: title → (token they were loaded with, videos).
     topic_shelves: HashMap<String, (String, Vec<Video>)>,
     topic_loading: std::collections::HashSet<String>,
+    /// Home's "Show all": the endless For you feed instead of Home's sections.
+    feed_all: bool,
     session_refresh: SessionRefresh,
     /// Last background "still signed in?" probe.
     session_checked: std::time::Instant,
@@ -370,6 +378,8 @@ impl App {
         let (tx, rx) = channel();
         let cookies = yt::cookie_file().unwrap_or_else(|_| PathBuf::from("cookies.txt"));
         let settings = Settings::load();
+        crate::i18n::set(settings.language);
+        crate::i18n::set_region(settings.region.clone());
         let (tray_tx, tray_rx) = channel();
         let tray = Tray::new(ctx, tray_tx).ok();
         let limits = Arc::new(Limits::new(settings.cache_mb, settings.cache_days));
@@ -411,6 +421,8 @@ impl App {
             queue_pos: None,
             up_next: std::collections::VecDeque::new(),
             played: Vec::new(),
+            related: (String::new(), Vec::new()),
+            queue_label: String::new(),
             eof_at: None,
             autoplay_cancelled: false,
             smoke: None,
@@ -423,6 +435,7 @@ impl App {
             settings_tab: SettingsTab::default(),
             topic_shelves: HashMap::new(),
             topic_loading: std::collections::HashSet::new(),
+            feed_all: false,
             session_refresh: SessionRefresh::Idle,
             session_checked: std::time::Instant::now(),
             np_last: None,
@@ -555,13 +568,12 @@ impl App {
                 }
                 let r = if update {
                     deps::update_if_needed(dep, &report)
-                        .map(|v| v.map(|v| format!("{} updated to {v}", dep.name())))
+                        .map(|v| v.map(|v| tf("{} updated to {}", &[&dep.name(), &v])))
                 } else {
                     deps::install(dep, &report).map(|exe| {
-                        Some(format!(
+                        Some(tf(
                             "{} {} installed",
-                            dep.name(),
-                            deps::version(&exe).unwrap_or_default()
+                            &[&dep.name(), &deps::version(&exe).unwrap_or_default()],
                         ))
                     })
                 };
@@ -582,29 +594,31 @@ impl App {
 
     /// Ask each tool for its version (spawns processes → worker thread).
     fn refresh_versions(&self, ctx: &egui::Context) {
-        let Some(t) = self.tools.clone() else { return };
+        let Some(tools) = self.tools.clone() else {
+            return;
+        };
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let ytdlp_src = if t.ytdlp_managed {
-                "auto-updated by ytmini"
+            let ytdlp_src = if tools.ytdlp_managed {
+                t("auto-updated by ytmini")
             } else {
-                "system copy"
+                t("system copy")
             };
             let mut v = vec![(
                 "yt-dlp".to_string(),
                 format!(
                     "{} · {ytdlp_src}",
-                    deps::version(&t.ytdlp).unwrap_or_else(|| "?".into())
+                    deps::version(&tools.ytdlp).unwrap_or_else(|| "?".into())
                 ),
             )];
             v.push((
                 "deno".into(),
-                match &t.deno {
+                match &tools.deno {
                     Some(d) => {
                         let src = if Dep::Deno.managed().as_ref() == Some(d) {
-                            "downloaded by ytmini"
+                            t("downloaded by ytmini")
                         } else {
-                            "system copy"
+                            t("system copy")
                         };
                         format!(
                             "{} · {src}",
@@ -613,13 +627,13 @@ impl App {
                                 .trim_start_matches("deno ")
                         )
                     }
-                    None => "not found — YouTube may fail".into(),
+                    None => t("not found — YouTube may fail").into(),
                 },
             ));
             let player = match mpv::bundled_or_system() {
-                Some(true) => "libmpv bundled in ytmini.app",
-                Some(false) => "system libmpv",
-                None => "separate window only (no libmpv)",
+                Some(true) => t("libmpv bundled in ytmini.app"),
+                Some(false) => t("system libmpv"),
+                None => t("separate window only (no libmpv)"),
             };
             v.push(("player".into(), player.into()));
             let _ = tx.send(Msg::Versions(v));
@@ -891,7 +905,8 @@ impl App {
                     .any(|k| e.contains(k));
                     if e.contains(crate::innertube::SESSION_EXPIRED) {
                         tab.error = Some(
-                            "Your YouTube session expired. Refreshing it from your browser…".into(),
+                            t("Your YouTube session expired. Refreshing it from your browser…")
+                                .into(),
                         );
                         self.auto_refresh_session(ctx);
                         continue;
@@ -913,25 +928,26 @@ impl App {
                 Msg::DepProgress(p) => {
                     self.deps.activity = Some(match p {
                         deps::Progress::Downloading { dep, done, total } => match total {
-                            Some(t) => format!(
-                                "Downloading {} — {:.0} / {:.0} MB",
-                                dep.name(),
-                                done as f64 / 1e6,
-                                t as f64 / 1e6
+                            Some(total) => tf(
+                                "Downloading {} — {} / {} MB",
+                                &[
+                                    &dep.name(),
+                                    &format!("{:.0}", done as f64 / 1e6),
+                                    &format!("{:.0}", total as f64 / 1e6),
+                                ],
                             ),
-                            None => {
-                                format!("Downloading {} — {:.0} MB", dep.name(), done as f64 / 1e6)
-                            }
+                            None => tf(
+                                "Downloading {} — {} MB",
+                                &[&dep.name(), &format!("{:.0}", done as f64 / 1e6)],
+                            ),
                         },
                         deps::Progress::Verifying(dep) => {
-                            format!("Verifying {} checksum…", dep.name())
+                            tf("Verifying {} checksum…", &[&dep.name()])
                         }
-                        deps::Progress::Preparing(dep) => {
-                            format!(
-                                "Preparing {} (macOS checks new apps once — about 15 s)…",
-                                dep.name()
-                            )
-                        }
+                        deps::Progress::Preparing(dep) => tf(
+                            "Preparing {} (macOS checks new apps once — about 15 s)…",
+                            &[&dep.name()],
+                        ),
                     });
                 }
                 Msg::DepsDone(r) => {
@@ -947,7 +963,7 @@ impl App {
                         Err(e) => {
                             self.deps.error = Some(e.clone());
                             if !matches!(self.screen, Screen::Setup) {
-                                self.status = Some((format!("Couldn't update tools: {e}"), true));
+                                self.status = Some((tf("Couldn't update tools: {}", &[&e]), true));
                             }
                         }
                     }
@@ -956,7 +972,7 @@ impl App {
                 Msg::ExternalProgress(id, pos, dur) => self.positions.update(&id, pos, dur),
                 Msg::Switched(r) => {
                     if let Err(e) = r {
-                        self.status = Some((format!("Couldn't switch quality: {e}"), true));
+                        self.status = Some((tf("Couldn't switch quality: {}", &[&e]), true));
                     }
                 }
                 Msg::Imported(r) => {
@@ -971,7 +987,7 @@ impl App {
                             }
                             self.screen = Screen::Main;
                             self.tabs.clear(); // new account/cookies: drop everything cached
-                            self.status = Some(("Signed in — cookies imported.".into(), false));
+                            self.status = Some((t("Signed in — cookies imported.").into(), false));
                             self.load(ctx, self.active.clone(), true);
                             self.prefetch_tabs(ctx);
                         }
@@ -986,14 +1002,15 @@ impl App {
                         Ok((label, id, profile)) => {
                             self.settings.signin_source =
                                 Some(crate::settings::SignInSource { id, profile });
-                            self.status = Some((format!("Session refreshed from {label}."), false));
+                            self.status =
+                                Some((tf("Session refreshed from {}.", &[&label]), false));
                             self.tabs.clear();
                             self.load(ctx, self.active.clone(), true);
                             self.prefetch_tabs(ctx);
                         }
                         Err(e) => {
                             self.status = Some((
-                                format!("Your YouTube session expired and couldn't be refreshed ({e}). Settings → Account → Sign in again."),
+                                tf("Your YouTube session expired and couldn't be refreshed ({}). Settings → Account & updates → Sign in again.", &[&e]),
                                 true,
                             ));
                         }
@@ -1017,6 +1034,11 @@ impl App {
                 Msg::TopicShelf(title, token, vids) => {
                     self.topic_loading.remove(&title);
                     self.topic_shelves.insert(title, (token, vids));
+                }
+                Msg::Related(id, vids) => {
+                    if self.playing_id() == Some(id.as_str()) {
+                        self.related = (id, vids);
+                    }
                 }
                 Msg::Chapters(id, c) => {
                     if let Some(p) = self.embedded.as_mut().filter(|p| p.id == id) {
@@ -1081,7 +1103,9 @@ impl App {
         });
     }
 
-    /// Start `v` with `list` (where it was clicked) as the queue.
+    /// Start `v` with `list` (where it was clicked) as the queue. Only lists
+    /// whose order means something are passed (a playlist, Watch later, the
+    /// Shorts row); from a feed, Next follows YouTube's suggestions instead.
     fn play_from(&mut self, list: Vec<Video>, v: &Video) {
         self.queue_pos = list.iter().position(|x| x.id == v.id);
         self.queue_ctx = if self.queue_pos.is_some() {
@@ -1102,10 +1126,23 @@ impl App {
 
     /// What Next would play.
     fn peek_next(&self) -> Option<&Video> {
-        self.up_next.front().or_else(|| {
-            let i = self.queue_pos? + 1;
-            self.queue_ctx.get(i)
-        })
+        self.up_next
+            .front()
+            .or_else(|| self.queue_pos.and_then(|i| self.queue_ctx.get(i + 1)))
+            .or_else(|| self.next_suggestion())
+    }
+
+    /// YouTube's top suggestion for the playing video that we haven't just
+    /// played (what the website autoplays).
+    fn next_suggestion(&self) -> Option<&Video> {
+        let cur = self.playing_id()?;
+        if self.related.0 != cur {
+            return None;
+        }
+        self.related
+            .1
+            .iter()
+            .find(|v| !v.is_playlist && !self.played.iter().any(|p| p.id == v.id))
     }
 
     fn go_next(&mut self) {
@@ -1118,11 +1155,23 @@ impl App {
         {
             self.queue_pos = self.queue_pos.map(|i| i + 1);
             v
+        } else if let Some(v) = self.next_suggestion().cloned() {
+            v
         } else {
             return;
         };
         self.remember_current();
         self.switch_to(&next);
+    }
+
+    /// Play `v` now from the Up next panel.
+    fn jump_to(&mut self, v: &Video) {
+        self.up_next.retain(|x| x.id != v.id);
+        if let Some(i) = self.queue_ctx.iter().position(|x| x.id == v.id) {
+            self.queue_pos = Some(i);
+        }
+        self.remember_current();
+        self.switch_to(v);
     }
 
     fn go_prev(&mut self) {
@@ -1218,7 +1267,7 @@ impl App {
             std::thread::spawn(move || {
                 if let Err(e) = crate::innertube::mark_watched(&cookies, &id) {
                     let _ = tx.send(Msg::Status(
-                        format!("Couldn't add to YouTube history: {e:#}"),
+                        tf("Couldn't add to YouTube history: {}", &[&format!("{e:#}")]),
                         true,
                     ));
                 }
@@ -1232,7 +1281,10 @@ impl App {
                 }
                 Err(e) => {
                     self.status = Some((
-                        format!("Embedded player unavailable ({e}) — using a separate window"),
+                        tf(
+                            "Embedded player unavailable ({}) — using a separate window",
+                            &[&e],
+                        ),
                         true,
                     ));
                 }
@@ -1256,7 +1308,10 @@ impl App {
                 Ok(s) => self.surface = Some(s),
                 Err(e) => {
                     self.status = Some((
-                        format!("Embedded player failed ({e}) — using a separate window"),
+                        tf(
+                            "Embedded player failed ({}) — using a separate window",
+                            &[&e],
+                        ),
                         true,
                     ));
                     return self.play_in_window(&video);
@@ -1314,6 +1369,9 @@ impl App {
                         ctx.clone(),
                     );
                     std::thread::spawn(move || {
+                        if let Ok(r) = crate::innertube::related(&cookies, &id) {
+                            let _ = tx.send(Msg::Related(id.clone(), r));
+                        }
                         if let Ok(e) = crate::innertube::player_extras(&cookies, &id) {
                             let chapters = crate::innertube::chapters(&id)
                                 .ok()
@@ -1351,7 +1409,10 @@ impl App {
             }
             Err(e) => {
                 self.status = Some((
-                    format!("Embedded player failed ({e}) — using a separate window"),
+                    tf(
+                        "Embedded player failed ({}) — using a separate window",
+                        &[&e],
+                    ),
                     true,
                 ));
                 self.play_in_window(&video);
@@ -1398,7 +1459,9 @@ impl App {
                     format: profile.ytdl_format,
                 });
             }
-            Err(e) => self.status = Some((format!("Couldn't start mpv: {e:#}"), true)),
+            Err(e) => {
+                self.status = Some((tf("Couldn't start mpv: {}", &[&format!("{e:#}")]), true))
+            }
         }
     }
 
@@ -1469,13 +1532,13 @@ impl App {
                     None
                 } else {
                     let why = yt::last_player_error()
-                        .unwrap_or_else(|| format!("mpv exited with {status}"));
-                    Some((format!("Playback failed: {why}"), true))
+                        .unwrap_or_else(|| tf("mpv exited with {}", &[&status]));
+                    Some((tf("Playback failed: {}", &[&why]), true))
                 };
                 self.player = None;
             }
             Err(e) => {
-                self.status = Some((format!("Lost track of mpv: {e}"), true));
+                self.status = Some((tf("Lost track of mpv: {}", &[&e]), true));
                 self.player = None;
             }
         }
@@ -1489,17 +1552,17 @@ impl App {
             logo(ui, 64.0);
             ui.add_space(8.0);
             ui.label(
-                RichText::new("No video player found")
+                RichText::new(t("No video player found"))
                     .size(20.0)
                     .color(text()),
             );
             ui.add_space(12.0);
             let _ = missing;
-            ui.label("This build of ytmini doesn't include libmpv, and mpv isn't installed. Install it with:");
+            ui.label(t("This build of ytmini doesn't include libmpv, and mpv isn't installed. Install it with:"));
             ui.add_space(8.0);
             code_box(ui, yt::install_hint());
             ui.add_space(16.0);
-            if accent_button(ui, "Check again").clicked() {
+            if accent_button(ui, t("Check again")).clicked() {
                 retry = true;
             }
         });
@@ -1513,7 +1576,7 @@ impl App {
         centered_column(ui, 520.0, |ui| {
             logo(ui, 64.0);
             ui.add_space(8.0);
-            ui.label(RichText::new("Getting ready").size(20.0).color(text()));
+            ui.label(RichText::new(t("Getting ready")).size(20.0).color(text()));
             ui.add_space(6.0);
             ui.label(
                 RichText::new(
@@ -1534,7 +1597,7 @@ impl App {
             if let Some(e) = &self.deps.error {
                 error_box(ui, e);
                 ui.add_space(8.0);
-                if accent_button(ui, "Try again").clicked() {
+                if accent_button(ui, t("Try again")).clicked() {
                     retry = true;
                 }
             }
@@ -1556,7 +1619,11 @@ impl App {
                 centered_column(ui, 560.0, |ui| {
                     logo(ui, 64.0);
                     ui.add_space(4.0);
-                    ui.label(RichText::new("Sign in to YouTube").size(20.0).color(text()));
+                    ui.label(
+                        RichText::new(t("Sign in to YouTube"))
+                            .size(20.0)
+                            .color(text()),
+                    );
                     ui.add_space(14.0);
                     google = self.ui_google_signin(ui, busy);
                     ui.add_space(10.0);
@@ -1582,8 +1649,9 @@ impl App {
                     if let Some(spec) = &self.importing {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label(format!(
-                                "Reading your session from {spec}… (answer any system prompt)"
+                            ui.label(tf(
+                                "Reading your session from {}… (answer any system prompt)",
+                                &[&spec],
                             ));
                         });
                     }
@@ -1595,7 +1663,7 @@ impl App {
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 ui.label(
-                                    RichText::new("Couldn't sign in")
+                                    RichText::new(t("Couldn't sign in"))
                                         .strong()
                                         .color(crate::theme::err()),
                                 );
@@ -1607,7 +1675,7 @@ impl App {
                     }
                     if can_cancel {
                         ui.add_space(12.0);
-                        if ui.button("← Back to videos").clicked() {
+                        if ui.button(t("← Back to videos")).clicked() {
                             cancel = true;
                         }
                     }
@@ -1676,7 +1744,11 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.add_space(4.0);
                         logo(ui, 34.0);
-                        ui.label(RichText::new("mini YouTube").size(12.5).color(text_dim()));
+                        ui.label(
+                            RichText::new(t("mini YouTube"))
+                                .size(12.5)
+                                .color(text_dim()),
+                        );
                     });
                 }
                 ui.add_space(12.0);
@@ -1688,7 +1760,11 @@ impl App {
                 for t in BASE_TABS {
                     if t == Source::WatchLater && !collapsed {
                         ui.add_space(10.0);
-                        ui.label(RichText::new("Library").small().color(text_dim()));
+                        ui.label(
+                            RichText::new(crate::i18n::t("Library"))
+                                .small()
+                                .color(text_dim()),
+                        );
                         ui.add_space(2.0);
                     }
                     if item(ui, nav_icon(&t), &t.label(), home_of(&t)) {
@@ -1708,18 +1784,18 @@ impl App {
                 ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
                     if !narrow {
                         let (icon, tip) = if collapsed {
-                            (Icon::Expand, "Expand sidebar")
+                            (Icon::Expand, t("Expand sidebar"))
                         } else {
-                            (Icon::Collapse, "Collapse sidebar")
+                            (Icon::Collapse, t("Collapse sidebar"))
                         };
-                        if nav_item(ui, icon, "Collapse", false, collapsed)
+                        if nav_item(ui, icon, t("Collapse"), false, collapsed)
                             .on_hover_text(tip)
                             .clicked()
                         {
                             self.settings.sidebar_collapsed = !self.settings.sidebar_collapsed;
                         }
                     }
-                    if item(ui, Icon::Gear, "Settings", self.show_settings) {
+                    if item(ui, Icon::Gear, t("Settings"), self.show_settings) {
                         self.show_settings = !self.show_settings;
                     }
                 });
@@ -1739,7 +1815,7 @@ impl App {
                     let w = (ui.available_width() - 60.0).clamp(160.0, 520.0);
                     let r = ui.add(
                         egui::TextEdit::singleline(&mut self.search_query)
-                            .hint_text("Search YouTube")
+                            .hint_text(t("Search YouTube"))
                             .desired_width(w)
                             .margin(Margin::symmetric(12, 7)),
                     );
@@ -1759,19 +1835,19 @@ impl App {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let b = egui::Button::new(RichText::new("↻").size(18.0).color(text_dim()))
                             .frame(false);
-                        if ui.add(b).on_hover_text("Refresh (⌘R)").clicked() {
+                        if ui.add(b).on_hover_text(t("Refresh (⌘R)")).clicked() {
                             refresh = true;
                         }
                         if let Some(link) = self.clip_link.clone() {
                             let x =
                                 egui::Button::new(RichText::new("✕").size(11.0).color(text_dim()))
                                     .frame(false);
-                            if ui.add(x).on_hover_text("Dismiss").clicked() {
+                            if ui.add(x).on_hover_text(t("Dismiss")).clicked() {
                                 self.clip_link = None;
                             }
                             if ui
                                 .add(accent_btn(&format!("▶  {}", link.verb())))
-                                .on_hover_text("A YouTube link is on your clipboard")
+                                .on_hover_text(t("A YouTube link is on your clipboard"))
                                 .clicked()
                             {
                                 self.pending_link = Some(link);
@@ -1804,15 +1880,15 @@ impl App {
                         if active_loading {
                             ui.spinner();
                             let msg = match cached_at {
-                                Some(t) => format!("Updating… (showing results from {})", ago(t)),
-                                None => "Loading…".into(),
+                                Some(at) => tf("Updating… (showing results from {})", &[&ago(at)]),
+                                None => t("Loading…").into(),
                             };
                             ui.label(RichText::new(msg).color(text_dim()));
                         } else if let Some(p) = &self.player {
                             ui.label(RichText::new("▶").color(accent()));
-                            ui.label(RichText::new(format!("Playing: {}", p.title)).color(text()));
+                            ui.label(RichText::new(tf("Playing: {}", &[&p.title])).color(text()));
                             ui.label(RichText::new(&p.profile).color(text_dim()));
-                            if ui.small_button("Stop").clicked() {
+                            if ui.small_button(t("Stop")).clicked() {
                                 stop = true;
                             }
                         } else if let Some((msg, is_err)) = &self.status {
@@ -1824,17 +1900,17 @@ impl App {
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             let power = if self.power.saver {
-                                "battery saver"
+                                t("battery saver")
                             } else if self.power.on_battery {
-                                "on battery"
+                                t("on battery")
                             } else {
                                 ""
                             };
                             if !power.is_empty() {
                                 ui.label(RichText::new(power).small().color(text_dim()))
-                                    .on_hover_text(
+                                    .on_hover_text(t(
                                         "Auto quality lowers resolution/frame rate to save power",
-                                    );
+                                    ));
                             }
                         });
                     });
@@ -1859,8 +1935,10 @@ impl App {
         let mut hovered_video: Option<Video> = None;
         let mut want_branding: Vec<String> = Vec::new();
         let mut clicked_list: Vec<Video> = Vec::new();
+        let mut clicked_label = String::new();
         let mut want_topics: Vec<(String, String)> = Vec::new();
         let mut open_topic: Option<Source> = None;
+        let mut show_all = false;
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let source = self.active.clone();
             let playing_id = self.player.as_ref().map(|p| p.id.clone());
@@ -1869,6 +1947,7 @@ impl App {
             let settings = &self.settings;
             let (downloads, dl_active) = (&self.downloads, &self.dl_active);
             let topic_shelves = &self.topic_shelves;
+            let feed_all = self.feed_all;
             let dearrow = settings.dearrow.then_some(&self.dearrow);
             let Some(tab) = self.tabs.get_mut(&source) else {
                 return;
@@ -1899,29 +1978,29 @@ impl App {
                         error_box(ui, e);
                         if source == Source::Feed {
                             ui.add_space(8.0);
-                            if ui.button("Re-import cookies…").clicked() {
+                            if ui.button(t("Re-import cookies…")).clicked() {
                                 reimport_from_empty = true;
                             }
                         }
                     } else if tab.loaded_once {
                         if source == Source::Feed {
                             ui.label(
-                                RichText::new("Your feed came back empty")
+                                RichText::new(t("Your feed came back empty"))
                                     .size(18.0)
                                     .color(text()),
                             );
                             ui.label(
-                                RichText::new(
+                                RichText::new(t(
                                     "That usually means the cookies expired or were rotated.",
-                                )
+                                ))
                                 .color(text_dim()),
                             );
                             ui.add_space(10.0);
-                            if accent_button(ui, "Re-import cookies").clicked() {
+                            if accent_button(ui, t("Re-import cookies")).clicked() {
                                 reimport_from_empty = true;
                             }
                         } else {
-                            ui.label(RichText::new("Nothing here.").color(text_dim()));
+                            ui.label(RichText::new(t("Nothing here.")).color(text_dim()));
                         }
                     }
                 });
@@ -1942,7 +2021,9 @@ impl App {
                 Source::Feed | Source::Subscriptions | Source::Topic { .. } | Source::Search(_)
             );
             // Home: each of YouTube's categories as its own row
-            let topics: Vec<(String, String)> = if source == Source::Feed {
+            // Home: For you (3 rows), Shorts, then the categories; the page ends
+            let home = source == Source::Feed && !feed_all;
+            let topics: Vec<(String, String)> = if home {
                 crate::innertube::HOME_CHIPS
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -1992,28 +2073,35 @@ impl App {
 
             // rows: video rows, with the Shorts shelf after the second one
             enum Row {
+                Head,
                 Videos(usize),
                 Shelf,
                 Topic(usize),
                 Footer,
             }
-            // two rows of the feed, Shorts, the categories, then the rest
-            let mut rows: Vec<Row> = (0..video_rows).map(Row::Videos).collect();
-            let at = video_rows.min(2);
-            let mut extra: Vec<Row> = Vec::new();
-            if !shorts.is_empty() {
-                extra.push(Row::Shelf);
-            }
-            extra.extend((0..topic_rows.len()).map(Row::Topic));
-            rows.splice(at..at, extra);
-            if show_footer {
-                rows.push(Row::Footer);
+            let mut rows: Vec<Row> = Vec::new();
+            if home {
+                rows.push(Row::Head);
+                rows.extend((0..video_rows.min(3)).map(Row::Videos));
+                if !shorts.is_empty() {
+                    rows.push(Row::Shelf);
+                }
+                rows.extend((0..topic_rows.len()).map(Row::Topic));
+            } else {
+                rows.extend((0..video_rows).map(Row::Videos));
+                if !shorts.is_empty() {
+                    rows.insert(video_rows.min(2), Row::Shelf);
+                }
+                if show_footer {
+                    rows.push(Row::Footer);
+                }
             }
             let short_w = (card_w * 0.62).clamp(140.0, 210.0);
             let short_thumb_h = short_w * 16.0 / 9.0;
             let short_h = short_thumb_h + (card_h - thumb_h);
             const SHELF_HEAD: f32 = 34.0;
             let height = |r: &Row| match r {
+                Row::Head => SHELF_HEAD - GAP * 0.5,
                 Row::Shelf => SHELF_HEAD + short_h,
                 Row::Topic(_) => SHELF_HEAD + card_h,
                 _ => card_h,
@@ -2113,7 +2201,7 @@ impl App {
                                                 Layout::left_to_right(Align::Center),
                                                 |ui| {
                                                     ui.label(
-                                                        RichText::new("Shorts")
+                                                        RichText::new(t("Shorts"))
                                                             .size(17.0)
                                                             .strong()
                                                             .color(text()),
@@ -2144,6 +2232,35 @@ impl App {
                                                 });
                                         });
                                     }
+                                    Row::Head => {
+                                        ui.label(
+                                            RichText::new(t("For you"))
+                                                .size(17.0)
+                                                .strong()
+                                                .color(text()),
+                                        );
+                                        ui.with_layout(
+                                            Layout::right_to_left(Align::Center),
+                                            |ui| {
+                                                if ui
+                                                    .add(
+                                                        egui::Label::new(
+                                                            RichText::new(format!(
+                                                                "{}  ›",
+                                                                t("Show all")
+                                                            ))
+                                                            .color(text_dim()),
+                                                        )
+                                                        .sense(Sense::click()),
+                                                    )
+                                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                    .clicked()
+                                                {
+                                                    show_all = true;
+                                                }
+                                            },
+                                        );
+                                    }
                                     Row::Topic(i) => {
                                         let (title, token, vids) = &topic_rows[*i];
                                         ui.vertical(|ui| {
@@ -2167,7 +2284,7 @@ impl App {
                                                         .on_hover_cursor(
                                                             egui::CursorIcon::PointingHand,
                                                         )
-                                                        .on_hover_text("See all");
+                                                        .on_hover_text(t("See all"));
                                                     if r.clicked() {
                                                         open_topic = Some(Source::Topic {
                                                             title: title.clone(),
@@ -2230,7 +2347,7 @@ impl App {
                                                 {
                                                     error_box(ui, e);
                                                     ui.add_space(8.0);
-                                                    if accent_button(ui, "Retry").clicked() {
+                                                    if accent_button(ui, t("Retry")).clicked() {
                                                         more = true;
                                                     }
                                                 } else {
@@ -2247,7 +2364,8 @@ impl App {
                 }
                 // Infinite scroll: start fetching the next page when we're within
                 // a couple of rows of the end, so it's usually there before you arrive.
-                if last_visible + 3 >= rows.len()
+                if !home
+                    && last_visible + 3 >= rows.len()
                     && !tab.loading
                     && !tab.exhausted
                     && tab.error.is_none()
@@ -2268,11 +2386,20 @@ impl App {
                 } else {
                     &shown
                 };
-                clicked_list = list
-                    .iter()
-                    .filter(|v| !v.is_playlist)
-                    .map(|v| (*v).clone())
-                    .collect();
+                let ordered = std::ptr::eq(list, &shorts)
+                    || matches!(source, Source::Playlist { .. } | Source::WatchLater);
+                if ordered {
+                    clicked_list = list
+                        .iter()
+                        .filter(|v| !v.is_playlist)
+                        .map(|v| (*v).clone())
+                        .collect();
+                    clicked_label = if std::ptr::eq(list, &shorts) {
+                        t("Shorts").to_string()
+                    } else {
+                        source.label()
+                    };
+                }
             }
         });
 
@@ -2287,6 +2414,7 @@ impl App {
                     },
                 );
             } else {
+                self.queue_label = clicked_label;
                 self.play_from(clicked_list, &v);
             }
         }
@@ -2306,6 +2434,12 @@ impl App {
         }
         for (title, token) in want_topics {
             self.load_topic_shelf(&ctx, title, token);
+        }
+        if show_all {
+            self.feed_all = true;
+            if let Some(tab) = self.tabs.get_mut(&Source::Feed) {
+                tab.scroll_to_top = true;
+            }
         }
         if let Some(src) = open_topic {
             self.tabs.remove(&src); // category tokens are short-lived; always fresh
@@ -2338,6 +2472,7 @@ impl App {
             self.load(&ctx, s, true);
         }
         if let Some(t) = switch_to {
+            self.feed_all = false;
             self.nav_back.clear();
             self.active = t.clone();
             self.load(&ctx, t, false);
@@ -2362,28 +2497,31 @@ enum SettingsTab {
     SponsorBlock,
     Feed,
     Appearance,
+    Language,
     Storage,
     Account,
 }
 
 impl SettingsTab {
     /// Watching → what you see → how it looks → disk → account/app.
-    const ALL: [SettingsTab; 6] = [
+    const ALL: [SettingsTab; 7] = [
         SettingsTab::Playback,
         SettingsTab::SponsorBlock,
         SettingsTab::Feed,
         SettingsTab::Appearance,
+        SettingsTab::Language,
         SettingsTab::Storage,
         SettingsTab::Account,
     ];
     fn label(self) -> &'static str {
         match self {
-            SettingsTab::Playback => "Playback",
+            SettingsTab::Playback => t("Playback"),
             SettingsTab::SponsorBlock => "SponsorBlock",
-            SettingsTab::Feed => "Feed",
-            SettingsTab::Appearance => "Appearance",
-            SettingsTab::Storage => "Storage",
-            SettingsTab::Account => "Account & updates",
+            SettingsTab::Feed => t("Feed"),
+            SettingsTab::Appearance => t("Appearance"),
+            SettingsTab::Language => t("Language & region"),
+            SettingsTab::Storage => t("Storage"),
+            SettingsTab::Account => t("Account & updates"),
         }
     }
 }
@@ -2420,11 +2558,11 @@ impl App {
             Quick::CopyLink => {
                 self.clip_seen = url.clone(); // our own copy: don't offer it back
                 ctx.copy_text(url);
-                self.status = Some(("Link copied.".into(), false));
+                self.status = Some((t("Link copied.").into(), false));
             }
             Quick::OpenInBrowser => {
                 if let Err(e) = open_url(&url) {
-                    self.status = Some((format!("Couldn't open the browser: {e}"), true));
+                    self.status = Some((tf("Couldn't open the browser: {}", &[&e]), true));
                 }
             }
             Quick::Download => self.start_download(ctx, v),
@@ -2437,9 +2575,13 @@ impl App {
                 }
                 self.status = Some((
                     if self.playing_id().is_some() {
-                        format!("{} in your queue", self.up_next.len())
+                        tn(
+                            "{} video in your queue",
+                            "{} videos in your queue",
+                            self.up_next.len() as u64,
+                        )
                     } else {
-                        "Queued. It plays after the next video you start.".into()
+                        t("Queued. It plays after the next video you start.").into()
                     },
                     false,
                 ));
@@ -2451,21 +2593,27 @@ impl App {
                 let (tx, cookies, id) = (self.tx.clone(), self.cookies.clone(), v.id.clone());
                 std::thread::spawn(move || {
                     let msg = match crate::innertube::remove_from_history(&cookies, &id) {
-                        Ok(_) => ("Removed from your YouTube history.".to_string(), false),
-                        Err(e) => (format!("Couldn't remove it from history: {e:#}"), true),
+                        Ok(_) => (t("Removed from your YouTube history.").to_string(), false),
+                        Err(e) => (
+                            tf("Couldn't remove it from history: {}", &[&format!("{e:#}")]),
+                            true,
+                        ),
                     };
                     let _ = tx.send(Msg::Status(msg.0, msg.1));
                 });
             }
             Quick::DeleteDownload => {
                 self.downloads.remove(&v.id);
-                self.status = Some(("Download deleted.".into(), false));
+                self.status = Some((t("Download deleted.").into(), false));
                 self.load(ctx, Source::Downloads, true);
             }
             Quick::MuteChannel => {
                 if let Some(ch) = v.channel.clone() {
                     self.status = Some((
-                        format!("Hiding {ch} in your feeds and search (“Muted” above the feed to undo)."),
+                        tf(
+                            "Hiding {} in your feeds and search (“Muted” above the feed to undo).",
+                            &[&ch],
+                        ),
                         false,
                     ));
                     if !self.settings.muted_channels.contains(&ch) {
@@ -2487,12 +2635,12 @@ impl App {
                     let r = crate::innertube::set_watch_later(&cookies, &id, add)
                         .map(|()| {
                             if add {
-                                format!("Saved to Watch later: {title}")
+                                tf("Saved to Watch later: {}", &[&title])
                             } else {
-                                format!("Removed from Watch later: {title}")
+                                tf("Removed from Watch later: {}", &[&title])
                             }
                         })
-                        .map_err(|e| format!("Watch later: {e:#}"));
+                        .map_err(|e| tf("Watch later: {}", &[&format!("{e:#}")]));
                     let _ = tx.send(Msg::WatchLater(add, id, r));
                     ctx.request_repaint();
                 });
@@ -2533,55 +2681,60 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     // inside a category opened from Home: the way back, and its name
-                    if let Source::Topic { title, .. } = &self.active {
-                        if topic_chip(ui, "←  Home", false).clicked() {
+                    let sub_title = match &self.active {
+                        Source::Topic { title, .. } => Some(title.clone()),
+                        Source::Feed if self.feed_all => Some(t("For you").to_string()),
+                        _ => None,
+                    };
+                    if let Some(title) = sub_title {
+                        if topic_chip(ui, t("←  Home"), false).clicked() {
                             go = Some(Source::Feed);
                         }
                         ui.label(RichText::new(title).size(17.0).strong().color(text()));
                         ui.add_space(10.0);
                     }
                     let s = &mut self.settings;
-                    if chip(ui, "Shorts", s.show_shorts)
-                        .on_hover_text("Shorts in their own row")
+                    if chip(ui, t("Shorts"), s.show_shorts)
+                        .on_hover_text(t("Shorts in their own row"))
                         .clicked()
                     {
                         s.show_shorts = !s.show_shorts;
                     }
-                    if chip(ui, "Live", !s.hide_live)
-                        .on_hover_text("Live streams and premieres")
+                    if chip(ui, t("Live"), !s.hide_live)
+                        .on_hover_text(t("Live streams and premieres"))
                         .clicked()
                     {
                         s.hide_live = !s.hide_live;
                     }
                     if feed
-                        && chip(ui, "Watched", !s.hide_watched)
-                            .on_hover_text("Videos you've already watched")
+                        && chip(ui, t("Watched"), !s.hide_watched)
+                            .on_hover_text(t("Videos you've already watched"))
                             .clicked()
                     {
                         s.hide_watched = !s.hide_watched;
                     }
-                    if chip(ui, "Less clickbait", s.dearrow)
-                        .on_hover_text("Community titles and thumbnails (DeArrow, experimental)")
+                    if chip(ui, t("Less clickbait"), s.dearrow)
+                        .on_hover_text(t("Community titles and thumbnails (DeArrow, experimental)"))
                         .clicked()
                     {
                         s.dearrow = !s.dearrow;
                     }
                     let n = s.muted_channels.len() + s.muted_words.len();
                     let label = if n == 0 {
-                        "Muted ▾".to_string()
+                        format!("{} ▾", t("Muted"))
                     } else {
-                        format!("Muted · {n} ▾")
+                        format!("{} · {n} ▾", t("Muted"))
                     };
                     let r = chip(ui, &label, n > 0);
                     egui::Popup::menu(&r)
                         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                         .show(|ui| {
                             ui.set_width(300.0);
-                            ui.label(RichText::new("Hide titles containing").color(text_dim()));
+                            ui.label(RichText::new(t("Hide titles containing")).color(text_dim()));
                             if ui
                                 .add(
                                     egui::TextEdit::singleline(&mut self.muted_words_buf)
-                                        .hint_text("reaction, podcast clip")
+                                        .hint_text(t("reaction, podcast clip"))
                                         .desired_width(f32::INFINITY),
                                 )
                                 .changed()
@@ -2594,12 +2747,12 @@ impl App {
                                     .collect();
                             }
                             ui.add_space(6.0);
-                            ui.label(RichText::new("Hidden channels").color(text_dim()));
+                            ui.label(RichText::new(t("Hidden channels")).color(text_dim()));
                             if s.muted_channels.is_empty() {
                                 ui.label(
-                                    RichText::new(
+                                    RichText::new(t(
                                         "None yet. Use “Hide this channel” in a video's ⋯ menu.",
-                                    )
+                                    ))
                                     .small()
                                     .color(text_dim()),
                                 );
@@ -2609,7 +2762,7 @@ impl App {
                                 for (i, ch) in s.muted_channels.iter().enumerate() {
                                     if ui
                                         .button(format!("{ch}  ✕"))
-                                        .on_hover_text("Show again")
+                                        .on_hover_text(t("Show again"))
                                         .clicked()
                                     {
                                         unmute = Some(i);
@@ -2623,7 +2776,8 @@ impl App {
                 });
             });
         // Esc / mouse back button leave a category too
-        if matches!(self.active, Source::Topic { .. })
+        if (matches!(self.active, Source::Topic { .. })
+            || (self.active == Source::Feed && self.feed_all))
             && !ui.ctx().egui_wants_keyboard_input()
             && ui.ctx().input(|i| {
                 i.key_pressed(Key::Escape) || i.pointer.button_clicked(egui::PointerButton::Extra1)
@@ -2633,6 +2787,7 @@ impl App {
         }
         if let Some(src) = go {
             let ctx = ui.ctx().clone();
+            self.feed_all = false;
             self.nav_back.clear();
             self.active = src.clone();
             self.load(&ctx, src, false);
@@ -2657,15 +2812,15 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if ui
-                        .add(egui::Button::new(RichText::new("←  Back").size(15.0)).frame(false))
+                        .add(egui::Button::new(RichText::new(t("←  Back")).size(15.0)).frame(false))
                         .clicked()
                     {
                         back = true;
                     }
                     ui.add_space(10.0);
                     let (kind, title) = match &self.active {
-                        Source::Playlist { title, .. } => ("Playlist", title.clone()),
-                        other => ("Channel", other.label()),
+                        Source::Playlist { title, .. } => (t("Playlist"), title.clone()),
+                        other => (t("Channel"), other.label()),
                     };
                     ui.label(RichText::new(kind).small().color(accent()));
                     ui.add(
@@ -2678,13 +2833,13 @@ impl App {
                         let (url, name) = (url.clone(), name.clone());
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             let on_lists = matches!(self.active, Source::ChannelPlaylists { .. });
-                            if tab_button(ui, "Playlists", on_lists).clicked() && !on_lists {
+                            if tab_button(ui, t("Playlists"), on_lists).clicked() && !on_lists {
                                 switch = Some(Source::ChannelPlaylists {
                                     url: url.clone(),
                                     name: name.clone(),
                                 });
                             }
-                            if tab_button(ui, "Videos", !on_lists).clicked() && on_lists {
+                            if tab_button(ui, t("Videos"), !on_lists).clicked() && on_lists {
                                 switch = Some(Source::Channel { url, name });
                             }
                         });
@@ -2735,8 +2890,8 @@ impl App {
         egui::Frame::new().fill(card()).corner_radius(RADIUS).inner_margin(Margin::same(16)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             if self.sessions.is_empty() {
-                ui.label(RichText::new("Sign in with Google").size(16.0).strong().color(text()));
-                ui.label(RichText::new("Needs Firefox or a Chromium-based browser (Chrome, Brave, Edge…).").color(text_dim()));
+                ui.label(RichText::new(t("Sign in with Google")).size(16.0).strong().color(text()));
+                ui.label(RichText::new(t("Needs Firefox or a Chromium-based browser (Chrome, Brave, Edge…).")).color(text_dim()));
                 return;
             }
             if let Some(s) = &self.signin {
@@ -2744,27 +2899,27 @@ impl App {
                 if !s.opened {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(RichText::new(format!("Checking {}…", s.session.label())).color(text()));
+                        ui.label(RichText::new(tf("Checking {}…", &[&s.session.label()])).color(text()));
                     });
                     return;
                 }
-                ui.label(RichText::new(format!("Sign in to Google in {b}")).size(16.0).strong().color(text()));
+                ui.label(RichText::new(tf("Sign in to Google in {}", &[&b])).size(16.0).strong().color(text()));
                 ui.label(
-                    RichText::new(format!(
-                        "We opened Google's sign-in page in {b}. Once you're signed in, ytmini picks the \
-                         session up by itself — leave {b} open."
+                    RichText::new(tf(
+                        "We opened Google's sign-in page in {0}. Once you're signed in, ytmini picks the session up by itself — leave {0} open.",
+                        &[&b],
                     ))
                     .color(text_dim()),
                 );
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(RichText::new("Waiting for sign-in…").color(text_dim()));
+                    ui.label(RichText::new(t("Waiting for sign-in…")).color(text_dim()));
                     ui.add_space(8.0);
-                    if accent_button(ui, "I've signed in").clicked() {
+                    if accent_button(ui, t("I've signed in")).clicked() {
                         act = GoogleAction::CheckNow;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(t("Cancel")).clicked() {
                         act = GoogleAction::Cancel;
                     }
                 });
@@ -2774,20 +2929,21 @@ impl App {
             let chosen = &self.sessions[pick];
             // title + button on one row; description below at full width
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Sign in with Google").size(16.0).strong().color(text()));
+                ui.label(RichText::new(t("Sign in with Google")).size(16.0).strong().color(text()));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add_enabled(!busy, accent_btn("Sign in")).clicked() {
+                    if ui.add_enabled(!busy, accent_btn(t("Sign in"))).clicked() {
                         act = GoogleAction::Start;
                     }
                 });
             });
             ui.add_space(4.0);
-            let mut note = format!(
+            let mut note = tf(
                 "Uses your {} session. If you're not signed in there yet, Google's sign-in page opens in it.",
-                chosen.browser
+                &[&chosen.browser],
             );
             if !chosen.firefox && !chosen.safari && cfg!(target_os = "macos") {
-                note.push_str(" macOS asks for Keychain access once — click Allow.");
+                note.push(' ');
+                note.push_str(t("macOS asks for Keychain access once — click Allow."));
             }
             ui.add(egui::Label::new(RichText::new(note).size(12.5).color(text_dim())).wrap());
             if self.sessions.len() > 1 {
@@ -2860,8 +3016,9 @@ impl App {
         }
         if s.started.elapsed() > SIGNIN_TIMEOUT {
             self.signin = None;
-            self.import_error =
-                Some("Stopped waiting for the Google sign-in. Click Sign in to try again.".into());
+            self.import_error = Some(
+                t("Stopped waiting for the Google sign-in. Click Sign in to try again.").into(),
+            );
             return;
         }
         if s.last_check.elapsed() >= SIGNIN_POLL {
@@ -2880,7 +3037,7 @@ impl App {
         if let Some((text, true)) = &self.status {
             if text.contains(crate::innertube::SESSION_EXPIRED) {
                 self.status = Some((
-                    "Your YouTube session expired. Refreshing it from your browser…".into(),
+                    t("Your YouTube session expired. Refreshing it from your browser…").into(),
                     false,
                 ));
                 self.auto_refresh_session(ctx);
@@ -2925,7 +3082,7 @@ impl App {
                         .cloned()
                 });
             let r = match pick {
-                None => Err("no signed-in browser found".to_string()),
+                None => Err(t("no signed-in browser found").to_string()),
                 Some(s) => s
                     .export_cookies(&cookies)
                     .map(|()| (s.label(), s.id.to_string(), s.profile.clone()))
@@ -2951,6 +3108,137 @@ impl App {
             let _ = tx.send(Msg::Imported(r));
             ctx.request_repaint();
         });
+    }
+
+    /// Beside the video: your queue (reorder, remove, clear), the rest of an
+    /// ordered list you started from, then YouTube's suggestions. Returns a
+    /// video to play now.
+    fn ui_up_next(&mut self, ui: &mut egui::Ui) -> Option<Video> {
+        let mut play: Option<Video> = None;
+        let cur = self.playing_id().map(str::to_string);
+        egui::Panel::right("up_next")
+            .resizable(false)
+            .exact_size(340.0)
+            .frame(egui::Frame::new().fill(bg()).inner_margin(Margin {
+                left: 10,
+                right: 12,
+                top: 8,
+                bottom: 8,
+            }))
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                let thumbs = &mut self.thumbs;
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    // --- your queue ---
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(t("Your queue")).size(15.0).strong().color(text()));
+                        if !self.up_next.is_empty() {
+                            ui.label(RichText::new(self.up_next.len().to_string()).color(text_dim()));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.small_button(t("Clear")).clicked() {
+                                    self.up_next.clear();
+                                }
+                            });
+                        }
+                    });
+                    if self.up_next.is_empty() {
+                        ui.label(
+                            RichText::new(t("Empty. Add videos with “Play next” or “Add to queue” in a video's ⋯ menu, or with + below."))
+                                .small()
+                                .color(text_dim()),
+                        );
+                    }
+                    let mut op: Option<(usize, i32)> = None; // (index, -1 up / +1 down / 0 remove)
+                    let n = self.up_next.len();
+                    for (i, v) in self.up_next.iter().enumerate() {
+                        let r = up_next_row(ui, thumbs, v, false);
+                        if r.clicked {
+                            play = Some(v.clone());
+                        }
+                        if r.hovered {
+                            let at = r.rect.right_top() + Vec2::new(-4.0, 4.0);
+                            let mut x = at.x;
+                            for (sym, d, show, tip) in [
+                                ("✕", 0, true, t("Remove")),
+                                ("▼", 1, i + 1 < n, t("Move down")),
+                                ("▲", -1, i > 0, t("Move up")),
+                            ] {
+                                if !show {
+                                    continue;
+                                }
+                                let b = egui::Rect::from_min_size(egui::pos2(x - 24.0, at.y), Vec2::splat(22.0));
+                                x -= 26.0;
+                                if ui.put(b, egui::Button::new(sym).small()).on_hover_text(tip).clicked() {
+                                    op = Some((i, d));
+                                }
+                            }
+                        }
+                    }
+                    if let Some((i, d)) = op {
+                        match d {
+                            0 => {
+                                self.up_next.remove(i);
+                            }
+                            -1 => self.up_next.swap(i, i - 1),
+                            _ => self.up_next.swap(i, i + 1),
+                        }
+                    }
+                    // --- the rest of an ordered list ---
+                    if let Some(pos) = self.queue_pos {
+                        let rest: Vec<&Video> = self.queue_ctx.iter().skip(pos + 1).take(30).collect();
+                        if !rest.is_empty() {
+                            ui.add_space(10.0);
+                            ui.label(
+                                RichText::new(tf("Next in {}", &[&self.queue_label]))
+                                    .size(15.0)
+                                    .strong()
+                                    .color(text()),
+                            );
+                            for v in rest {
+                                if up_next_row(ui, thumbs, v, false).clicked {
+                                    play = Some(v.clone());
+                                }
+                            }
+                        }
+                    }
+                    // --- YouTube's suggestions ---
+                    ui.add_space(10.0);
+                    ui.label(RichText::new(t("Suggestions")).size(15.0).strong().color(text()));
+                    let suggestions: Vec<&Video> = if cur.as_deref() == Some(self.related.0.as_str()) {
+                        self.related.1.iter().filter(|v| !v.is_playlist).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    if suggestions.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(RichText::new(t("Loading…")).color(text_dim()));
+                        });
+                    }
+                    let mut add: Option<Video> = None;
+                    for v in suggestions {
+                        let r = up_next_row(ui, thumbs, v, true);
+                        if r.clicked {
+                            play = Some(v.clone());
+                        }
+                        if r.hovered {
+                            let b = egui::Rect::from_min_size(r.rect.right_top() + Vec2::new(-28.0, 4.0), Vec2::splat(22.0));
+                            let queued = self.up_next.iter().any(|q| q.id == v.id);
+                            let resp = ui
+                                .put(b, egui::Button::new(if queued { "✓" } else { "+" }).small())
+                                .on_hover_text(t("Add to queue"));
+                            if resp.clicked() && !queued {
+                                add = Some(v.clone());
+                            }
+                        }
+                    }
+                    if let Some(v) = add {
+                        self.up_next.push_back(v);
+                    }
+                });
+            });
+        play
     }
 
     fn ui_player(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -3087,6 +3375,10 @@ impl App {
             }
             _ => self.eof_at = None,
         }
+        let mut jump: Option<Video> = None;
+        if !fullscreen && self.settings.up_next_panel && self.embedded.is_some() {
+            jump = self.ui_up_next(ui);
+        }
         if let (Some(p), Some(surface), Some(gl)) =
             (&mut self.embedded, &mut self.surface, frame.gl())
         {
@@ -3100,10 +3392,14 @@ impl App {
                 prev: q_prev,
                 next: q_next,
                 autoplay_in,
+                panel_open: (!fullscreen).then_some(self.settings.up_next_panel),
             };
             let act = p.ui(ui, view);
             go_next |= act.next;
             go_prev |= act.prev;
+            if act.toggle_panel {
+                self.settings.up_next_panel = !self.settings.up_next_panel;
+            }
             if act.cancel_autoplay {
                 self.autoplay_cancelled = true;
             }
@@ -3126,7 +3422,9 @@ impl App {
             self.settings.quality = q;
             self.apply_profile_live(&ctx);
         }
-        if go_next && !back {
+        if let Some(v) = jump.filter(|_| !back) {
+            self.jump_to(&v);
+        } else if go_next && !back {
             self.go_next();
         } else if go_prev && !back {
             self.go_prev();
@@ -3148,7 +3446,7 @@ impl App {
         let mut clear_downloads = false;
         let before_quality = self.settings.quality;
         let tab = &mut self.settings_tab;
-        egui::Window::new("Settings")
+        egui::Window::new(t("Settings"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -3178,15 +3476,15 @@ impl App {
                     ui.add_space(4.0);
                     match *tab {
                         SettingsTab::Playback => {
-                            section(ui, "Playback");
+                            section(ui, t("Playback"));
                             egui::Grid::new("playback").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
-                                ui.label("Player");
+                                ui.label(t("Player"));
                                 ui.horizontal(|ui| {
-                                    ui.selectable_value(&mut s.player, PlayerMode::Embedded, "In this window");
-                                    ui.selectable_value(&mut s.player, PlayerMode::Window, "Separate window");
+                                    ui.selectable_value(&mut s.player, PlayerMode::Embedded, t("In this window"));
+                                    ui.selectable_value(&mut s.player, PlayerMode::Window, t("Separate window"));
                                 });
                                 ui.end_row();
-                                ui.label("Quality");
+                                ui.label(t("Quality"));
                                 egui::ComboBox::from_id_salt("q").selected_text(s.quality.label()).width(220.0).show_ui(ui, |ui| {
                                     for q in yt::Quality::choices(self.screen_cap) {
                                         ui.selectable_value(&mut s.quality, q, q.label());
@@ -3194,14 +3492,14 @@ impl App {
                                 });
                                 ui.end_row();
                             });
-                            ui.checkbox(&mut s.mark_watched, "Add videos I watch to my YouTube history");
-                            ui.checkbox(&mut s.volume_leveling, "Level volume (quiet voices up, loud parts down)");
-                            ui.checkbox(&mut s.prepare_on_hover, "Start videos faster (prepare the one you're pointing at)");
-                                ui.checkbox(&mut s.autoplay, "Autoplay the next video in the queue");
+                            ui.checkbox(&mut s.mark_watched, t("Add videos I watch to my YouTube history"));
+                            ui.checkbox(&mut s.volume_leveling, t("Level volume (quiet voices up, loud parts down)"));
+                            ui.checkbox(&mut s.prepare_on_hover, t("Start videos faster (prepare the one you're pointing at)"));
+                                ui.checkbox(&mut s.autoplay, t("Autoplay the next video in the queue"));
                             ui.label(
-                                RichText::new(format!(
+                                RichText::new(tf(
                                     "Auto never exceeds what this screen can show ({}p). On battery and in Low Power Mode it plays 1080p30. Sharp VP9 is preferred everywhere: this Mac decodes it in hardware, so it costs no more battery than blurry H.264.",
-                                    self.screen_cap
+                                    &[&self.screen_cap],
                                 ))
                                 .small()
                                 .color(text_dim()),
@@ -3209,16 +3507,16 @@ impl App {
 
                         }
                         SettingsTab::SponsorBlock => {
-                            section(ui, "SponsorBlock");
-                            ui.checkbox(&mut s.sponsorblock, "Skip sponsor segments and other filler");
+                            section(ui, t("SponsorBlock"));
+                            ui.checkbox(&mut s.sponsorblock, t("Skip sponsor segments and other filler"));
                             if s.sponsorblock {
                                 ui.indent("sb", |ui| {
-                                    for (id, label, [r, g, b]) in crate::sponsorblock::CATEGORIES {
+                                    for (id, _, [r, g, b]) in crate::sponsorblock::CATEGORIES {
                                         let mut on = s.sb_categories.iter().any(|c| c == id);
                                         ui.horizontal(|ui| {
                                             let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
                                             ui.painter().circle_filled(dot.center(), 4.0, Color32::from_rgb(r, g, b));
-                                            if ui.checkbox(&mut on, label).changed() {
+                                            if ui.checkbox(&mut on, crate::sponsorblock::label(id)).changed() {
                                                 s.sb_categories.retain(|c| c != id);
                                                 if on {
                                                     s.sb_categories.push(id.to_string());
@@ -3229,24 +3527,24 @@ impl App {
                                 });
                             }
                             ui.label(
-                                RichText::new("Segments come from the SponsorBlock community (sponsor.ajay.app). Only a short hash prefix of the video id is sent, never the id itself.")
+                                RichText::new(t("Segments come from the SponsorBlock community (sponsor.ajay.app). Only a short hash prefix of the video id is sent, never the id itself."))
                                     .small()
                                     .color(text_dim()),
                             );
 
                         }
                         SettingsTab::Feed => {
-                            section(ui, "Feed");
-                            ui.checkbox(&mut s.show_shorts, "Shorts (in their own row)");
-                            ui.checkbox(&mut s.dearrow, "Less clickbait: community titles and thumbnails (DeArrow, experimental)");
-                            ui.checkbox(&mut s.hide_live, "Hide live streams and premieres");
-                            ui.checkbox(&mut s.hide_watched, "Hide videos I've watched (Home and Subscriptions)");
+                            section(ui, t("Feed"));
+                            ui.checkbox(&mut s.show_shorts, t("Shorts (in their own row)"));
+                            ui.checkbox(&mut s.dearrow, t("Less clickbait: community titles and thumbnails (DeArrow, experimental)"));
+                            ui.checkbox(&mut s.hide_live, t("Hide live streams and premieres"));
+                            ui.checkbox(&mut s.hide_watched, t("Hide videos I've watched (Home and Subscriptions)"));
                             ui.horizontal(|ui| {
-                                ui.label("Hide titles containing");
+                                ui.label(t("Hide titles containing"));
                                 if ui
                                     .add(
                                         egui::TextEdit::singleline(&mut self.muted_words_buf)
-                                            .hint_text("reaction, podcast clip")
+                                            .hint_text(t("reaction, podcast clip"))
                                             .desired_width(200.0),
                                     )
                                     .changed()
@@ -3260,11 +3558,11 @@ impl App {
                                 }
                             });
                             if !s.muted_channels.is_empty() {
-                                ui.label("Hidden channels");
+                                ui.label(t("Hidden channels"));
                                 let mut unmute = None;
                                 ui.horizontal_wrapped(|ui| {
                                     for (i, ch) in s.muted_channels.iter().enumerate() {
-                                        if ui.button(format!("{ch}  ✕")).on_hover_text("Show again").clicked() {
+                                        if ui.button(format!("{ch}  ✕")).on_hover_text(t("Show again")).clicked() {
                                             unmute = Some(i);
                                         }
                                     }
@@ -3274,79 +3572,104 @@ impl App {
                                 }
                             }
                             ui.label(
-                                RichText::new("Filters apply to Home, Subscriptions and search, never to channel or playlist pages. Hide a channel from a video's ⋯ menu.")
+                                RichText::new(t("Filters apply to Home, Subscriptions and search, never to channel or playlist pages. Hide a channel from a video's ⋯ menu."))
                                     .small()
                                     .color(text_dim()),
                             );
 
                         }
                         SettingsTab::Appearance => {
-                            section(ui, "Layout");
+                            section(ui, t("Layout"));
                             ui.horizontal(|ui| {
-                                ui.label("Grid");
-                                ui.selectable_value(&mut s.density, Density::Comfortable, "Comfortable");
-                                ui.selectable_value(&mut s.density, Density::Compact, "Compact");
+                                ui.label(t("Grid"));
+                                ui.selectable_value(&mut s.density, Density::Comfortable, t("Comfortable"));
+                                ui.selectable_value(&mut s.density, Density::Compact, t("Compact"));
                             });
-                            ui.checkbox(&mut s.sidebar_collapsed, "Sidebar: icons only");
+                            ui.checkbox(&mut s.sidebar_collapsed, t("Sidebar: icons only"));
                             ui.add_space(10.0);
-                            section(ui, "Thumbnails");
+                            section(ui, t("Thumbnails"));
                             ui.horizontal(|ui| {
-                                ui.selectable_value(&mut s.thumbs, ThumbQuality::Auto, "Auto");
-                                ui.selectable_value(&mut s.thumbs, ThumbQuality::Standard, "Standard · 320p");
-                                ui.selectable_value(&mut s.thumbs, ThumbQuality::High, "High · 640p");
+                                ui.selectable_value(&mut s.thumbs, ThumbQuality::Auto, t("Auto"));
+                                ui.selectable_value(&mut s.thumbs, ThumbQuality::Standard, t("Standard · 320p"));
+                                ui.selectable_value(&mut s.thumbs, ThumbQuality::High, t("High · 640p"));
                             });
-                            ui.label(RichText::new("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (Retina) screens.").small().color(text_dim()));
+                            ui.label(RichText::new(t("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (Retina) screens.")).small().color(text_dim()));
 
                             ui.add_space(10.0);
                             if self.tray.is_some() {
-                                section(ui, "Window");
-                                ui.checkbox(&mut s.close_to_tray, "Closing the window keeps ytmini in the menu bar");
-                                ui.label(RichText::new("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.").small().color(text_dim()));
+                                section(ui, t("Window"));
+                                ui.checkbox(&mut s.close_to_tray, t("Closing the window keeps ytmini in the menu bar"));
+                                ui.label(RichText::new(t("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.")).small().color(text_dim()));
                                 ui.add_space(10.0);
                             }
                         }
+                        SettingsTab::Language => {
+                            section(ui, t("Language"));
+                            let sys = crate::i18n::system();
+                            let auto = tf("Same as macOS ({})", &[&sys.native_name()]);
+                            let shown = s.language.map_or(auto.clone(), |l| l.native_name().to_string());
+                            egui::ComboBox::from_id_salt("lang").selected_text(shown).width(240.0).show_ui(ui, |ui| {
+                                ui.selectable_value(&mut s.language, None, auto);
+                                for l in crate::i18n::Lang::ALL {
+                                    ui.selectable_value(&mut s.language, Some(l), l.native_name());
+                                }
+                            });
+                            ui.label(RichText::new(t("The interface, and the language ytmini asks YouTube to use for its own text (categories, view counts, dates). Video titles stay as their authors wrote them.")).small().color(text_dim()));
+                            ui.add_space(10.0);
+                            section(ui, t("Region"));
+                            let sysr = crate::i18n::system_region();
+                            let auto = tf("Same as macOS ({})", &[&crate::i18n::regions::name(&sysr)]);
+                            let shown = s.region.as_deref().map_or(auto.clone(), |r| format!("{} ({r})", crate::i18n::regions::name(r)));
+                            egui::ComboBox::from_id_salt("region").selected_text(shown).width(240.0).height(360.0).show_ui(ui, |ui| {
+                                ui.selectable_value(&mut s.region, None, auto);
+                                for (code, name) in crate::i18n::regions::REGIONS {
+                                    ui.selectable_value(&mut s.region, Some(code.to_string()), format!("{name} ({code})"));
+                                }
+                            });
+                            ui.label(RichText::new(t("What YouTube recommends and trends for, and how it ranks search results. Separate from the language.")).small().color(text_dim()));
+                        }
                         SettingsTab::Storage => {
-                            section(ui, "Downloads");
+                            section(ui, t("Downloads"));
                             ui.horizontal(|ui| {
-                                ui.label("Quality");
-                                let label = |h: u32| if h == 0 { "Audio only".to_string() } else { format!("{h}p") };
+                                ui.label(t("Quality"));
+                                let label = |h: u32| if h == 0 { t("Audio only").to_string() } else { format!("{h}p") };
                                 egui::ComboBox::from_id_salt("dlq").selected_text(label(s.download_height)).show_ui(ui, |ui| {
                                     for h in [480, 720, 1080, 1440, 0] {
                                         ui.selectable_value(&mut s.download_height, h, label(h));
                                     }
                                 });
-                                ui.label("Keep at most");
+                                ui.label(t("Keep at most"));
                                 ui.add(egui::DragValue::new(&mut s.download_cap_gb).range(1..=500).suffix(" GB"));
                             });
                             ui.horizontal(|ui| {
                                 ui.label(
                                     RichText::new(format!(
-                                        "{} used · {} videos",
-                                        crate::downloads::fmt_bytes(self.downloads.total_bytes()),
-                                        self.downloads.entries.len()
+                                        "{} · {}",
+                                        tf("{} used", &[&crate::downloads::fmt_bytes(self.downloads.total_bytes())]),
+                                        tn("{} video", "{} videos", self.downloads.entries.len() as u64)
                                     ))
                                     .color(text_dim()),
                                 );
-                                if ui.button("Show in Finder").clicked() {
+                                if ui.button(t("Show in Finder")).clicked() {
                                     if let Ok(d) = crate::downloads::dir() {
                                         let _ = open_url(&d.display().to_string());
                                     }
                                 }
-                                if !self.downloads.entries.is_empty() && ui.button("Delete all").clicked() {
+                                if !self.downloads.entries.is_empty() && ui.button(t("Delete all")).clicked() {
                                     self.downloads.clear();
                                     clear_downloads = true;
                                 }
                             });
                             ui.label(
-                                RichText::new("Saved to Movies/ytmini. When full, the oldest videos you've already watched are deleted first. Hardware-friendly codecs only, so offline playback is easy on the battery.")
+                                RichText::new(t("Saved to Movies/ytmini. When full, the oldest videos you've already watched are deleted first. Hardware-friendly codecs only, so offline playback is easy on the battery."))
                                     .small()
                                     .color(text_dim()),
                             );
 
                             ui.add_space(10.0);
-                            section(ui, "Disk cache");
+                            section(ui, t("Disk cache"));
                             egui::Grid::new("cache").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
-                                ui.label("Size limit");
+                                ui.label(t("Size limit"));
                                 ui.add(
                                     egui::Slider::new(&mut s.cache_mb, 32..=4096)
                                         .logarithmic(true)
@@ -3354,24 +3677,23 @@ impl App {
                                         .text(""),
                                 );
                                 ui.end_row();
-                                ui.label("Keep for");
-                                ui.add(egui::Slider::new(&mut s.cache_days, 1..=365).logarithmic(true).suffix(" days"));
+                                ui.label(t("Keep for"));
+                                ui.add(egui::Slider::new(&mut s.cache_days, 1..=365).logarithmic(true).suffix(format!(" {}", t("days"))));
                                 ui.end_row();
-                                ui.label("In use");
+                                ui.label(t("In use"));
                                 ui.horizontal(|ui| {
                                     let used = self.cache_usage.map_or("…".into(), |b| format!("{:.1} MB", b as f64 / 1_048_576.0));
                                     ui.label(used);
-                                    if ui.small_button("Clear").clicked() {
+                                    if ui.small_button(t("Clear")).clicked() {
                                         clear = true;
                                     }
                                 });
                                 ui.end_row();
                             });
                             ui.label(
-                                RichText::new(format!(
+                                RichText::new(tf(
                                     "Recommended: {} MB, {} days — about 4,000 high-quality or 18,000 standard thumbnails, plus your last feed/subscriptions for instant startup.",
-                                    crate::settings::DEFAULT_CACHE_MB,
-                                    crate::settings::DEFAULT_CACHE_DAYS
+                                    &[&crate::settings::DEFAULT_CACHE_MB, &crate::settings::DEFAULT_CACHE_DAYS],
                                 ))
                                 .small()
                                 .color(text_dim()),
@@ -3379,22 +3701,22 @@ impl App {
 
                         }
                         SettingsTab::Account => {
-                            section(ui, "YouTube account");
+                            section(ui, t("YouTube account"));
                             ui.horizontal(|ui| {
                                 if let Some(src) = &s.signin_source {
                                     let label = signin::find(&src.id, &src.profile).map(|s| s.label());
                                     if let Some(label) = label {
-                                        if ui.button("Refresh session").on_hover_text(format!("Re-import from {label}")).clicked() {
+                                        if ui.button(t("Refresh session")).on_hover_text(format!("Re-import from {label}")).clicked() {
                                             refresh_session = true;
                                         }
                                     }
                                 }
-                                if ui.button("Sign in again…").clicked() {
+                                if ui.button(t("Sign in again…")).clicked() {
                                     reimport = true;
                                 }
                             });
                             ui.add_space(10.0);
-                            section(ui, "Components");
+                            section(ui, t("Components"));
                             egui::Grid::new("versions").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
                                 for (k, v) in &self.deps.versions {
                                     ui.label(k);
@@ -3406,8 +3728,8 @@ impl App {
                                 let managed = self.tools.as_ref().is_some_and(|t| t.ytdlp_managed);
                                 if self.deps.busy {
                                     ui.spinner();
-                                    ui.label(RichText::new(self.deps.activity.clone().unwrap_or_else(|| "Checking…".into())).small());
-                                } else if managed && ui.button("Check for yt-dlp update").clicked() {
+                                    ui.label(RichText::new(self.deps.activity.clone().unwrap_or_else(|| t("Checking…").into())).small());
+                                } else if managed && ui.button(t("Check for yt-dlp update")).clicked() {
                                     check_updates = true;
                                 }
                             });
@@ -3471,7 +3793,7 @@ impl App {
                 }
                 None => {
                     self.status = Some((
-                        "That isn't a YouTube video, playlist or channel link".into(),
+                        t("That isn't a YouTube video, playlist or channel link").into(),
                         true,
                     ))
                 }
@@ -3583,10 +3905,12 @@ impl App {
                 .evict(cap, |id| positions.get(id).is_some_and(|e| e.watched()), "");
         if self.downloads.total_bytes() >= cap {
             self.status = Some((
-                format!(
+                tf(
                     "Downloads are full ({} of {}). Delete some, or raise the limit in Settings.",
-                    crate::downloads::fmt_bytes(self.downloads.total_bytes()),
-                    crate::downloads::fmt_bytes(cap)
+                    &[
+                        &crate::downloads::fmt_bytes(self.downloads.total_bytes()),
+                        &crate::downloads::fmt_bytes(cap),
+                    ],
                 ),
                 true,
             ));
@@ -3594,7 +3918,11 @@ impl App {
         }
         if evicted > 0 {
             self.status = Some((
-                format!("Made room: deleted {evicted} watched download(s)."),
+                tn(
+                    "Made room: deleted {} watched download.",
+                    "Made room: deleted {} watched downloads.",
+                    evicted as u64,
+                ),
                 false,
             ));
         }
@@ -3637,10 +3965,9 @@ impl App {
                 match r {
                     Ok(e) => {
                         self.status = Some((
-                            format!(
+                            tf(
                                 "Downloaded “{}” ({}).",
-                                e.title,
-                                crate::downloads::fmt_bytes(e.bytes)
+                                &[&e.title, &crate::downloads::fmt_bytes(e.bytes)],
                             ),
                             false,
                         ));
@@ -3654,7 +3981,7 @@ impl App {
                         );
                         self.load(ctx, Source::Downloads, true);
                     }
-                    Err(e) => self.status = Some((format!("Download failed: {e}"), true)),
+                    Err(e) => self.status = Some((tf("Download failed: {}", &[&e]), true)),
                 }
             }
         }
@@ -3737,7 +4064,7 @@ impl App {
                     ctx,
                     Source::Playlist {
                         id,
-                        title: "Playlist".into(),
+                        title: t("Playlist").into(),
                     },
                 );
             }
@@ -3919,10 +4246,10 @@ fn ago(unix: u64) -> String {
         .map_or(0, |d| d.as_secs());
     let d = now.saturating_sub(unix);
     match d {
-        0..=89 => "just now".into(),
-        90..=5399 => format!("{} min ago", d / 60),
-        5400..=129_599 => format!("{} h ago", d / 3600),
-        _ => format!("{} days ago", d / 86_400),
+        0..=89 => t("just now").into(),
+        90..=5399 => tn("{} minute ago", "{} minutes ago", d / 60),
+        5400..=129_599 => tn("{} hour ago", "{} hours ago", d / 3600),
+        _ => tn("{} day ago", "{} days ago", d / 86_400),
     }
 }
 
@@ -3948,6 +4275,23 @@ impl eframe::App for App {
         }
         // (the smoke test changes settings; never persist those)
         if self.smoke.is_none() && self.settings != self.saved_settings {
+            if (self.settings.language, &self.settings.region)
+                != (self.saved_settings.language, &self.saved_settings.region)
+            {
+                // YouTube answers in the new language/region: refetch everything
+                crate::i18n::set(self.settings.language);
+                crate::i18n::set_region(self.settings.region.clone());
+                crate::innertube::HOME_CHIPS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clear();
+                self.topic_shelves.clear();
+                self.dearrow.clear();
+                for tab in self.tabs.values_mut() {
+                    tab.loaded_once = false;
+                }
+                self.load(ctx, self.active.clone(), true);
+            }
             if self.settings.volume_leveling != self.saved_settings.volume_leveling {
                 if let Some(p) = &mut self.embedded {
                     p.set_leveling(self.settings.volume_leveling);
@@ -4124,6 +4468,82 @@ struct CardInfo {
     portrait: bool,
 }
 
+struct RowResp {
+    clicked: bool,
+    hovered: bool,
+    rect: egui::Rect,
+}
+
+/// A compact video row for the Up next panel: thumbnail, title, channel.
+fn up_next_row(ui: &mut egui::Ui, thumbs: &mut Thumbs, v: &Video, _suggested: bool) -> RowResp {
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 64.0), Sense::click());
+    let hovered = ui.rect_contains_pointer(rect);
+    if !ui.is_rect_visible(rect) {
+        return RowResp {
+            clicked: false,
+            hovered: false,
+            rect,
+        };
+    }
+    let painter = ui.painter_at(rect);
+    if hovered {
+        painter.rect_filled(rect, 8, card_hover());
+    }
+    let thumb = egui::Rect::from_min_size(rect.min + Vec2::new(2.0, 2.0), Vec2::new(107.0, 60.0));
+    painter.rect_filled(thumb, 6, thumb_bg());
+    if let Some(tex) = thumbs.get(&v.id, Variant::Standard) {
+        egui::Image::from_texture(egui::load::SizedTexture::from_handle(tex))
+            .corner_radius(6)
+            .paint_at(ui, thumb);
+    }
+    let dur = v.duration_label();
+    if !dur.is_empty() && dur != "LIVE" {
+        let g = painter.layout_no_wrap(dur, FontId::proportional(10.5), Color32::WHITE);
+        let b = egui::Rect::from_min_size(
+            thumb.right_bottom() - g.size() - Vec2::new(7.0, 5.0),
+            g.size() + Vec2::new(4.0, 2.0),
+        );
+        painter.rect_filled(b, 3, Color32::from_black_alpha(190));
+        painter.galley(b.min + Vec2::new(2.0, 1.0), g, Color32::WHITE);
+    }
+    let tx = thumb.right() + 8.0;
+    let tw = rect.right() - tx - 4.0;
+    let mut job = LayoutJob::single_section(
+        v.title().to_string(),
+        TextFormat {
+            font_id: FontId::proportional(13.0),
+            color: text(),
+            ..Default::default()
+        },
+    );
+    job.wrap.max_width = tw;
+    job.wrap.max_rows = 2;
+    job.wrap.overflow_character = Some('…');
+    let g = painter.layout_job(job);
+    painter.galley(egui::pos2(tx, rect.top() + 3.0), g, text());
+    let mut cj = LayoutJob::single_section(
+        v.channel().to_string(),
+        TextFormat {
+            font_id: FontId::proportional(11.5),
+            color: text_dim(),
+            ..Default::default()
+        },
+    );
+    cj.wrap.max_width = tw;
+    cj.wrap.max_rows = 1;
+    cj.wrap.overflow_character = Some('…');
+    let cg = painter.layout_job(cj);
+    painter.galley(egui::pos2(tx, rect.bottom() - 18.0), cg, text_dim());
+    RowResp {
+        clicked: resp
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked(),
+        hovered,
+        rect,
+    }
+}
+
 fn video_card(
     ui: &mut egui::Ui,
     thumbs: &mut Thumbs,
@@ -4217,7 +4637,7 @@ fn video_card(
 
     // duration / playlist badge
     let dur = if v.is_playlist {
-        "PLAYLIST".to_string()
+        t("PLAYLIST").to_string()
     } else if watched {
         format!("✓ {}", v.duration_label())
     } else {
@@ -4225,7 +4645,8 @@ fn video_card(
     };
     let live = dur == "LIVE";
     let no_badge = dur.trim_start_matches("✓ ").is_empty();
-    let g = painter.layout_no_wrap(dur, FontId::proportional(11.5), Color32::WHITE);
+    let shown_dur = if live { t("LIVE").to_string() } else { dur };
+    let g = painter.layout_no_wrap(shown_dur, FontId::proportional(11.5), Color32::WHITE);
     let badge = egui::Rect::from_min_size(
         thumb.right_bottom() - g.size() - Vec2::new(12.0, 10.0),
         g.size() + Vec2::new(8.0, 4.0),
@@ -4262,7 +4683,7 @@ fn video_card(
     painter.galley(title_pos, title, text());
 
     // channel · views
-    let views: String = [v.views_label(), v.age.clone()]
+    let views: String = [v.views_label(), v.age.as_deref().map(crate::i18n::age)]
         .into_iter()
         .flatten()
         .map(|s| format!("  ·  {s}"))
@@ -4356,63 +4777,63 @@ fn video_card(
     let menu = |ui: &mut egui::Ui, action: &mut CardAction| {
         ui.set_min_width(190.0);
         if !v.is_playlist {
-            if ui.button("Play next").clicked() {
+            if ui.button(t("Play next")).clicked() {
                 *action = CardAction::Quick(Quick::PlayNext);
             }
-            if ui.button("Add to queue").clicked() {
+            if ui.button(t("Add to queue")).clicked() {
                 *action = CardAction::Quick(Quick::AddToQueue);
             }
             ui.separator();
             if in_watch_later {
-                if ui.button("Remove from Watch later").clicked() {
+                if ui.button(t("Remove from Watch later")).clicked() {
                     *action = CardAction::Quick(Quick::WatchLater(false));
                 }
-            } else if ui.button("Save to Watch later").clicked() {
+            } else if ui.button(t("Save to Watch later")).clicked() {
                 *action = CardAction::Quick(Quick::WatchLater(true));
             }
             let (label, to) = if watched {
-                ("Mark as unwatched", false)
+                (t("Mark as unwatched"), false)
             } else {
-                ("Mark as watched", true)
+                (t("Mark as watched"), true)
             };
             if ui.button(label).clicked() {
                 *action = CardAction::Quick(Quick::Watched(to));
             }
-            if in_history && ui.button("Remove from watch history").clicked() {
+            if in_history && ui.button(t("Remove from watch history")).clicked() {
                 *action = CardAction::Quick(Quick::RemoveFromHistory);
             }
             ui.separator();
         }
-        if v.channel_url.is_some() && ui.button("Go to channel").clicked() {
+        if v.channel_url.is_some() && ui.button(t("Go to channel")).clicked() {
             *action = CardAction::Channel;
         }
         if !v.is_playlist {
             match download {
                 None => {
-                    if ui.button("Download").clicked() {
+                    if ui.button(t("Download")).clicked() {
                         *action = CardAction::Quick(Quick::Download);
                     }
                 }
                 Some(p) if p < 1.0 => {
                     ui.add_enabled(
                         false,
-                        egui::Button::new(format!("Downloading… {:.0}%", p * 100.0)),
+                        egui::Button::new(tf("Downloading… {}%", &[&format!("{:.0}", p * 100.0)])),
                     );
                 }
                 Some(_) => {
-                    if ui.button("Delete download").clicked() {
+                    if ui.button(t("Delete download")).clicked() {
                         *action = CardAction::Quick(Quick::DeleteDownload);
                     }
                 }
             }
         }
-        if v.channel.is_some() && !v.is_playlist && ui.button("Hide this channel").clicked() {
+        if v.channel.is_some() && !v.is_playlist && ui.button(t("Hide this channel")).clicked() {
             *action = CardAction::Quick(Quick::MuteChannel);
         }
-        if ui.button("Copy link").clicked() {
+        if ui.button(t("Copy link")).clicked() {
             *action = CardAction::Quick(Quick::CopyLink);
         }
-        if ui.button("Open in browser").clicked() {
+        if ui.button(t("Open in browser")).clicked() {
             *action = CardAction::Quick(Quick::OpenInBrowser);
         }
     };
@@ -4441,7 +4862,10 @@ fn video_card(
             ui.set_max_width(340.0);
             ui.label(RichText::new(v.title()).strong().color(text()));
             let mut meta = v.channel().to_string();
-            for extra in [v.views_label(), v.age.clone()].into_iter().flatten() {
+            for extra in [v.views_label(), v.age.as_deref().map(crate::i18n::age)]
+                .into_iter()
+                .flatten()
+            {
                 meta = if meta.is_empty() {
                     extra
                 } else {
@@ -4449,7 +4873,8 @@ fn video_card(
                 };
             }
             if let Some(p) = progress.filter(|p| p.dur > 0.0 && !p.watched()) {
-                meta.push_str(&format!(" · {} left", fmt_secs(p.dur - p.pos)));
+                meta.push_str(" · ");
+                meta.push_str(&tf("{} left", &[&fmt_secs(p.dur - p.pos)]));
             }
             if !meta.is_empty() {
                 ui.label(RichText::new(meta).small().color(text_dim()));
@@ -4885,7 +5310,7 @@ fn code_box(ui: &mut egui::Ui, text: &str) {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(text).monospace().color(crate::theme::text()));
-                if ui.small_button("Copy").clicked() {
+                if ui.small_button(t("Copy")).clicked() {
                     ui.ctx().copy_text(text.to_string());
                 }
             });
