@@ -6,6 +6,7 @@
 mod app;
 mod cache;
 mod deps;
+mod innertube;
 mod mpv;
 mod player;
 mod positions;

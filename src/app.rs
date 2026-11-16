@@ -516,10 +516,11 @@ impl App {
 
     // ---------- background work ----------
 
-    /// A worker thread owning one yt-dlp stream for `source`. It reads videos
-    /// only on request (so yt-dlp idles one page ahead), sends them in small
-    /// chunks so cards appear as they arrive, and closes the stream after a
-    /// minute without requests (resumed later from the current position).
+    /// A worker thread that feeds one tab. It asks YouTube's web API directly
+    /// (fast, page by page with continuation tokens) and falls back to a
+    /// yt-dlp stream if that fails. Videos are read only on request and sent
+    /// in small chunks so cards appear as they arrive. A yt-dlp stream closes
+    /// after a minute without requests (resumed later from the same position).
     fn spawn_stream(
         &self,
         ctx: &egui::Context,
@@ -530,9 +531,21 @@ impl App {
         let tools = self.tools.clone()?;
         let (req_tx, req_rx) = channel::<usize>();
         let (tx, ctx, cookies) = (self.tx.clone(), ctx.clone(), self.cookies.clone());
+        let debug = std::env::var_os("YTMINI_DEBUG").is_some();
         std::thread::Builder::new()
-            .name("yt-stream".into())
+            .name("yt-list".into())
             .spawn(move || {
+                let send = |videos: Vec<Video>, first: bool, batch_done: bool, exhausted: bool| {
+                    let _ = tx.send(Msg::Chunk {
+                        source: source.clone(),
+                        generation,
+                        videos,
+                        first,
+                        batch_done,
+                        exhausted,
+                    });
+                    ctx.request_repaint();
+                };
                 let fail = |error: String| {
                     let _ = tx.send(Msg::FetchFailed {
                         source: source.clone(),
@@ -541,20 +554,35 @@ impl App {
                     });
                     ctx.request_repaint();
                 };
-                let mut stream = match yt::Stream::open(&tools, &cookies, &source, start) {
-                    Ok(s) => s,
-                    Err(e) => return fail(format!("{e:#}")),
+                let mut feed = if start == 0 {
+                    Feed::native(&cookies, &source).unwrap_or_else(|e| {
+                        if debug {
+                            eprintln!("native {} failed, using yt-dlp: {e:#}", source.label());
+                        }
+                        Feed::Ytdlp(None)
+                    })
+                } else {
+                    Feed::Ytdlp(None)
                 };
+                let mut delivered = start;
                 let mut first = start == 0;
-                while let Ok(want) = req_rx.recv_timeout(Duration::from_secs(60)) {
+                loop {
+                    let idle = match feed {
+                        Feed::Native { .. } => Duration::from_secs(24 * 3600),
+                        Feed::Ytdlp(_) => Duration::from_secs(60),
+                    };
+                    let Ok(want) = req_rx.recv_timeout(idle) else {
+                        return;
+                    };
                     let (mut chunk, mut got, mut last_send) =
                         (Vec::new(), 0, std::time::Instant::now());
                     let mut exhausted = false;
                     while got < want {
-                        match stream.next_video() {
+                        match feed.next_video(&tools, &cookies, &source, delivered) {
                             Ok(Some(v)) => {
                                 chunk.push(v);
                                 got += 1;
+                                delivered += 1;
                             }
                             Ok(None) => {
                                 exhausted = true;
@@ -562,49 +590,26 @@ impl App {
                             }
                             Err(e) => {
                                 if !chunk.is_empty() {
-                                    let videos = std::mem::take(&mut chunk);
-                                    let _ = tx.send(Msg::Chunk {
-                                        source: source.clone(),
-                                        generation,
-                                        videos,
-                                        first,
-                                        batch_done: false,
-                                        exhausted: false,
-                                    });
+                                    send(std::mem::take(&mut chunk), first, false, false);
                                 }
                                 return fail(format!("{e:#}"));
                             }
                         }
-                        // flush a few at a time so the grid fills in progressively
-                        if last_send.elapsed() >= Duration::from_millis(150) && got < want {
-                            let videos = std::mem::take(&mut chunk);
-                            let _ = tx.send(Msg::Chunk {
-                                source: source.clone(),
-                                generation,
-                                videos,
-                                first,
-                                batch_done: false,
-                                exhausted: false,
-                            });
-                            ctx.request_repaint();
+                        if last_send.elapsed() >= Duration::from_millis(150)
+                            && got < want
+                            && !feed.buffered()
+                        {
+                            send(std::mem::take(&mut chunk), first, false, false);
                             last_send = std::time::Instant::now();
                         }
                     }
-                    let _ = tx.send(Msg::Chunk {
-                        source: source.clone(),
-                        generation,
-                        videos: chunk,
-                        first,
-                        batch_done: true,
-                        exhausted,
-                    });
-                    ctx.request_repaint();
+                    send(chunk, first, true, exhausted);
                     first = false;
                     if exhausted {
                         return;
                     }
+                    feed.prefetch();
                 }
-                // idle or tab refreshed: dropping `stream` stops yt-dlp
             })
             .ok()?;
         req_tx.send(yt::PAGE).ok()?;
@@ -1717,7 +1722,7 @@ impl App {
                     v.title().to_string(),
                 );
                 std::thread::spawn(move || {
-                    let r = yt::set_watch_later(&cookies, &id, add)
+                    let r = crate::innertube::set_watch_later(&cookies, &id, add)
                         .map(|()| {
                             if add {
                                 format!("Saved to Watch later: {title}")
@@ -2520,6 +2525,86 @@ impl eframe::App for App {
     }
 }
 
+// ---------- list sources ----------
+
+/// Where a tab's videos come from: YouTube's API, or yt-dlp as the fallback.
+enum Feed {
+    Native {
+        pager: crate::innertube::Pager,
+        buf: std::collections::VecDeque<Video>,
+        ended: bool,
+    },
+    /// Opened lazily (and reopened after idling) at the current position.
+    Ytdlp(Option<yt::Stream>),
+}
+
+impl Feed {
+    /// Fetch the first page natively; errors mean "use yt-dlp".
+    fn native(cookies: &std::path::Path, source: &Source) -> anyhow::Result<Feed> {
+        if std::env::var_os("YTMINI_NO_NATIVE").is_some() {
+            anyhow::bail!("disabled by YTMINI_NO_NATIVE");
+        }
+        let mut pager = crate::innertube::Pager::new(cookies, source)?;
+        let page = pager.next_page()?.unwrap_or_default();
+        Ok(Feed::Native {
+            pager,
+            buf: page.into(),
+            ended: false,
+        })
+    }
+
+    /// Videos already in hand (no waiting for the next one).
+    fn buffered(&self) -> bool {
+        matches!(self, Feed::Native { buf, .. } if !buf.is_empty())
+    }
+
+    fn next_video(
+        &mut self,
+        tools: &Tools,
+        cookies: &std::path::Path,
+        source: &Source,
+        delivered: usize,
+    ) -> anyhow::Result<Option<Video>> {
+        loop {
+            match self {
+                Feed::Native { pager, buf, ended } => {
+                    if let Some(v) = buf.pop_front() {
+                        return Ok(Some(v));
+                    }
+                    if *ended {
+                        return Ok(None);
+                    }
+                    match pager.next_page() {
+                        Ok(Some(page)) if !page.is_empty() => buf.extend(page),
+                        Ok(_) => *ended = true,
+                        // a later page failed: carry on with yt-dlp from here
+                        Err(_) => *self = Feed::Ytdlp(None),
+                    }
+                }
+                Feed::Ytdlp(stream) => {
+                    if stream.is_none() {
+                        *stream = Some(yt::Stream::open(tools, cookies, source, delivered)?);
+                    }
+                    return stream.as_mut().map_or(Ok(None), |s| s.next_video());
+                }
+            }
+        }
+    }
+
+    /// Native: fetch the next page while the user is still looking at this one.
+    fn prefetch(&mut self) {
+        if let Feed::Native { pager, buf, ended } = self {
+            if buf.len() < yt::PAGE && !*ended {
+                match pager.next_page() {
+                    Ok(Some(page)) if !page.is_empty() => buf.extend(page),
+                    Ok(_) => *ended = true,
+                    Err(_) => {} // retried on the next request
+                }
+            }
+        }
+    }
+}
+
 // ---------- widgets ----------
 
 struct CardInfo {
@@ -2644,10 +2729,11 @@ fn video_card(
     painter.galley(title_pos, title, text());
 
     // channel · views
-    let views = v
-        .views_label()
+    let views: String = [v.views_label(), v.age.clone()]
+        .into_iter()
+        .flatten()
         .map(|s| format!("  ·  {s}"))
-        .unwrap_or_default();
+        .collect();
     let views_g = painter.layout_no_wrap(views, FontId::proportional(m.meta), text_dim());
     let mut cjob = LayoutJob::single_section(
         v.channel().to_string(),
@@ -2772,11 +2858,11 @@ fn video_card(
             ui.set_max_width(340.0);
             ui.label(RichText::new(v.title()).strong().color(text()));
             let mut meta = v.channel().to_string();
-            if let Some(vl) = v.views_label() {
+            for extra in [v.views_label(), v.age.clone()].into_iter().flatten() {
                 meta = if meta.is_empty() {
-                    vl
+                    extra
                 } else {
-                    format!("{meta} · {vl}")
+                    format!("{meta} · {extra}")
                 };
             }
             if let Some(p) = progress.filter(|p| p.dur > 0.0 && !p.watched()) {
