@@ -1812,28 +1812,26 @@ impl App {
             }
             let pick = self.session_pick.min(self.sessions.len() - 1);
             let chosen = &self.sessions[pick];
+            // title + button on one row; description below at full width
             ui.horizontal(|ui| {
-                let text_w = (ui.available_width() - 110.0).max(120.0);
-                ui.allocate_ui_with_layout(Vec2::new(text_w, 0.0), Layout::top_down(Align::Min), |ui| {
-                    ui.set_max_width(text_w);
-                    ui.label(RichText::new("Sign in with Google").size(16.0).strong().color(text()));
-                    let mut note = format!(
-                        "Uses your {} session. If you're not signed in there yet, Google's sign-in page opens in it.",
-                        chosen.browser
-                    );
-                    if !chosen.firefox && !chosen.safari && cfg!(target_os = "macos") {
-                        note.push_str(" macOS asks for Keychain access once — click Allow.");
-                    }
-                    ui.add(egui::Label::new(RichText::new(note).size(12.5).color(text_dim())).wrap());
-                });
+                ui.label(RichText::new("Sign in with Google").size(16.0).strong().color(text()));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.add_enabled(!busy, accent_btn("Sign in")).clicked() {
                         act = GoogleAction::Start;
                     }
                 });
             });
+            ui.add_space(4.0);
+            let mut note = format!(
+                "Uses your {} session. If you're not signed in there yet, Google's sign-in page opens in it.",
+                chosen.browser
+            );
+            if !chosen.firefox && !chosen.safari && cfg!(target_os = "macos") {
+                note.push_str(" macOS asks for Keychain access once — click Allow.");
+            }
+            ui.add(egui::Label::new(RichText::new(note).size(12.5).color(text_dim())).wrap());
             if self.sessions.len() > 1 {
-                ui.add_space(6.0);
+                ui.add_space(10.0);
                 let labels: Vec<String> = self.sessions.iter().map(|s| s.label()).collect();
                 egui::ComboBox::from_id_salt("signin_profile")
                     .selected_text(labels[pick].clone())
