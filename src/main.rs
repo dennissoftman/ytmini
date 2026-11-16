@@ -17,6 +17,7 @@ mod mpv;
 mod nowplaying;
 mod player;
 mod positions;
+mod resolver;
 mod settings;
 mod signin;
 mod sponsorblock;

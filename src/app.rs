@@ -628,7 +628,15 @@ impl App {
                 }
                 self.refresh_versions(ctx);
                 let on_main = matches!(self.screen, Screen::Main);
+                // a new yt-dlp (or deno) may have arrived: restart the helpers
+                crate::resolver::reset();
                 if yt::logged_in(&self.cookies) {
+                    let (tools, cookies) = (self.tools.clone(), self.cookies.clone());
+                    std::thread::spawn(move || {
+                        if let Some(t) = tools {
+                            crate::resolver::warm_up(&t, &cookies);
+                        }
+                    });
                     self.screen = Screen::Main;
                     if !on_main {
                         self.load(ctx, Source::Feed, false);
@@ -1538,7 +1546,12 @@ impl App {
                 eprintln!("playing {} from pre-resolved URLs", video.id);
             }
         }
-        // hovered a moment ago and its resolve is still running: wait for it
+        // nothing stored: resolve with the warm helper (much faster than
+        // mpv's own one-off yt-dlp) while the player opens
+        if direct.is_none() && !profile.audio_only {
+            self.start_prepare(ctx, tools.clone(), video.clone());
+        }
+        // hovered a moment ago, or just started above: wait for it
         let wait = direct.is_none() && self.preparing.contains(&video.id);
         self.resolve_wait = wait.then(std::time::Instant::now);
         match Embedded::start(
@@ -4653,7 +4666,8 @@ impl App {
             profile.ytdl_format,
         );
         std::thread::spawn(move || {
-            let r = yt::resolve(&tools, &cookies, &video, &format).map_err(|e| format!("{e:#}"));
+            let r = crate::resolver::resolve(&tools, &cookies, &video, &format)
+                .map_err(|e| format!("{e:#}"));
             let _ = tx.send(Msg::Prepared(video.id, format, r));
             ctx.request_repaint();
         });
@@ -4666,6 +4680,7 @@ impl App {
             return;
         }
         self.net_checked = std::time::Instant::now();
+        crate::resolver::reap_idle();
         let now = yt::route_fingerprint();
         if now != self.net_route {
             if self.net_route.is_some() && !self.prepared.is_empty() {
@@ -4676,6 +4691,9 @@ impl App {
                     );
                 }
                 self.prepared.clear();
+            }
+            if self.net_route.is_some() {
+                crate::resolver::reset();
             }
             self.net_route = now;
         }

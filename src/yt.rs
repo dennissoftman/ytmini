@@ -775,7 +775,13 @@ pub fn route_fingerprint() -> Option<std::net::IpAddr> {
     Some(s.local_addr().ok()?.ip())
 }
 
-/// Resolve `video` with yt-dlp for `format` (blocking, ~4 s).
+/// yt-dlp extractor args for stream lookups: skip the client-config request
+/// (~0.6 s); the watch page already carries that config. Not `webpage`:
+/// skipping that trips YouTube's bot check.
+pub const RESOLVE_EXTRACTOR_ARGS: &str = "youtube:player_skip=configs";
+
+/// Resolve `video` with a one-off yt-dlp run for `format` (blocking, ~3 s).
+/// `resolver::resolve` is the fast path; this is its fallback.
 pub fn resolve(tools: &Tools, cookies: &Path, video: &Video, format: &str) -> Result<Direct> {
     let jar = CookieCopy::new(cookies)?;
     let out = tools
@@ -783,6 +789,7 @@ pub fn resolve(tools: &Tools, cookies: &Path, video: &Video, format: &str) -> Re
         .arg("--cookies")
         .arg(jar.path())
         .args(["-J", "--no-warnings", "--no-playlist", "-f", format])
+        .args(["--extractor-args", RESOLVE_EXTRACTOR_ARGS])
         .arg(video.url())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -790,6 +797,11 @@ pub fn resolve(tools: &Tools, cookies: &Path, video: &Video, format: &str) -> Re
         .context("running yt-dlp")?;
     anyhow::ensure!(out.status.success(), "yt-dlp couldn't resolve the video");
     let j: serde_json::Value = serde_json::from_slice(&out.stdout).context("yt-dlp output")?;
+    direct_from_info(&j)
+}
+
+/// The stream URLs in a yt-dlp info dict (`-J` output, or the resolver's).
+pub fn direct_from_info(j: &serde_json::Value) -> Result<Direct> {
     let url = |f: &serde_json::Value| f.get("url").and_then(|u| u.as_str()).map(str::to_string);
     let user_agent = j
         .pointer("/http_headers/User-Agent")
@@ -819,7 +831,7 @@ pub fn resolve(tools: &Tools, cookies: &Path, video: &Video, format: &str) -> Re
             });
         }
     }
-    let v = url(&j).context("no stream URL in yt-dlp's answer")?;
+    let v = url(j).context("no stream URL in yt-dlp's answer")?;
     Ok(Direct {
         video: v,
         audio: None,
