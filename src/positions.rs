@@ -85,6 +85,17 @@ impl Positions {
         self.dirty = true;
     }
 
+    /// Mark as fully watched (duration unknown → just flagged by a large position).
+    pub fn mark_watched(&mut self, id: &str, dur: Option<f64>) {
+        let d = dur.filter(|d| *d > 0.0).unwrap_or(1.0);
+        self.map.insert(id.to_string(), Entry { pos: d, dur: d, at: now() });
+        self.dirty = true;
+    }
+
+    pub fn forget(&mut self, id: &str) {
+        self.dirty |= self.map.remove(id).is_some();
+    }
+
     pub fn maybe_save(&mut self) {
         if self.dirty && self.last_save.elapsed() >= SAVE_EVERY {
             self.save();

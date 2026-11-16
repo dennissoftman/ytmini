@@ -423,6 +423,8 @@ struct RawEntry {
     uploader_url: Option<String>,
     ie_key: Option<String>,
     url: Option<String>,
+    view_count: Option<u64>,
+    description: Option<String>,
     #[serde(default)]
     thumbnails: Vec<RawThumb>,
 }
@@ -462,6 +464,9 @@ impl RawEntry {
             channel_url,
             is_playlist,
             thumb_id,
+            views: self.view_count,
+            // search results carry a ~150-char snippet; keep it short
+            description: self.description.map(|d| d.chars().take(200).collect()),
         })
     }
 }
@@ -481,6 +486,10 @@ pub struct Video {
     /// For playlists: the video whose thumbnail represents it.
     #[serde(default)]
     pub thumb_id: Option<String>,
+    #[serde(default)]
+    pub views: Option<u64>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 impl Video {
@@ -508,6 +517,22 @@ impl Video {
     pub fn url(&self) -> String {
         format!("https://www.youtube.com/watch?v={}", self.id)
     }
+    /// "1.2M views"
+    pub fn views_label(&self) -> Option<String> {
+        let n = self.views? as f64;
+        let s = if n >= 1e9 {
+            format!("{:.1}B", n / 1e9)
+        } else if n >= 1e6 {
+            format!("{:.1}M", n / 1e6)
+        } else if n >= 1e3 {
+            format!("{:.0}K", n / 1e3)
+        } else {
+            format!("{n}")
+        };
+        Some(format!("{} views", s.replace(".0", "")))
+    }
+
+
     /// `H:MM:SS` / `M:SS`, or `LIVE` when there's no duration.
     pub fn duration_label(&self) -> String {
         match self.duration {
@@ -1085,5 +1110,88 @@ mod live {
         assert!(height <= 480, "still at {height}p");
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Watch later (YouTube web API; yt-dlp can only read playlists)
+// ---------------------------------------------------------------------------
+
+/// Add or remove `video_id` in Watch later, as youtube.com does: a signed
+/// request with the session cookies. Blocking. Cookie values are only sent to
+/// youtube.com, never logged.
+pub fn set_watch_later(cookies: &Path, video_id: &str, add: bool) -> Result<()> {
+    use sha1::{Digest, Sha1};
+    let jar = fs::read_to_string(cookies).context("reading cookies")?;
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for line in jar.lines() {
+        let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 7 || line.starts_with('#') || !f[0].ends_with("youtube.com") {
+            continue;
+        }
+        if !pairs.iter().any(|(n, _)| n == f[5]) {
+            pairs.push((f[5].to_string(), f[6].to_string()));
+        }
+    }
+    let sapisid = ["SAPISID", "__Secure-3PAPISID"]
+        .iter()
+        .find_map(|n| pairs.iter().find(|(k, _)| k == n))
+        .map(|(_, v)| v.clone())
+        .context("not signed in (no SAPISID cookie)")?;
+    let origin = "https://www.youtube.com";
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let digest = Sha1::digest(format!("{ts} {sapisid} {origin}").as_bytes());
+    let hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    let cookie: String = pairs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ");
+    let action = if add {
+        serde_json::json!({"action": "ACTION_ADD_VIDEO", "addedVideoId": video_id})
+    } else {
+        serde_json::json!({"action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID", "removedVideoId": video_id})
+    };
+    let body = serde_json::json!({
+        "context": {"client": {"clientName": "WEB", "clientVersion": "2.20251101.00.00", "hl": "en"}},
+        "playlistId": "WL",
+        "actions": [action],
+    });
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(20)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut resp = agent
+        .post(format!("{origin}/youtubei/v1/browse/edit_playlist?prettyPrint=false"))
+        .header("Cookie", &cookie)
+        .header("Authorization", &format!("SAPISIDHASH {ts}_{hash}"))
+        .header("Origin", origin)
+        .header("X-Origin", origin)
+        .header("X-Goog-AuthUser", "0")
+        .header("Content-Type", "application/json")
+        .send(body.to_string())
+        .context("contacting YouTube")?;
+    let status = resp.status().as_u16();
+    let text = resp.body_mut().read_to_string().unwrap_or_default();
+    if status != 200 || !text.contains("STATUS_SUCCEEDED") {
+        bail!("YouTube refused the change (HTTP {status})");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod watch_later_live {
+    /// Adds a video to Watch later, checks it's listed, removes it again.
+    /// `cargo test -- --ignored watch_later_roundtrip --nocapture`
+    #[test]
+    #[ignore]
+    fn watch_later_roundtrip() {
+        let tools = super::Tools::locate().unwrap();
+        let cookies = super::config_dir().unwrap().join("cookies.txt");
+        let id = "jNQXAC9IVRw"; // "Me at the zoo"
+        super::set_watch_later(&cookies, id, true).unwrap();
+        let listed = super::fetch(&tools, &cookies, &super::Source::WatchLater, 0, 50).unwrap();
+        let found = listed.iter().any(|v| v.id == id);
+        super::set_watch_later(&cookies, id, false).unwrap();
+        eprintln!("listed after add: {found}");
+        assert!(found);
     }
 }

@@ -7,12 +7,13 @@ use crate::mpv;
 use crate::player::{self, Embedded, Surface};
 use crate::positions::Positions;
 use crate::signin::{self, Session};
-use crate::settings::{PlayerMode, Settings, ThumbQuality};
+use crate::theme::{accent, bg, card, card_hover, err, err_bg, on_accent, panel, sidebar, text, text_dim, thumb_bg, RADIUS};
+use crate::settings::{Density, PlayerMode, Settings, ThumbQuality};
 use crate::thumbs::{Thumbs, Variant};
 use crate::tray::{self, Tray, TrayEvent};
 use crate::yt::{self, Browser, Source, Tools, Video};
 use eframe::egui::{
-    self, text::LayoutJob, Align, Color32, CornerRadius, FontFamily, FontId, Key, Layout, Margin, RichText, Sense,
+    self, text::LayoutJob, Align, Align2, Color32, CornerRadius, FontId, Key, Layout, Margin, RichText, Sense,
     Stroke, StrokeKind, TextFormat, Vec2,
 };
 use std::{
@@ -28,21 +29,24 @@ use std::{
 
 // ---------- look ----------
 
-const ACCENT: Color32 = Color32::from_rgb(0xFF, 0x5C, 0x4D); // warm coral
-const BG: Color32 = Color32::from_rgb(0x0E, 0x0E, 0x12);
-const PANEL: Color32 = Color32::from_rgb(0x15, 0x15, 0x1B);
-const CARD: Color32 = Color32::from_rgb(0x1B, 0x1B, 0x23);
-const CARD_HOVER: Color32 = Color32::from_rgb(0x26, 0x26, 0x31);
-const TEXT: Color32 = Color32::from_rgb(0xEC, 0xEC, 0xF1);
-const TEXT_DIM: Color32 = Color32::from_rgb(0x9A, 0x9A, 0xA8);
-const ERR: Color32 = Color32::from_rgb(0xFF, 0x8A, 0x80);
 
-const CARD_MIN_W: f32 = 250.0;
 const GAP: f32 = 16.0;
-const CARD_PAD: f32 = 10.0;
-const TITLE_SIZE: f32 = 15.0;
-const META_SIZE: f32 = 13.0;
-const RADIUS: u8 = 12;
+
+/// Card sizes for a grid density.
+#[derive(Clone, Copy)]
+struct Metrics {
+    min_w: f32,
+    pad: f32,
+    title: f32,
+    meta: f32,
+}
+
+fn metrics(d: Density) -> Metrics {
+    match d {
+        Density::Compact => Metrics { min_w: 200.0, pad: 8.0, title: 13.0, meta: 11.5 },
+        Density::Comfortable => Metrics { min_w: 260.0, pad: 10.0, title: 14.5, meta: 12.5 },
+    }
+}
 
 const BASE_TABS: [Source; 5] =
     [Source::Feed, Source::Subscriptions, Source::WatchLater, Source::History, Source::Playlists];
@@ -82,6 +86,8 @@ enum Msg {
     ExternalProgress(String, f64, f64),
     /// Is the sign-in browser profile signed in to Google yet?
     SignInCheck(Result<bool, String>),
+    /// Watch later add (true) / remove finished for a video id.
+    WatchLater(bool, String, Result<String, String>),
 }
 
 #[derive(Default)]
@@ -132,6 +138,16 @@ enum CardAction {
     None,
     Open,
     Channel,
+    Quick(Quick),
+}
+
+/// Card menu (right-click or ⋯).
+#[derive(Clone, Copy)]
+enum Quick {
+    WatchLater(bool),
+    CopyLink,
+    OpenInBrowser,
+    Watched(bool),
 }
 
 struct Player {
@@ -157,6 +173,9 @@ pub struct App {
     /// Browser profiles for "Sign in with Google", most recent first.
     sessions: Vec<Session>,
     session_pick: usize,
+    /// For the fade-in when the grid changes.
+    view_shown: Source,
+    view_since: std::time::Instant,
     /// Where the import in flight comes from, saved on success for "Refresh session".
     import_source: Option<(String, std::path::PathBuf)>,
     custom_spec: String,
@@ -225,8 +244,7 @@ impl Smoke {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let ctx = &cc.egui_ctx;
-        setup_style(ctx);
-        add_fallback_fonts(ctx);
+        crate::theme::init(ctx);
 
         let (tx, rx) = channel();
         let cookies = yt::cookie_file().unwrap_or_else(|_| PathBuf::from("cookies.txt"));
@@ -244,6 +262,8 @@ impl App {
             sessions: signin::sessions(),
             session_pick: 0,
             import_source: None,
+            view_shown: Source::Feed,
+            view_since: std::time::Instant::now(),
             custom_spec: String::new(),
             importing: None,
             import_error: None,
@@ -577,6 +597,20 @@ impl App {
                     }
                 }
                 Msg::SignInCheck(r) => self.on_signin_check(ctx, r),
+                Msg::WatchLater(add, id, r) => {
+                    match r {
+                        Ok(msg) => self.status = Some((msg, false)),
+                        Err(e) => self.status = Some((e, true)),
+                    }
+                    // keep the Watch later tab in step without refetching
+                    if let Some(tab) = self.tabs.get_mut(&Source::WatchLater) {
+                        if !add {
+                            tab.videos.retain(|v| v.id != id);
+                        } else {
+                            tab.loaded_once = false; // refetch next time it's opened
+                        }
+                    }
+                }
             }
         }
     }
@@ -746,9 +780,9 @@ impl App {
     fn ui_missing(&mut self, ui: &mut egui::Ui, missing: &yt::Missing) {
         let mut retry = false;
         centered_column(ui, 520.0, |ui| {
-            ui.label(RichText::new("ytmini").size(34.0).strong().color(ACCENT));
+            ui.label(RichText::new("ytmini").size(34.0).strong().color(accent()));
             ui.add_space(8.0);
-            ui.label(RichText::new("No video player found").size(20.0).color(TEXT));
+            ui.label(RichText::new("No video player found").size(20.0).color(text()));
             ui.add_space(12.0);
             let _ = missing;
             ui.label("This build of ytmini doesn't include libmpv, and mpv isn't installed. Install it with:");
@@ -767,16 +801,16 @@ impl App {
     fn ui_setup(&mut self, ui: &mut egui::Ui) {
         let mut retry = false;
         centered_column(ui, 520.0, |ui| {
-            ui.label(RichText::new("ytmini").size(34.0).strong().color(ACCENT));
+            ui.label(RichText::new("ytmini").size(34.0).strong().color(accent()));
             ui.add_space(8.0);
-            ui.label(RichText::new("Getting ready").size(20.0).color(TEXT));
+            ui.label(RichText::new("Getting ready").size(20.0).color(text()));
             ui.add_space(6.0);
             ui.label(
                 RichText::new(
                     "Downloading yt-dlp (lists videos, ~55 MB) and deno (solves YouTube's checks, ~40 MB) \
                      from their official releases. Checksums are verified; yt-dlp keeps itself up to date.",
                 )
-                .color(TEXT_DIM),
+                .color(text_dim()),
             );
             ui.add_space(16.0);
             if let Some(a) = &self.deps.activity {
@@ -810,31 +844,31 @@ impl App {
 
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             centered_column(ui, 560.0, |ui| {
-                ui.label(RichText::new("ytmini").size(34.0).strong().color(ACCENT));
+                ui.label(RichText::new("ytmini").size(34.0).strong().color(accent()));
                 ui.add_space(4.0);
-                ui.label(RichText::new("Sign in to YouTube").size(20.0).color(TEXT));
+                ui.label(RichText::new("Sign in to YouTube").size(20.0).color(text()));
                 ui.add_space(14.0);
                 google = self.ui_google_signin(ui, busy);
                 ui.add_space(22.0);
-                ui.label(RichText::new("Or use a browser you're already signed in to").strong().color(TEXT));
-                ui.label(RichText::new("Cookies are stored only on this computer.").small().color(TEXT_DIM));
+                ui.label(RichText::new("Or use a browser you're already signed in to").strong().color(text()));
+                ui.label(RichText::new("Cookies are stored only on this computer.").small().color(text_dim()));
                 ui.add_space(10.0);
 
                 if browsers.is_empty() {
-                    ui.label(RichText::new("No browsers detected — type a yt-dlp spec below.").color(TEXT_DIM));
+                    ui.label(RichText::new("No browsers detected — type a yt-dlp spec below.").color(text_dim()));
                 }
                 for b in &browsers {
                     egui::Frame::new()
-                        .fill(CARD)
+                        .fill(card())
                         .corner_radius(RADIUS)
                         .inner_margin(Margin::symmetric(14, 10))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
-                                    ui.label(RichText::new(b.name).size(16.0).strong().color(TEXT));
+                                    ui.label(RichText::new(b.name).size(16.0).strong().color(text()));
                                     ui.add(
-                                        egui::Label::new(RichText::new(yt::browser_note(b.id)).size(12.5).color(TEXT_DIM))
+                                        egui::Label::new(RichText::new(yt::browser_note(b.id)).size(12.5).color(text_dim()))
                                             .wrap(),
                                     );
                                 });
@@ -849,7 +883,7 @@ impl App {
                 }
 
                 ui.add_space(8.0);
-                ui.label(RichText::new("Or a yt-dlp browser spec").color(TEXT_DIM));
+                ui.label(RichText::new("Or a yt-dlp browser spec").color(text_dim()));
                 ui.horizontal(|ui| {
                     let r = ui.add_enabled(
                         !busy,
@@ -865,7 +899,7 @@ impl App {
                     }
                 });
                 if !self.custom_spec.trim().is_empty() {
-                    ui.label(RichText::new(yt::browser_note(&self.custom_spec)).size(12.5).color(TEXT_DIM));
+                    ui.label(RichText::new(yt::browser_note(&self.custom_spec)).size(12.5).color(text_dim()));
                 }
 
                 ui.add_space(16.0);
@@ -877,13 +911,13 @@ impl App {
                 }
                 if let Some(err) = &self.import_error {
                     egui::Frame::new()
-                        .fill(Color32::from_rgb(0x33, 0x18, 0x1A))
+                        .fill(err_bg())
                         .corner_radius(RADIUS)
                         .inner_margin(Margin::same(12))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            ui.label(RichText::new("Import failed").strong().color(ERR));
-                            ui.add(egui::Label::new(RichText::new(err).monospace().size(12.0).color(TEXT)).wrap());
+                            ui.label(RichText::new("Import failed").strong().color(crate::theme::err()));
+                            ui.add(egui::Label::new(RichText::new(err).monospace().size(12.0).color(text())).wrap());
                         });
                 }
                 if can_cancel {
@@ -934,59 +968,88 @@ impl App {
         let mut refresh = refresh_key;
         let mut switch_to: Option<Source> = None;
         let mut search: Option<String> = None;
-        let mut reimport = false;
 
-        // ----- top bar -----
+        // ----- sidebar -----
+        let narrow = ctx.content_rect().width() < 760.0;
+        let collapsed = self.settings.sidebar_collapsed || narrow;
+        egui::Panel::left("nav")
+            .resizable(false)
+            .exact_size(if collapsed { 60.0 } else { 208.0 })
+            .frame(egui::Frame::new().fill(sidebar()).inner_margin(Margin { left: 10, right: 10, top: 14, bottom: 10 }))
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                let item = |ui: &mut egui::Ui, icon: Icon, label: &str, selected: bool| -> bool {
+                    nav_item(ui, icon, label, selected, collapsed).clicked()
+                };
+                ui.add_space(2.0);
+                if !collapsed {
+                    ui.label(RichText::new("ytmini").size(17.0).strong().color(text()));
+                    ui.add_space(12.0);
+                } else {
+                    ui.add_space(4.0);
+                }
+                let home_of = |t: &Source| t == &self.active || (self.active.is_page() && self.nav_back.first() == Some(t));
+                for t in BASE_TABS {
+                    if t == Source::WatchLater && !collapsed {
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("Library").small().color(text_dim()));
+                        ui.add_space(2.0);
+                    }
+                    if item(ui, nav_icon(&t), &t.label(), home_of(&t)) {
+                        switch_to = Some(t.clone());
+                    }
+                }
+                if let Some(s) = self.last_search.clone() {
+                    ui.add_space(10.0);
+                    let label = match &s {
+                        Source::Search(q) => format!("“{q}”"),
+                        other => other.label(),
+                    };
+                    if item(ui, Icon::Search, &label, home_of(&s)) {
+                        switch_to = Some(s);
+                    }
+                }
+                ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+                    if !narrow {
+                        let (icon, tip) = if collapsed { (Icon::Expand, "Expand sidebar") } else { (Icon::Collapse, "Collapse sidebar") };
+                        if nav_item(ui, icon, "Collapse", false, collapsed).on_hover_text(tip).clicked() {
+                            self.settings.sidebar_collapsed = !self.settings.sidebar_collapsed;
+                        }
+                    }
+                    if item(ui, Icon::Gear, "Settings", self.show_settings) {
+                        self.show_settings = !self.show_settings;
+                    }
+                });
+            });
+
+        // ----- top bar: search + refresh -----
         egui::Panel::top("top")
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(16, 10)))
+            .frame(egui::Frame::new().fill(bg()).inner_margin(Margin { left: 20, right: 16, top: 12, bottom: 8 }))
             .show_separator_line(false)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("ytmini").size(20.0).strong().color(ACCENT));
-                    ui.add_space(14.0);
-                    let mut tabs: Vec<Source> = BASE_TABS.to_vec();
-                    if let Some(s) = &self.last_search {
-                        tabs.push(s.clone());
+                    let w = (ui.available_width() - 60.0).clamp(160.0, 520.0);
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut self.search_query)
+                            .hint_text("Search YouTube")
+                            .desired_width(w)
+                            .margin(Margin::symmetric(12, 7)),
+                    );
+                    if self.focus_search {
+                        r.request_focus();
+                        self.focus_search = false;
                     }
-                    for t in tabs {
-                        let selected = t == self.active || (self.active.is_page() && self.nav_back.first() == Some(&t));
-                        if tab_button(ui, &t.label(), selected).clicked() {
-                            switch_to = Some(t);
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        let q = self.search_query.trim();
+                        if !q.is_empty() {
+                            search = Some(q.to_string());
                         }
                     }
-
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.menu_button(RichText::new("☰").size(18.0), |ui| {
-                            if ui.button("Settings…").clicked() {
-                                self.show_settings = true;
-                                ui.close();
-                            }
-                            if ui.button("Re-import cookies…").clicked() {
-                                reimport = true;
-                                ui.close();
-                            }
-                        })
-                        .response
-                        .on_hover_text("Settings");
-                        if ui.add(egui::Button::new(RichText::new("↻").size(19.0)).frame(false)).on_hover_text("Refresh (⌘R)").clicked() {
+                        let b = egui::Button::new(RichText::new("↻").size(18.0).color(text_dim())).frame(false);
+                        if ui.add(b).on_hover_text("Refresh (⌘R)").clicked() {
                             refresh = true;
-                        }
-                        ui.add_space(6.0);
-                        let r = ui.add(
-                            egui::TextEdit::singleline(&mut self.search_query)
-                                .hint_text("Search YouTube")
-                                .desired_width(260.0)
-                                .margin(Margin::symmetric(10, 6)),
-                        );
-                        if self.focus_search {
-                            r.request_focus();
-                            self.focus_search = false;
-                        }
-                        if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                            let q = self.search_query.trim();
-                            if !q.is_empty() {
-                                search = Some(q.to_string());
-                            }
                         }
                     });
                 });
@@ -996,7 +1059,7 @@ impl App {
         let active_loading = self.tabs.get(&self.active).is_some_and(|t| t.loading);
         let mut stop = false;
         egui::Panel::bottom("status")
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(16, 6)))
+            .frame(egui::Frame::new().fill(panel()).inner_margin(Margin::symmetric(16, 6)))
             .show_separator_line(false)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -1007,19 +1070,19 @@ impl App {
                             Some(t) => format!("Updating… (showing results from {})", ago(t)),
                             None => "Loading…".into(),
                         };
-                        ui.label(RichText::new(msg).color(TEXT_DIM));
+                        ui.label(RichText::new(msg).color(text_dim()));
                     } else if let Some(p) = &self.player {
-                        ui.label(RichText::new("▶").color(ACCENT));
-                        ui.label(RichText::new(format!("Playing: {}", p.title)).color(TEXT));
-                        ui.label(RichText::new(&p.profile).color(TEXT_DIM));
+                        ui.label(RichText::new("▶").color(accent()));
+                        ui.label(RichText::new(format!("Playing: {}", p.title)).color(text()));
+                        ui.label(RichText::new(&p.profile).color(text_dim()));
                         if ui.small_button("Stop").clicked() {
                             stop = true;
                         }
                     } else if let Some((msg, is_err)) = &self.status {
-                        ui.label(RichText::new(msg).color(if *is_err { ERR } else { TEXT_DIM }));
+                        ui.label(RichText::new(msg).color(if *is_err { err() } else { text_dim() }));
                     } else {
                         let n = self.tabs.get(&self.active).map_or(0, |t| t.videos.len());
-                        ui.label(RichText::new(format!("{n} videos")).color(TEXT_DIM));
+                        ui.label(RichText::new(format!("{n} videos")).color(text_dim()));
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let power = if self.power.saver {
@@ -1030,7 +1093,7 @@ impl App {
                             ""
                         };
                         if !power.is_empty() {
-                            ui.label(RichText::new(power).small().color(TEXT_DIM))
+                            ui.label(RichText::new(power).small().color(text_dim()))
                                 .on_hover_text("Auto quality lowers resolution/frame rate to save power");
                         }
                     });
@@ -1044,6 +1107,11 @@ impl App {
         self.ui_page_header(ui);
         let mut clicked: Option<Video> = None;
         let mut open_channel: Option<Video> = None;
+        let mut quick: Option<(Quick, Video)> = None;
+        if self.active != self.view_shown {
+            self.view_shown = self.active.clone();
+            self.view_since = std::time::Instant::now();
+        }
         let mut more = false;
         let mut reimport_from_empty = false;
         egui::CentralPanel::no_frame().show(ui, |ui| {
@@ -1053,12 +1121,28 @@ impl App {
             let positions = &self.positions;
             let Some(tab) = self.tabs.get_mut(&source) else { return };
             let avail_w = ui.available_width() - 2.0 * GAP;
+            let m = metrics(self.settings.density);
+            let cols = (((avail_w + GAP) / (m.min_w + GAP)).floor() as usize).max(1);
+            let card_w = (avail_w - GAP * (cols as f32 - 1.0)) / cols as f32;
+            let thumb_h = card_w * 9.0 / 16.0;
+            let title_h = ui.fonts_mut(|f| f.row_height(&FontId::proportional(m.title)));
+            let meta_h = ui.fonts_mut(|f| f.row_height(&FontId::proportional(m.meta)));
+            let card_h = thumb_h + m.pad + title_h * 2.0 + 4.0 + meta_h + m.pad;
 
+            // Fade the grid in after switching tabs/pages.
+            let fade = (self.view_since.elapsed().as_secs_f32() / 0.18).min(1.0);
+            if fade < 1.0 {
+                ui.multiply_opacity(fade);
+                ui.ctx().request_repaint();
+            }
+
+            if tab.videos.is_empty() && tab.loading {
+                skeleton_grid(ui, cols, Vec2::new(card_w, card_h), thumb_h);
+                return;
+            }
             if tab.videos.is_empty() {
                 centered_column(ui, 520.0, |ui| {
-                    if tab.loading {
-                        ui.spinner();
-                    } else if let Some(e) = &tab.error {
+                    if let Some(e) = &tab.error {
                         error_box(ui, e);
                         if source == Source::Feed {
                             ui.add_space(8.0);
@@ -1068,26 +1152,23 @@ impl App {
                         }
                     } else if tab.loaded_once {
                         if source == Source::Feed {
-                            ui.label(RichText::new("Your feed came back empty").size(18.0).color(TEXT));
+                            ui.label(RichText::new("Your feed came back empty").size(18.0).color(text()));
                             ui.label(
                                 RichText::new("That usually means the cookies expired or were rotated.")
-                                    .color(TEXT_DIM),
+                                    .color(text_dim()),
                             );
                             ui.add_space(10.0);
                             if accent_button(ui, "Re-import cookies").clicked() {
                                 reimport_from_empty = true;
                             }
                         } else {
-                            ui.label(RichText::new("Nothing here.").color(TEXT_DIM));
+                            ui.label(RichText::new("Nothing here.").color(text_dim()));
                         }
                     }
                 });
                 return;
             }
 
-            let cols = (((avail_w + GAP) / (CARD_MIN_W + GAP)).floor() as usize).max(1);
-            let card_w = (avail_w - GAP * (cols as f32 - 1.0)) / cols as f32;
-            let thumb_h = card_w * 9.0 / 16.0;
             let variant = match self.settings.thumbs {
                 ThumbQuality::Standard => Variant::Standard,
                 ThumbQuality::High => Variant::High,
@@ -1095,9 +1176,6 @@ impl App {
                 ThumbQuality::Auto if card_w * ui.ctx().pixels_per_point() > 380.0 => Variant::High,
                 ThumbQuality::Auto => Variant::Standard,
             };
-            let title_h = ui.fonts_mut(|f| f.row_height(&FontId::proportional(TITLE_SIZE)));
-            let meta_h = ui.fonts_mut(|f| f.row_height(&FontId::proportional(META_SIZE)));
-            let card_h = thumb_h + CARD_PAD + title_h * 2.0 + 4.0 + meta_h + CARD_PAD;
             let video_rows = tab.videos.len().div_ceil(cols);
             let show_footer = !tab.exhausted || tab.error.is_some();
             let rows = video_rows + usize::from(show_footer);
@@ -1123,10 +1201,11 @@ impl App {
                             for v in tab.videos.iter().skip(row * cols).take(cols) {
                                 let playing = playing_id.as_deref() == Some(v.id.as_str());
                                 let progress = (!v.is_playlist).then(|| positions.get(&v.id)).flatten().copied();
-                                let card = CardInfo { size: Vec2::new(card_w, card_h), thumb_h, playing, progress };
+                                let card = CardInfo { size: Vec2::new(card_w, card_h), thumb_h, playing, progress, m, in_watch_later: source == Source::WatchLater };
                                 match video_card(ui, thumbs, variant, v, card) {
                                     CardAction::Open => clicked = Some(v.clone()),
                                     CardAction::Channel => open_channel = Some(v.clone()),
+                                    CardAction::Quick(q) => quick = Some((q, v.clone())),
                                     CardAction::None => {}
                                 }
                             }
@@ -1170,6 +1249,9 @@ impl App {
         if more {
             self.load_more(&ctx, self.active.clone());
         }
+        if let Some((q, v)) = quick {
+            self.quick_action(&ctx, q, &v);
+        }
         if let Some(q) = search {
             let s = Source::Search(q);
             self.tabs.remove(&s);
@@ -1190,7 +1272,7 @@ impl App {
         if refresh {
             self.load(&ctx, self.active.clone(), true);
         }
-        if reimport || reimport_from_empty {
+        if reimport_from_empty {
             self.import_error = None;
             self.browsers = yt::detect_browsers();
             self.sessions = signin::sessions();
@@ -1209,6 +1291,33 @@ enum GoogleAction {
 }
 
 impl App {
+    fn quick_action(&mut self, ctx: &egui::Context, q: Quick, v: &Video) {
+        let url = if v.is_playlist { format!("https://www.youtube.com/playlist?list={}", v.id) } else { v.url() };
+        match q {
+            Quick::CopyLink => {
+                ctx.copy_text(url);
+                self.status = Some(("Link copied.".into(), false));
+            }
+            Quick::OpenInBrowser => {
+                if let Err(e) = open_url(&url) {
+                    self.status = Some((format!("Couldn't open the browser: {e}"), true));
+                }
+            }
+            Quick::Watched(true) => self.positions.mark_watched(&v.id, v.duration),
+            Quick::Watched(false) => self.positions.forget(&v.id),
+            Quick::WatchLater(add) => {
+                let (tx, ctx, cookies, id, title) = (self.tx.clone(), ctx.clone(), self.cookies.clone(), v.id.clone(), v.title().to_string());
+                std::thread::spawn(move || {
+                    let r = yt::set_watch_later(&cookies, &id, add)
+                        .map(|()| if add { format!("Saved to Watch later: {title}") } else { format!("Removed from Watch later: {title}") })
+                        .map_err(|e| format!("Watch later: {e:#}"));
+                    let _ = tx.send(Msg::WatchLater(add, id, r));
+                    ctx.request_repaint();
+                });
+            }
+        }
+    }
+
     /// Go to a channel/playlist page, remembering where we came from.
     fn open_page(&mut self, ctx: &egui::Context, page: Source) {
         if self.active == page {
@@ -1227,7 +1336,7 @@ impl App {
         let mut back = false;
         let mut switch: Option<Source> = None;
         egui::Panel::top("page")
-            .frame(egui::Frame::new().fill(BG).inner_margin(Margin { left: 16, right: 16, top: 12, bottom: 4 }))
+            .frame(egui::Frame::new().fill(bg()).inner_margin(Margin { left: 16, right: 16, top: 12, bottom: 4 }))
             .show_separator_line(false)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -1239,8 +1348,8 @@ impl App {
                         Source::Playlist { title, .. } => ("Playlist", title.clone()),
                         other => ("Channel", other.label()),
                     };
-                    ui.label(RichText::new(kind).small().color(ACCENT));
-                    ui.add(egui::Label::new(RichText::new(title).size(20.0).strong().color(TEXT)).truncate());
+                    ui.label(RichText::new(kind).small().color(accent()));
+                    ui.add(egui::Label::new(RichText::new(title).size(20.0).strong().color(text())).truncate());
                     if let Source::Channel { url, name } | Source::ChannelPlaylists { url, name } = &self.active {
                         let (url, name) = (url.clone(), name.clone());
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1294,11 +1403,11 @@ impl App {
 
     fn ui_google_signin(&mut self, ui: &mut egui::Ui, busy: bool) -> GoogleAction {
         let mut act = GoogleAction::None;
-        egui::Frame::new().fill(CARD).corner_radius(RADIUS).inner_margin(Margin::same(16)).show(ui, |ui| {
+        egui::Frame::new().fill(card()).corner_radius(RADIUS).inner_margin(Margin::same(16)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             if self.sessions.is_empty() {
-                ui.label(RichText::new("Sign in with Google").size(16.0).strong().color(TEXT));
-                ui.label(RichText::new("Needs Firefox or a Chromium-based browser (Chrome, Brave, Edge…).").color(TEXT_DIM));
+                ui.label(RichText::new("Sign in with Google").size(16.0).strong().color(text()));
+                ui.label(RichText::new("Needs Firefox or a Chromium-based browser (Chrome, Brave, Edge…).").color(text_dim()));
                 return;
             }
             if let Some(s) = &self.signin {
@@ -1306,22 +1415,22 @@ impl App {
                 if !s.opened {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(RichText::new(format!("Checking {}…", s.session.label())).color(TEXT));
+                        ui.label(RichText::new(format!("Checking {}…", s.session.label())).color(text()));
                     });
                     return;
                 }
-                ui.label(RichText::new(format!("Sign in to Google in {b}")).size(16.0).strong().color(TEXT));
+                ui.label(RichText::new(format!("Sign in to Google in {b}")).size(16.0).strong().color(text()));
                 ui.label(
                     RichText::new(format!(
                         "We opened Google's sign-in page in {b}. Once you're signed in, ytmini picks the \
                          session up by itself — leave {b} open."
                     ))
-                    .color(TEXT_DIM),
+                    .color(text_dim()),
                 );
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(RichText::new("Waiting for sign-in…").color(TEXT_DIM));
+                    ui.label(RichText::new("Waiting for sign-in…").color(text_dim()));
                     ui.add_space(8.0);
                     if accent_button(ui, "I've signed in").clicked() {
                         act = GoogleAction::CheckNow;
@@ -1336,7 +1445,7 @@ impl App {
             let chosen = &self.sessions[pick];
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("Sign in with Google").size(16.0).strong().color(TEXT));
+                    ui.label(RichText::new("Sign in with Google").size(16.0).strong().color(text()));
                     let mut note = format!(
                         "Uses your {} session. If you're not signed in there yet, Google's sign-in page opens in it.",
                         chosen.browser
@@ -1344,7 +1453,7 @@ impl App {
                     if !chosen.firefox && cfg!(target_os = "macos") {
                         note.push_str(" macOS asks for Keychain access once — click Allow.");
                     }
-                    ui.add(egui::Label::new(RichText::new(note).size(12.5).color(TEXT_DIM)).wrap());
+                    ui.add(egui::Label::new(RichText::new(note).size(12.5).color(text_dim())).wrap());
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.add_enabled(!busy, accent_btn("Sign in")).clicked() {
@@ -1490,7 +1599,7 @@ impl App {
                 fullscreen,
                 quality: self.settings.quality,
                 screen_cap: self.screen_cap,
-                accent: ACCENT,
+                accent: accent(),
             };
             let act = p.ui(ui, view);
             back |= act.back;
@@ -1555,9 +1664,17 @@ impl App {
                         self.screen_cap
                     ))
                     .small()
-                    .color(TEXT_DIM),
+                    .color(text_dim()),
                 );
 
+                ui.add_space(10.0);
+                section(ui, "Layout");
+                ui.horizontal(|ui| {
+                    ui.label("Grid");
+                    ui.selectable_value(&mut s.density, Density::Comfortable, "Comfortable");
+                    ui.selectable_value(&mut s.density, Density::Compact, "Compact");
+                });
+                ui.checkbox(&mut s.sidebar_collapsed, "Sidebar: icons only");
                 ui.add_space(10.0);
                 section(ui, "Thumbnails");
                 ui.horizontal(|ui| {
@@ -1565,7 +1682,7 @@ impl App {
                     ui.selectable_value(&mut s.thumbs, ThumbQuality::Standard, "Standard · 320p");
                     ui.selectable_value(&mut s.thumbs, ThumbQuality::High, "High · 640p");
                 });
-                ui.label(RichText::new("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (Retina) screens.").small().color(TEXT_DIM));
+                ui.label(RichText::new("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (Retina) screens.").small().color(text_dim()));
 
                 ui.add_space(10.0);
                 section(ui, "Disk cache");
@@ -1598,21 +1715,21 @@ impl App {
                         crate::settings::DEFAULT_CACHE_DAYS
                     ))
                     .small()
-                    .color(TEXT_DIM),
+                    .color(text_dim()),
                 );
 
                 ui.add_space(10.0);
                 if self.tray.is_some() {
                     section(ui, "Window");
                     ui.checkbox(&mut s.close_to_tray, "Closing the window keeps ytmini in the menu bar");
-                    ui.label(RichText::new("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.").small().color(TEXT_DIM));
+                    ui.label(RichText::new("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.").small().color(text_dim()));
                     ui.add_space(10.0);
                 }
                 section(ui, "Components");
                 egui::Grid::new("versions").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
                     for (k, v) in &self.deps.versions {
                         ui.label(k);
-                        ui.label(RichText::new(v).color(TEXT_DIM));
+                        ui.label(RichText::new(v).color(text_dim()));
                         ui.end_row();
                     }
                 });
@@ -1803,7 +1920,7 @@ impl App {
 }
 
 fn section(ui: &mut egui::Ui, title: &str) {
-    ui.label(RichText::new(title).strong().size(15.0).color(ACCENT));
+    ui.label(RichText::new(title).strong().size(15.0).color(accent()));
     ui.add_space(2.0);
 }
 
@@ -1820,6 +1937,7 @@ fn ago(unix: u64) -> String {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        crate::theme::update(ctx);
         self.drive_smoke(ctx, frame);
         self.handle_messages(ctx);
         self.thumbs.poll(ctx);
@@ -1865,7 +1983,7 @@ impl eframe::App for App {
         if self.pending_play.is_some() {
             self.start_embedded(&ctx, frame);
         }
-        egui::Frame::new().fill(BG).show(ui, |ui| {
+        egui::Frame::new().fill(bg()).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
             match &self.screen {
                 Screen::MissingTools(m) => {
@@ -1909,38 +2027,44 @@ struct CardInfo {
     thumb_h: f32,
     playing: bool,
     progress: Option<crate::positions::Entry>,
+    m: Metrics,
+    in_watch_later: bool,
 }
 
 fn video_card(ui: &mut egui::Ui, thumbs: &mut Thumbs, variant: Variant, v: &Video, info: CardInfo) -> CardAction {
-    let CardInfo { size, thumb_h, playing, progress } = info;
+    let CardInfo { size, thumb_h, playing, progress, m, in_watch_later } = info;
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if !ui.is_rect_visible(rect) {
         return CardAction::None;
     }
-    let hover = ui.ctx().animate_bool(resp.id, resp.hovered());
+    let ctx = ui.ctx().clone();
+    let hover = ctx.animate_bool_with_time(resp.id, resp.hovered() || resp.context_menu_opened(), 0.12);
     let painter = ui.painter_at(rect.expand(2.0));
     let r = CornerRadius::same(RADIUS);
-    painter.rect_filled(rect, r, lerp_color(CARD, CARD_HOVER, hover));
+    painter.rect_filled(rect, r, lerp_color(card(), card_hover(), hover));
 
-    // thumbnail
+    // thumbnail (fades in when it arrives; already-cached ones show at once)
     let thumb = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width(), thumb_h));
     let tr = CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 };
-    painter.rect_filled(thumb, tr, Color32::from_rgb(0x24, 0x24, 0x2D));
+    painter.rect_filled(thumb, tr, thumb_bg());
     let thumb_video = if v.is_playlist { v.thumb_id.as_deref() } else { Some(v.id.as_str()) };
     let watched = progress.is_some_and(|p| p.watched());
-    if let Some(tex) = thumb_video.and_then(|id| thumbs.get(id, variant)) {
+    let tex = thumb_video.and_then(|id| thumbs.get(id, variant));
+    let shown = ctx.animate_bool_with_time(resp.id.with("thumb"), tex.is_some(), 0.25);
+    if let Some(tex) = tex {
+        let base = if watched { Color32::from_gray(140) } else { Color32::WHITE };
         egui::Image::from_texture(egui::load::SizedTexture::from_handle(tex))
             .corner_radius(tr)
-            .tint(if watched { Color32::from_gray(150) } else { Color32::WHITE })
+            .tint(base.gamma_multiply(shown))
             .paint_at(ui, thumb);
     }
 
     // watch progress: thin accent bar along the bottom of the thumbnail
     if let Some(f) = progress.and_then(|p| p.fraction()).filter(|f| *f > 0.01) {
-        let track = egui::Rect::from_min_max(egui::pos2(thumb.left(), thumb.bottom() - 4.0), thumb.right_bottom());
-        painter.rect_filled(track, 0, Color32::from_white_alpha(60));
+        let track = egui::Rect::from_min_max(egui::pos2(thumb.left(), thumb.bottom() - 3.0), thumb.right_bottom());
+        painter.rect_filled(track, 0, Color32::from_white_alpha(70));
         let done = egui::Rect::from_min_max(track.min, egui::pos2(track.left() + track.width() * f, track.bottom()));
-        painter.rect_filled(done, 0, ACCENT);
+        painter.rect_filled(done, 0, accent());
     }
 
     // duration / playlist badge
@@ -1952,51 +2076,96 @@ fn video_card(ui: &mut egui::Ui, thumbs: &mut Thumbs, variant: Variant, v: &Vide
         v.duration_label()
     };
     let live = dur == "LIVE";
-    let g = painter.layout_no_wrap(dur, FontId::proportional(12.0), Color32::WHITE);
+    let g = painter.layout_no_wrap(dur, FontId::proportional(11.5), Color32::WHITE);
     let badge = egui::Rect::from_min_size(
-        thumb.right_bottom() - g.size() - Vec2::new(14.0, 10.0),
+        thumb.right_bottom() - g.size() - Vec2::new(12.0, 10.0),
         g.size() + Vec2::new(8.0, 4.0),
     );
-    painter.rect_filled(badge, 5, if live { ACCENT } else { Color32::from_black_alpha(200) });
+    painter.rect_filled(badge, 4, if live { Color32::from_rgb(0xE5, 0x2D, 0x27) } else { Color32::from_black_alpha(190) });
     painter.galley(badge.min + Vec2::new(4.0, 2.0), g, Color32::WHITE);
 
-    // title (max 2 lines) + channel
-    let text_w = rect.width() - 2.0 * CARD_PAD;
+    // title (max 2 lines)
+    let text_w = rect.width() - 2.0 * m.pad;
     let mut job = LayoutJob::single_section(
         v.title().to_string(),
-        TextFormat { font_id: FontId::proportional(TITLE_SIZE), color: TEXT, ..Default::default() },
+        TextFormat { font_id: FontId::proportional(m.title), color: text(), ..Default::default() },
     );
     job.wrap.max_width = text_w;
     job.wrap.max_rows = 2;
     job.wrap.break_anywhere = false;
     job.wrap.overflow_character = Some('…');
     let title = painter.layout_job(job);
-    let title_pos = egui::pos2(rect.min.x + CARD_PAD, thumb.max.y + CARD_PAD);
-    painter.galley(title_pos, title, TEXT);
+    let title_pos = egui::pos2(rect.min.x + m.pad, thumb.max.y + m.pad);
+    painter.galley(title_pos, title, text());
 
+    // channel · views
+    let views = v.views_label().map(|s| format!("  ·  {s}")).unwrap_or_default();
+    let views_g = painter.layout_no_wrap(views, FontId::proportional(m.meta), text_dim());
     let mut cjob = LayoutJob::single_section(
         v.channel().to_string(),
-        TextFormat { font_id: FontId::proportional(META_SIZE), color: TEXT_DIM, ..Default::default() },
+        TextFormat { font_id: FontId::proportional(m.meta), color: text_dim(), ..Default::default() },
     );
-    cjob.wrap.max_width = text_w;
+    cjob.wrap.max_width = (text_w - views_g.size().x).max(40.0);
     cjob.wrap.max_rows = 1;
     cjob.wrap.overflow_character = Some('…');
     let chan = painter.layout_job(cjob);
-    let chan_rect = egui::Rect::from_min_size(egui::pos2(title_pos.x, rect.max.y - CARD_PAD - chan.size().y), chan.size());
+    let chan_rect = egui::Rect::from_min_size(egui::pos2(title_pos.x, rect.max.y - m.pad - chan.size().y), chan.size());
     // The channel name is its own link (when we know the channel's URL).
     let chan_resp = (v.channel_url.is_some() && !v.channel().is_empty())
         .then(|| ui.interact(chan_rect.expand(2.0), resp.id.with("channel"), Sense::click()));
     let chan_hover = chan_resp.as_ref().is_some_and(|r| r.hovered());
-    painter.galley(chan_rect.min, chan, if chan_hover { TEXT } else { TEXT_DIM });
+    painter.galley(chan_rect.min, chan, if chan_hover { text() } else { text_dim() });
+    painter.galley(egui::pos2(chan_rect.right(), chan_rect.top()), views_g, text_dim());
     if chan_hover {
-        painter.line_segment([chan_rect.left_bottom(), chan_rect.right_bottom()], Stroke::new(1.0, TEXT_DIM));
+        painter.line_segment([chan_rect.left_bottom(), chan_rect.right_bottom()], Stroke::new(1.0, text_dim()));
     }
 
-    // outline: accent when playing, faint accent on hover
+    // outline when playing
     if playing {
-        painter.rect_stroke(rect, r, Stroke::new(2.0, ACCENT), StrokeKind::Outside);
-    } else if hover > 0.0 {
-        painter.rect_stroke(rect, r, Stroke::new(1.0, ACCENT.gamma_multiply(0.5 * hover)), StrokeKind::Outside);
+        painter.rect_stroke(rect, r, Stroke::new(2.0, accent()), StrokeKind::Outside);
+    }
+
+    // ⋯ menu button on hover, top-right of the thumbnail
+    let mut action = CardAction::None;
+    let menu_rect = egui::Rect::from_center_size(thumb.right_top() + Vec2::new(-20.0, 20.0), Vec2::splat(28.0));
+    let menu_resp = ui.interact(menu_rect, resp.id.with("menu"), Sense::click());
+    let menu_open = egui::Popup::is_id_open(&ctx, egui::Popup::default_response_id(&menu_resp));
+    if hover > 0.0 || menu_open {
+        let a = if menu_open { 1.0 } else { hover };
+        let fill = Color32::from_black_alpha(if menu_resp.hovered() { 210 } else { 150 }).gamma_multiply(a);
+        painter.circle_filled(menu_rect.center(), 13.0, fill);
+        painter.text(menu_rect.center(), Align2::CENTER_CENTER, "⋯", FontId::proportional(16.0), Color32::WHITE.gamma_multiply(a));
+    }
+    let menu = |ui: &mut egui::Ui, action: &mut CardAction| {
+        ui.set_min_width(190.0);
+        if !v.is_playlist {
+            if in_watch_later {
+                if ui.button("Remove from Watch later").clicked() {
+                    *action = CardAction::Quick(Quick::WatchLater(false));
+                }
+            } else if ui.button("Save to Watch later").clicked() {
+                *action = CardAction::Quick(Quick::WatchLater(true));
+            }
+            let (label, to) = if watched { ("Mark as unwatched", false) } else { ("Mark as watched", true) };
+            if ui.button(label).clicked() {
+                *action = CardAction::Quick(Quick::Watched(to));
+            }
+            ui.separator();
+        }
+        if v.channel_url.is_some() && ui.button("Go to channel").clicked() {
+            *action = CardAction::Channel;
+        }
+        if ui.button("Copy link").clicked() {
+            *action = CardAction::Quick(Quick::CopyLink);
+        }
+        if ui.button("Open in browser").clicked() {
+            *action = CardAction::Quick(Quick::OpenInBrowser);
+        }
+    };
+    egui::Popup::menu(&menu_resp).show(|ui| menu(ui, &mut action));
+    resp.context_menu(|ui| menu(ui, &mut action));
+    if !matches!(action, CardAction::None) {
+        return action;
     }
 
     if let Some(cr) = chan_resp {
@@ -2004,20 +2173,93 @@ fn video_card(ui: &mut egui::Ui, thumbs: &mut Thumbs, variant: Variant, v: &Vide
             return CardAction::Channel;
         }
         if cr.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
         }
     }
-    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+    if menu_resp.hovered() {
+        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+        return CardAction::None;
+    }
+    // details on hover: full title, channel, views, description snippet
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_ui(|ui| {
+        ui.set_max_width(340.0);
+        ui.label(RichText::new(v.title()).strong().color(text()));
+        let mut meta = v.channel().to_string();
+        if let Some(vl) = v.views_label() {
+            meta = if meta.is_empty() { vl } else { format!("{meta} · {vl}") };
+        }
+        if let Some(p) = progress.filter(|p| p.dur > 0.0 && !p.watched()) {
+            meta.push_str(&format!(" · {} left", fmt_secs(p.dur - p.pos)));
+        }
+        if !meta.is_empty() {
+            ui.label(RichText::new(meta).small().color(text_dim()));
+        }
+        if let Some(d) = v.description.as_deref().filter(|d| !d.trim().is_empty()) {
+            ui.add_space(2.0);
+            ui.label(RichText::new(d.trim()).size(12.0).color(text_dim()));
+        }
+    });
+    if resp.clicked() {
         CardAction::Open
     } else {
         CardAction::None
     }
 }
 
+fn fmt_secs(s: f64) -> String {
+    let s = s.max(0.0).round() as u64;
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
+}
+
+/// Grey placeholder cards with a gentle pulse while the first page loads.
+fn skeleton_grid(ui: &mut egui::Ui, cols: usize, size: Vec2, thumb_h: f32) {
+    let t = ui.input(|i| i.time) as f32;
+    let pulse = 0.55 + 0.45 * (t * 2.6).sin().abs();
+    let rows = ((ui.available_height() / (size.y + GAP)).ceil() as usize).max(1);
+    let painter = ui.painter().clone();
+    let origin = ui.max_rect().min + Vec2::new(GAP, GAP * 0.5);
+    let fill = card().gamma_multiply(pulse.max(0.4));
+    let bar = card_hover().gamma_multiply(pulse);
+    for row in 0..rows {
+        for col in 0..cols {
+            let min = origin + Vec2::new(col as f32 * (size.x + GAP), row as f32 * (size.y + GAP));
+            let r = egui::Rect::from_min_size(min, size);
+            painter.rect_filled(r, RADIUS, fill);
+            let th = egui::Rect::from_min_size(min, Vec2::new(size.x, thumb_h));
+            painter.rect_filled(th, CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 }, bar);
+            let l1 = egui::Rect::from_min_size(min + Vec2::new(10.0, thumb_h + 12.0), Vec2::new(size.x * 0.8, 10.0));
+            let l2 = egui::Rect::from_min_size(min + Vec2::new(10.0, thumb_h + 30.0), Vec2::new(size.x * 0.45, 9.0));
+            painter.rect_filled(l1, 4, bar);
+            painter.rect_filled(l2, 4, bar);
+        }
+    }
+    ui.ctx().request_repaint();
+}
+
+/// Open a URL in the default browser.
+fn open_url(url: &str) -> std::io::Result<()> {
+    let mut c = if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else if cfg!(windows) {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        c
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    let mut child = c.arg(url).spawn()?;
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
 fn tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
-    let text = RichText::new(label).size(15.0).color(if selected { TEXT } else { TEXT_DIM });
+    let text = RichText::new(label).size(15.0).color(if selected { text() } else { text_dim() });
     let btn = egui::Button::new(text)
-        .fill(if selected { CARD_HOVER } else { Color32::TRANSPARENT })
+        .fill(if selected { card_hover() } else { Color32::TRANSPARENT })
         .stroke(Stroke::NONE)
         .corner_radius(8)
         .min_size(Vec2::new(0.0, 30.0));
@@ -2026,15 +2268,133 @@ fn tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response 
         let r = resp.rect;
         ui.painter().line_segment(
             [egui::pos2(r.left() + 10.0, r.bottom() + 3.0), egui::pos2(r.right() - 10.0, r.bottom() + 3.0)],
-            Stroke::new(2.0, ACCENT),
+            Stroke::new(2.0, accent()),
         );
     }
     resp
 }
 
+#[derive(Clone, Copy)]
+enum Icon {
+    Home,
+    Subs,
+    Later,
+    History,
+    Lists,
+    Search,
+    Gear,
+    Collapse,
+    Expand,
+}
+
+fn nav_icon(s: &Source) -> Icon {
+    match s {
+        Source::Feed => Icon::Home,
+        Source::Subscriptions => Icon::Subs,
+        Source::WatchLater => Icon::Later,
+        Source::History => Icon::History,
+        Source::Playlists => Icon::Lists,
+        _ => Icon::Search,
+    }
+}
+
+/// Small line icons drawn with the painter (no icon font needed). `c` = centre, ~16 pt box.
+fn paint_icon(p: &egui::Painter, icon: Icon, c: egui::Pos2, color: Color32) {
+    use egui::pos2;
+    let st = Stroke::new(1.5, color);
+    let v = |x: f32, y: f32| c + Vec2::new(x, y);
+    match icon {
+        Icon::Home => {
+            p.line(vec![v(-7.0, -0.5), v(0.0, -7.0), v(7.0, -0.5)], st);
+            p.line(vec![v(-5.0, -2.0), v(-5.0, 6.5), v(5.0, 6.5), v(5.0, -2.0)], st);
+            p.line(vec![v(-1.8, 6.5), v(-1.8, 2.0), v(1.8, 2.0), v(1.8, 6.5)], st);
+        }
+        Icon::Subs => {
+            p.rect_stroke(egui::Rect::from_center_size(c + Vec2::new(0.0, 1.0), Vec2::new(15.0, 11.0)), 2.5, st, StrokeKind::Middle);
+            p.line_segment([v(-4.5, -7.0), v(4.5, -7.0)], st);
+            p.add(egui::Shape::convex_polygon(vec![v(-2.0, -2.0), v(3.5, 1.0), v(-2.0, 4.0)], color, Stroke::NONE));
+        }
+        Icon::Later => {
+            p.circle_stroke(c, 7.0, st);
+            p.line(vec![v(0.0, -4.0), v(0.0, 0.0), v(3.0, 2.0)], st);
+        }
+        Icon::History => {
+            // counter-clockwise arrow around a clock hand: "earlier"
+            let pts: Vec<egui::Pos2> = (0..=24)
+                .map(|i| {
+                    let a = (-150.0 + i as f32 * 12.5).to_radians();
+                    c + Vec2::angled(a) * 7.0
+                })
+                .collect();
+            p.line(pts, st);
+            let tip = c + Vec2::angled((-150.0f32).to_radians()) * 7.0;
+            p.add(egui::Shape::convex_polygon(vec![tip + Vec2::new(-3.5, -1.0), tip + Vec2::new(2.5, -2.5), tip + Vec2::new(0.5, 3.0)], color, Stroke::NONE));
+            p.line(vec![v(0.0, -3.5), v(0.0, 0.0), v(2.5, 2.0)], st);
+        }
+        Icon::Lists => {
+            for y in [-4.5, 0.0, 4.5] {
+                p.circle_filled(v(-6.0, y), 1.1, color);
+                p.line_segment([v(-3.0, y), v(7.0, y)], st);
+            }
+        }
+        Icon::Search => {
+            p.circle_stroke(v(-1.5, -1.5), 5.0, st);
+            p.line_segment([v(2.2, 2.2), v(6.5, 6.5)], Stroke::new(2.0, color));
+        }
+        Icon::Gear => {
+            for i in 0..8 {
+                let a = i as f32 * std::f32::consts::TAU / 8.0;
+                let d = Vec2::angled(a);
+                p.line_segment([c + d * 5.5, c + d * 8.0], Stroke::new(2.4, color));
+            }
+            p.circle_stroke(c, 5.5, st);
+            p.circle_stroke(c, 2.0, st);
+        }
+        Icon::Collapse | Icon::Expand => {
+            let s = if matches!(icon, Icon::Collapse) { 1.0 } else { -1.0 };
+            for dx in [-2.5, 2.5] {
+                p.line(vec![pos2(c.x + dx + 2.5 * s, c.y - 5.0), pos2(c.x + dx - 2.5 * s, c.y), pos2(c.x + dx + 2.5 * s, c.y + 5.0)], st);
+            }
+        }
+    }
+}
+
+/// A sidebar row: icon + label, rounded highlight when selected (macOS source-list style).
+fn nav_item(ui: &mut egui::Ui, icon: Icon, label: &str, selected: bool, collapsed: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+    let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
+    // macOS source-list style: neutral highlight, accent-coloured icon
+    let sel = if crate::theme::pal().dark { Color32::from_white_alpha(22) } else { Color32::from_black_alpha(18) };
+    let fill = if selected { sel } else { sel.gamma_multiply(0.6 * hover) };
+    ui.painter().rect_filled(rect, 6, fill);
+    let icon_color = if selected { accent() } else { text_dim() };
+    let icon_x = if collapsed { rect.center().x } else { rect.left() + 18.0 };
+    paint_icon(ui.painter(), icon, egui::pos2(icon_x, rect.center().y), icon_color);
+    if !collapsed {
+        let g = ui.painter().layout(
+            label.to_string(),
+            FontId::proportional(14.0),
+            text(),
+            rect.width() - 46.0,
+        );
+        let g = if g.rows.len() > 1 {
+            let mut job = LayoutJob::single_section(label.to_string(), TextFormat { font_id: FontId::proportional(14.0), color: text(), ..Default::default() });
+            job.wrap.max_width = rect.width() - 46.0;
+            job.wrap.max_rows = 1;
+            job.wrap.overflow_character = Some('…');
+            ui.painter().layout_job(job)
+        } else {
+            g
+        };
+        ui.painter().galley(egui::pos2(rect.left() + 36.0, rect.center().y - g.size().y / 2.0), g, text());
+    }
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if collapsed { resp.on_hover_text(label) } else { resp }
+}
+
 fn accent_btn(label: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(label).strong().color(Color32::WHITE))
-        .fill(ACCENT)
+    egui::Button::new(RichText::new(label).strong().color(on_accent()))
+        .fill(accent())
         .corner_radius(8)
         .min_size(Vec2::new(72.0, 30.0))
 }
@@ -2045,18 +2405,18 @@ fn accent_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
 
 fn error_box(ui: &mut egui::Ui, err: &str) {
     egui::Frame::new()
-        .fill(Color32::from_rgb(0x33, 0x18, 0x1A))
+        .fill(err_bg())
         .corner_radius(RADIUS)
         .inner_margin(Margin::same(12))
         .show(ui, |ui| {
-            ui.add(egui::Label::new(RichText::new(err).size(13.0).color(ERR)).wrap());
+            ui.add(egui::Label::new(RichText::new(err).size(13.0).color(crate::theme::err())).wrap());
         });
 }
 
 fn code_box(ui: &mut egui::Ui, text: &str) {
-    egui::Frame::new().fill(CARD).corner_radius(8).inner_margin(Margin::same(10)).show(ui, |ui| {
+    egui::Frame::new().fill(card()).corner_radius(8).inner_margin(Margin::same(10)).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(text).monospace().color(TEXT));
+            ui.label(RichText::new(text).monospace().color(crate::theme::text()));
             if ui.small_button("Copy").clicked() {
                 ui.ctx().copy_text(text.to_string());
             }
@@ -2078,79 +2438,3 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
 
-// ---------- style ----------
-
-fn setup_style(ctx: &egui::Context) {
-    ctx.set_theme(egui::Theme::Dark);
-    ctx.all_styles_mut(|style| {
-        use egui::TextStyle::*;
-        style.text_styles = [
-            (Heading, FontId::new(22.0, FontFamily::Proportional)),
-            (Body, FontId::new(15.0, FontFamily::Proportional)),
-            (Button, FontId::new(15.0, FontFamily::Proportional)),
-            (Small, FontId::new(12.0, FontFamily::Proportional)),
-            (Monospace, FontId::new(13.0, FontFamily::Monospace)),
-        ]
-        .into();
-        style.spacing.item_spacing = Vec2::new(8.0, 6.0);
-        style.spacing.button_padding = Vec2::new(10.0, 5.0);
-
-        let v = &mut style.visuals;
-        *v = egui::Visuals::dark();
-        v.panel_fill = BG;
-        v.window_fill = PANEL;
-        v.extreme_bg_color = Color32::from_rgb(0x0A, 0x0A, 0x0D);
-        v.override_text_color = None;
-        v.hyperlink_color = ACCENT;
-        v.selection.bg_fill = ACCENT.gamma_multiply(0.45);
-        v.selection.stroke = Stroke::new(1.0, ACCENT);
-        v.window_corner_radius = CornerRadius::same(RADIUS);
-        v.menu_corner_radius = CornerRadius::same(10);
-        for w in [
-            &mut v.widgets.noninteractive,
-            &mut v.widgets.inactive,
-            &mut v.widgets.hovered,
-            &mut v.widgets.active,
-            &mut v.widgets.open,
-        ] {
-            w.corner_radius = CornerRadius::same(8);
-        }
-        v.widgets.noninteractive.fg_stroke.color = TEXT;
-        v.widgets.inactive.fg_stroke.color = TEXT;
-        v.widgets.inactive.weak_bg_fill = CARD;
-        v.widgets.inactive.bg_fill = CARD;
-        v.widgets.hovered.weak_bg_fill = CARD_HOVER;
-        v.widgets.hovered.bg_fill = CARD_HOVER;
-        v.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT.gamma_multiply(0.6));
-        v.widgets.active.bg_stroke = Stroke::new(1.0, ACCENT);
-        v.text_cursor.stroke = Stroke::new(2.0, ACCENT);
-    });
-}
-
-/// egui's built-in fonts cover Latin/Cyrillic/Greek. Titles also come in CJK,
-/// Arabic, Hindi… so add a broad system font as a fallback if we can find one.
-fn add_fallback_fonts(ctx: &egui::Context) {
-    let candidates: &[&str] = if cfg!(target_os = "macos") {
-        &["/System/Library/Fonts/Supplemental/Arial Unicode.ttf"]
-    } else if cfg!(windows) {
-        &["C:\\Windows\\Fonts\\arialuni.ttf", "C:\\Windows\\Fonts\\seguisym.ttf"]
-    } else {
-        &[
-            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-            "/usr/share/fonts/google-droid-sans-fonts/DroidSansFallbackFull.ttf",
-            "/usr/share/fonts/truetype/arphic/uming.ttc",
-        ]
-    };
-    for path in candidates {
-        if let Ok(bytes) = std::fs::read(path) {
-            use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
-            let fam = |family| InsertFontFamily { family, priority: FontPriority::Lowest };
-            ctx.add_font(FontInsert::new(
-                "system-fallback",
-                egui::FontData::from_owned(bytes),
-                vec![fam(FontFamily::Proportional), fam(FontFamily::Monospace)],
-            ));
-            break;
-        }
-    }
-}

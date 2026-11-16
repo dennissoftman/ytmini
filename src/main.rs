@@ -11,6 +11,7 @@ mod player;
 mod positions;
 mod settings;
 mod signin;
+mod theme;
 mod thumbs;
 mod tray;
 mod yt;

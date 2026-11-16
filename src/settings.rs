@@ -25,6 +25,14 @@ pub enum ThumbQuality {
     High,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Density {
+    /// Smaller cards, more per row.
+    Compact,
+    #[default]
+    Comfortable,
+}
+
 /// The browser profile "Sign in with Google" last imported from.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SignInSource {
@@ -51,6 +59,9 @@ pub struct Settings {
     pub close_to_tray: bool,
     /// For one-click "Refresh session".
     pub signin_source: Option<SignInSource>,
+    pub density: Density,
+    /// Sidebar shows icons only.
+    pub sidebar_collapsed: bool,
 }
 
 pub const DEFAULT_CACHE_MB: u64 = 256;
@@ -68,6 +79,8 @@ impl Default for Settings {
             mark_watched: true,
             close_to_tray: true,
             signin_source: None,
+            density: Density::Comfortable,
+            sidebar_collapsed: false,
         }
     }
 }
