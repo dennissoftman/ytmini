@@ -57,7 +57,9 @@ impl Dep {
                 let (file, exe, zip) = match (os, arch) {
                     ("macos", _) => ("yt-dlp_macos.zip", "yt-dlp_macos", true),
                     ("linux", "x86_64") => ("yt-dlp_linux.zip", "yt-dlp_linux", true),
-                    ("linux", "aarch64") => ("yt-dlp_linux_aarch64.zip", "yt-dlp_linux_aarch64", true),
+                    ("linux", "aarch64") => {
+                        ("yt-dlp_linux_aarch64.zip", "yt-dlp_linux_aarch64", true)
+                    }
                     ("windows", "aarch64") => ("yt-dlp_arm64.exe", "yt-dlp.exe", false),
                     ("windows", _) => ("yt-dlp.exe", "yt-dlp.exe", false),
                     _ => return None,
@@ -80,7 +82,8 @@ impl Dep {
                     _ => return None,
                 };
                 let file = format!("deno-{target}.zip");
-                let url = format!("https://github.com/denoland/deno/releases/latest/download/{file}");
+                let url =
+                    format!("https://github.com/denoland/deno/releases/latest/download/{file}");
                 Some(Asset {
                     sums_url: format!("{url}.sha256sum"),
                     url,
@@ -110,7 +113,11 @@ impl Dep {
 /// Progress reports for the setup screen.
 #[derive(Clone, Debug)]
 pub enum Progress {
-    Downloading { dep: Dep, done: u64, total: Option<u64> },
+    Downloading {
+        dep: Dep,
+        done: u64,
+        total: Option<u64>,
+    },
     Verifying(Dep),
     /// First launch: macOS checks new executables once (can take ~15 s).
     Preparing(Dep),
@@ -145,14 +152,19 @@ fn expected_sha(agent: &ureq::Agent, asset: &Asset) -> Result<String> {
 /// Is a newer build published than the one installed? (Compares checksums.)
 pub fn update_available(dep: Dep) -> Result<bool> {
     let asset = dep.asset().context("unsupported platform")?;
-    let installed = dep.sha_file().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
+    let installed = dep
+        .sha_file()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .unwrap_or_default();
     Ok(expected_sha(&agent(), &asset)? != installed.trim())
 }
 
 /// Download, verify, install (atomically replacing any previous copy) and
 /// warm up `dep`. Blocking; run on a worker thread.
 pub fn install(dep: Dep, progress: &dyn Fn(Progress)) -> Result<PathBuf> {
-    let asset = dep.asset().context("no prebuilt download for this platform")?;
+    let asset = dep
+        .asset()
+        .context("no prebuilt download for this platform")?;
     let dir = dep.dir().context("no config directory")?;
     let bin = dir.parent().context("bad install dir")?.to_path_buf();
     fs::create_dir_all(&bin)?;
@@ -161,9 +173,16 @@ pub fn install(dep: Dep, progress: &dyn Fn(Progress)) -> Result<PathBuf> {
 
     // download → temp file, hashing as we go
     let tmp = bin.join(format!(".{}.download", dep.name()));
-    let mut resp = agent.get(&asset.url).call().with_context(|| format!("downloading {}", asset.url))?;
+    let mut resp = agent
+        .get(&asset.url)
+        .call()
+        .with_context(|| format!("downloading {}", asset.url))?;
     let total = resp.body().content_length();
-    let mut reader = resp.body_mut().with_config().limit(512 * 1024 * 1024).reader();
+    let mut reader = resp
+        .body_mut()
+        .with_config()
+        .limit(512 * 1024 * 1024)
+        .reader();
     let mut out = fs::File::create(&tmp)?;
     let mut hasher = Sha256::new();
     let (mut buf, mut done, mut last_report) = (vec![0u8; 256 * 1024], 0u64, 0u64);
@@ -187,7 +206,10 @@ pub fn install(dep: Dep, progress: &dyn Fn(Progress)) -> Result<PathBuf> {
     let got = hex(&hasher.finalize());
     if got != want {
         let _ = fs::remove_file(&tmp);
-        bail!("{} checksum mismatch (expected {want}, got {got}) — download discarded", dep.name());
+        bail!(
+            "{} checksum mismatch (expected {want}, got {got}) — download discarded",
+            dep.name()
+        );
     }
 
     // unpack into a staging dir, then swap
@@ -231,7 +253,9 @@ fn unzip(zip_path: &Path, dest: &Path) -> Result<()> {
     for i in 0..archive.len() {
         let mut f = archive.by_index(i)?;
         // enclosed_name rejects absolute paths and `..` (zip-slip)
-        let Some(rel) = f.enclosed_name() else { continue };
+        let Some(rel) = f.enclosed_name() else {
+            continue;
+        };
         let out = dest.join(rel);
         if f.is_dir() {
             fs::create_dir_all(&out)?;
@@ -268,9 +292,17 @@ fn hex(bytes: &[u8]) -> String {
 
 /// `<exe> --version`, first line.
 pub fn version(exe: &Path) -> Option<String> {
-    let out = Command::new(exe).arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    let out = Command::new(exe)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
-    s.lines().next().map(|l| l.trim().to_string()).filter(|l| !l.is_empty())
+    s.lines()
+        .next()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
 }
 
 fn check_stamp(dep: Dep) -> Option<PathBuf> {

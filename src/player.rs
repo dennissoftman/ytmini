@@ -36,11 +36,22 @@ impl Surface {
         unsafe {
             let tex = gl.create_texture()?;
             let fbo = gl.create_framebuffer()?;
-            let mut s = Surface { tex, fbo, id: egui::TextureId::default(), size: [0, 0] };
+            let mut s = Surface {
+                tex,
+                fbo,
+                id: egui::TextureId::default(),
+                size: [0, 0],
+            };
             s.resize(gl, 2, 2);
             let prev = gl.get_parameter_framebuffer(glow::FRAMEBUFFER_BINDING);
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(tex), 0);
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(tex),
+                0,
+            );
             let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
             gl.bind_framebuffer(glow::FRAMEBUFFER, prev);
             if status != glow::FRAMEBUFFER_COMPLETE {
@@ -73,10 +84,26 @@ impl Surface {
                 glow::UNSIGNED_BYTE,
                 glow::PixelUnpackData::Slice(None),
             );
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
             gl.bind_texture(glow::TEXTURE_2D, prev);
         }
     }
@@ -184,7 +211,10 @@ impl Embedded {
             ("hwdec", "auto-safe".into()),
             ("ytdl", "yes".into()),
             ("ytdl-format", profile.ytdl_format.clone()),
-            ("script-opts", format!("ytdl_hook-ytdl_path={}", tools.ytdlp.display())),
+            (
+                "script-opts",
+                format!("ytdl_hook-ytdl_path={}", tools.ytdlp.display()),
+            ),
             ("keep-open", "yes".into()),
             ("idle", "yes".into()),
             ("osc", "no".into()),
@@ -206,7 +236,12 @@ impl Embedded {
             mpv.observe(i as u64 + 1, name, *fmt);
         }
         // change-list handles any characters in the path (spaces, commas).
-        mpv.command(&["change-list", "ytdl-raw-options", "append", &format!("cookies={}", cookies.display())])?;
+        mpv.command(&[
+            "change-list",
+            "ytdl-raw-options",
+            "append",
+            &format!("cookies={}", cookies.display()),
+        ])?;
         for opt in tools.ytdl_raw_options() {
             mpv.command(&["change-list", "ytdl-raw-options", "append", &opt])?;
         }
@@ -216,7 +251,10 @@ impl Embedded {
         }
 
         let render = Render::new(&mpv, gpa)?;
-        let shared = Box::new(Shared { ctx: ctx.clone(), frame_ready: AtomicBool::new(false) });
+        let shared = Box::new(Shared {
+            ctx: ctx.clone(),
+            frame_ready: AtomicBool::new(false),
+        });
         let data = (&raw const *shared) as *mut c_void;
         // SAFETY: `shared` outlives both the render context and the core (see Drop).
         unsafe {
@@ -224,7 +262,13 @@ impl Embedded {
             render.set_update_callback(on_frame, data);
         }
         match resume {
-            Some(t) => mpv.command(&["loadfile", &video.url(), "replace", "-1", &format!("start={t:.1}")])?,
+            Some(t) => mpv.command(&[
+                "loadfile",
+                &video.url(),
+                "replace",
+                "-1",
+                &format!("start={t:.1}"),
+            ])?,
             None => mpv.command(&["loadfile", &video.url()])?,
         }
 
@@ -282,7 +326,11 @@ impl Embedded {
                         "media-title" => {
                             // Fills in the title when we started from a bare id (`--play`).
                             let t = mpv::prop_string(p).unwrap_or_default();
-                            if self.title_from_mpv && !t.is_empty() && !t.starts_with("watch?v=") && t != self.title {
+                            if self.title_from_mpv
+                                && !t.is_empty()
+                                && !t.starts_with("watch?v=")
+                                && t != self.title
+                            {
                                 self.title = t;
                                 self.title_changed = true;
                             }
@@ -305,7 +353,9 @@ impl Embedded {
                     let e = unsafe { &*(ev.data as *const mpv::EventEndFile) };
                     if e.reason == mpv::END_FILE_REASON_ERROR {
                         self.error = Some(
-                            self.last_log_error.clone().unwrap_or_else(|| "playback failed (mpv error)".into()),
+                            self.last_log_error
+                                .clone()
+                                .unwrap_or_else(|| "playback failed (mpv error)".into()),
                         );
                         self.buffering = false;
                     } else if e.reason == mpv::END_FILE_REASON_EOF {
@@ -317,7 +367,8 @@ impl Embedded {
                     let m = unsafe { &*(ev.data as *const mpv::EventLogMessage) };
                     let text = mpv::c_to_string(m.text).trim().to_string();
                     if !text.is_empty() {
-                        self.last_log_error = Some(format!("{}: {text}", mpv::c_to_string(m.prefix)));
+                        self.last_log_error =
+                            Some(format!("{}: {text}", mpv::c_to_string(m.prefix)));
                     }
                 }
                 mpv::EVENT_SHUTDOWN => self.error = Some("mpv shut down".into()),
@@ -329,9 +380,12 @@ impl Embedded {
     /// Render the current frame into `surface` at `w`×`h` pixels if mpv has a
     /// new frame or the size changed. GL context must be current.
     fn render(&mut self, gl: &glow::Context, surface: &mut Surface, w: i32, h: i32) {
-        let (Some(render), Some(shared)) = (&self.render, &self.shared) else { return };
+        let (Some(render), Some(shared)) = (&self.render, &self.shared) else {
+            return;
+        };
         let resized = surface.size != [w, h];
-        let new_frame = shared.frame_ready.swap(false, Ordering::Acquire) && render.update() & mpv::RENDER_UPDATE_FRAME != 0;
+        let new_frame = shared.frame_ready.swap(false, Ordering::Acquire)
+            && render.update() & mpv::RENDER_UPDATE_FRAME != 0;
         if !(resized || new_frame) {
             return;
         }
@@ -366,12 +420,18 @@ impl Embedded {
     }
 
     pub fn seek_relative(&mut self, secs: f64) {
-        let _ = self.mpv().command(&["seek", &format!("{secs}"), "relative+exact"]);
+        let _ = self
+            .mpv()
+            .command(&["seek", &format!("{secs}"), "relative+exact"]);
         self.poke();
     }
 
     pub fn seek_absolute(&self, t: f64, exact: bool) {
-        let flags = if exact { "absolute+exact" } else { "absolute+keyframes" };
+        let flags = if exact {
+            "absolute+exact"
+        } else {
+            "absolute+keyframes"
+        };
         let _ = self.mpv().command(&["seek", &format!("{t:.2}"), flags]);
     }
 
@@ -395,7 +455,13 @@ impl Embedded {
         let _ = mpv.set_str("ytdl-format", &profile.ytdl_format);
         let _ = mpv.set_str("vid", if profile.audio_only { "no" } else { "auto" });
         let pos = mpv.get_f64("time-pos").unwrap_or(self.pos);
-        let _ = mpv.command(&["loadfile", &self.url, "replace", "-1", &format!("start={pos:.1}")]);
+        let _ = mpv.command(&[
+            "loadfile",
+            &self.url,
+            "replace",
+            "-1",
+            &format!("start={pos:.1}"),
+        ]);
     }
 
     /// Register user activity (shows the controls for a while).
@@ -403,7 +469,11 @@ impl Embedded {
     /// for frames nobody sees. Restores video when shown again.
     pub fn set_background(&mut self, background: bool) {
         let audio_only = self.format == "ba/b";
-        let vid = if background || audio_only { "no" } else { "auto" };
+        let vid = if background || audio_only {
+            "no"
+        } else {
+            "auto"
+        };
         let _ = self.mpv().set_str("vid", vid);
     }
 
@@ -470,11 +540,17 @@ impl Embedded {
         if !v.fullscreen {
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
-                if ui.add(egui::Button::new(egui::RichText::new("←  Back").size(15.0)).frame(false)).clicked() {
+                if ui
+                    .add(egui::Button::new(egui::RichText::new("←  Back").size(15.0)).frame(false))
+                    .clicked()
+                {
                     act.back = true;
                 }
                 ui.add_space(8.0);
-                ui.add(egui::Label::new(egui::RichText::new(&self.title).size(16.0).strong()).truncate());
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&self.title).size(16.0).strong())
+                        .truncate(),
+                );
             });
             ui.add_space(6.0);
         }
@@ -489,7 +565,8 @@ impl Embedded {
             self.poke();
         }
         let idle = self.last_activity.elapsed();
-        let show_controls = self.paused || self.eof || !self.started || idle < HIDE_AFTER || self.scrub.is_some();
+        let show_controls =
+            self.paused || self.eof || !self.started || idle < HIDE_AFTER || self.scrub.is_some();
         if !show_controls && resp.hovered() {
             ctx.set_cursor_icon(egui::CursorIcon::None);
         } else if !self.paused {
@@ -498,7 +575,10 @@ impl Embedded {
 
         // Video
         let ppp = ctx.pixels_per_point();
-        let (w, h) = ((area.width() * ppp).round() as i32, (area.height() * ppp).round() as i32);
+        let (w, h) = (
+            (area.width() * ppp).round() as i32,
+            (area.height() * ppp).round() as i32,
+        );
         if w > 0 && h > 0 {
             self.render(v.gl, v.surface, w, h);
             painter.image(
@@ -521,51 +601,91 @@ impl Embedded {
         if let Some(err) = self.error.clone() {
             let r = Rect::from_center_size(center, Vec2::new(area.width().min(560.0), 150.0));
             ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
-                egui::Frame::new().fill(Color32::from_black_alpha(220)).corner_radius(12).inner_margin(14).show(ui, |ui| {
-                    ui.label(egui::RichText::new("Couldn't play this video").strong().color(Color32::WHITE));
-                    ui.add(egui::Label::new(egui::RichText::new(err).size(12.5).color(Color32::LIGHT_GRAY)).wrap());
-                    ui.horizontal(|ui| {
-                        if ui.button("Try in separate window").clicked() {
-                            act.open_in_window = true;
-                        }
-                        if ui.button("Back").clicked() {
-                            act.back = true;
-                        }
+                egui::Frame::new()
+                    .fill(Color32::from_black_alpha(220))
+                    .corner_radius(12)
+                    .inner_margin(14)
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new("Couldn't play this video")
+                                .strong()
+                                .color(Color32::WHITE),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(err)
+                                    .size(12.5)
+                                    .color(Color32::LIGHT_GRAY),
+                            )
+                            .wrap(),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button("Try in separate window").clicked() {
+                                act.open_in_window = true;
+                            }
+                            if ui.button("Back").clicked() {
+                                act.back = true;
+                            }
+                        });
                     });
-                });
             });
         } else if !self.started || self.buffering {
             painter.circle_filled(center, 28.0, Color32::from_black_alpha(140));
-            ui.scope_builder(egui::UiBuilder::new().max_rect(Rect::from_center_size(center, Vec2::splat(32.0))), |ui| {
-                ui.add(egui::Spinner::new().size(28.0).color(Color32::WHITE));
-            });
+            ui.scope_builder(
+                egui::UiBuilder::new().max_rect(Rect::from_center_size(center, Vec2::splat(32.0))),
+                |ui| {
+                    ui.add(egui::Spinner::new().size(28.0).color(Color32::WHITE));
+                },
+            );
             ctx.request_repaint_after(Duration::from_millis(33));
         } else if self.eof {
             let r = Rect::from_center_size(center, Vec2::new(120.0, 40.0));
-            if ui.put(r, egui::Button::new(egui::RichText::new("↻  Replay").size(16.0))).clicked() {
+            if ui
+                .put(
+                    r,
+                    egui::Button::new(egui::RichText::new("↻  Replay").size(16.0)),
+                )
+                .clicked()
+            {
                 self.replay();
             }
         }
         // "Resumed at …" pill, top-left, for the first seconds of a resumed video
-        if let Some((t, _)) = self.resumed_from.filter(|(_, since)| since.elapsed() < Duration::from_secs(8)) {
-            let r = Rect::from_min_size(area.left_top() + Vec2::new(16.0, 16.0), Vec2::new(250.0, 34.0));
+        if let Some((t, _)) = self
+            .resumed_from
+            .filter(|(_, since)| since.elapsed() < Duration::from_secs(8))
+        {
+            let r = Rect::from_min_size(
+                area.left_top() + Vec2::new(16.0, 16.0),
+                Vec2::new(250.0, 34.0),
+            );
             ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
-                egui::Frame::new().fill(Color32::from_black_alpha(190)).corner_radius(8).inner_margin(egui::Margin::symmetric(10, 5)).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(format!("Resumed at {}", fmt_time(t))).color(Color32::WHITE));
-                        if ui.link("Start over").clicked() {
-                            self.seek_absolute(0.0, true);
-                            self.resumed_from = None;
-                        }
+                egui::Frame::new()
+                    .fill(Color32::from_black_alpha(190))
+                    .corner_radius(8)
+                    .inner_margin(egui::Margin::symmetric(10, 5))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("Resumed at {}", fmt_time(t)))
+                                    .color(Color32::WHITE),
+                            );
+                            if ui.link("Start over").clicked() {
+                                self.seek_absolute(0.0, true);
+                                self.resumed_from = None;
+                            }
+                        });
                     });
-                });
             });
             ctx.request_repaint_after(Duration::from_millis(500));
         }
 
         // Controls
         if show_controls && self.error.is_none() {
-            let bar = Rect::from_min_max(Pos2::new(area.left(), area.bottom() - CONTROLS_H), area.right_bottom());
+            let bar = Rect::from_min_max(
+                Pos2::new(area.left(), area.bottom() - CONTROLS_H),
+                area.right_bottom(),
+            );
             // soft gradient so controls read over bright video
             let top = bar.top() - 40.0;
             let mut mesh = egui::Mesh::default();
@@ -620,9 +740,18 @@ impl Embedded {
         let track = Rect::from_center_size(seek.center(), Vec2::new(seek.width(), track_h));
         let frac = |t: f64| (t / dur).clamp(0.0, 1.0) as f32;
         painter.rect_filled(track, 3, Color32::from_white_alpha(50));
-        let cached = Rect::from_min_max(track.min, Pos2::new(track.left() + track.width() * frac(self.cached_until), track.bottom()));
+        let cached = Rect::from_min_max(
+            track.min,
+            Pos2::new(
+                track.left() + track.width() * frac(self.cached_until),
+                track.bottom(),
+            ),
+        );
         painter.rect_filled(cached, 3, Color32::from_white_alpha(90));
-        let played = Rect::from_min_max(track.min, Pos2::new(track.left() + track.width() * frac(shown), track.bottom()));
+        let played = Rect::from_min_max(
+            track.min,
+            Pos2::new(track.left() + track.width() * frac(shown), track.bottom()),
+        );
         painter.rect_filled(played, 3, v.accent);
         if hover {
             painter.circle_filled(Pos2::new(played.right(), track.center().y), 7.0, v.accent);
@@ -630,18 +759,30 @@ impl Embedded {
                 let t = x_to_t(hp.x);
                 let label = fmt_time(t);
                 let g = painter.layout_no_wrap(label, FontId::proportional(12.0), Color32::WHITE);
-                let r = Rect::from_center_size(Pos2::new(hp.x.clamp(seek.left() + 24.0, seek.right() - 24.0), seek.top() - 14.0), g.size() + Vec2::new(10.0, 4.0));
-                ui.painter().rect_filled(r, 4, Color32::from_black_alpha(200));
-                ui.painter().galley(r.min + Vec2::new(5.0, 2.0), g, Color32::WHITE);
+                let r = Rect::from_center_size(
+                    Pos2::new(
+                        hp.x.clamp(seek.left() + 24.0, seek.right() - 24.0),
+                        seek.top() - 14.0,
+                    ),
+                    g.size() + Vec2::new(10.0, 4.0),
+                );
+                ui.painter()
+                    .rect_filled(r, 4, Color32::from_black_alpha(200));
+                ui.painter()
+                    .galley(r.min + Vec2::new(5.0, 2.0), g, Color32::WHITE);
             }
         }
 
         // --- buttons row ---
-        let row = Rect::from_min_max(Pos2::new(bar.left() + pad, seek.bottom() + 2.0), Pos2::new(bar.right() - pad, bar.bottom() - 4.0));
+        let row = Rect::from_min_max(
+            Pos2::new(bar.left() + pad, seek.bottom() + 2.0),
+            Pos2::new(bar.right() - pad, bar.bottom() - 4.0),
+        );
         let btn = |ui: &mut egui::Ui, rect: Rect, id: &str| {
             let r = ui.interact(rect, ui.scope_id().with(id), Sense::click());
             if r.hovered() {
-                ui.painter().rect_filled(rect, 6, Color32::from_white_alpha(25));
+                ui.painter()
+                    .rect_filled(rect, 6, Color32::from_white_alpha(25));
             }
             r.on_hover_cursor(egui::CursorIcon::PointingHand)
         };
@@ -655,13 +796,21 @@ impl Embedded {
         if self.paused || self.eof {
             let s = 9.0;
             painter.add(egui::Shape::convex_polygon(
-                vec![Pos2::new(c.x - s * 0.7, c.y - s), Pos2::new(c.x - s * 0.7, c.y + s), Pos2::new(c.x + s, c.y)],
+                vec![
+                    Pos2::new(c.x - s * 0.7, c.y - s),
+                    Pos2::new(c.x - s * 0.7, c.y + s),
+                    Pos2::new(c.x + s, c.y),
+                ],
                 Color32::WHITE,
                 Stroke::NONE,
             ));
         } else {
             for dx in [-4.5, 4.5] {
-                painter.rect_filled(Rect::from_center_size(Pos2::new(c.x + dx, c.y), Vec2::new(4.0, 16.0)), 1, Color32::WHITE);
+                painter.rect_filled(
+                    Rect::from_center_size(Pos2::new(c.x + dx, c.y), Vec2::new(4.0, 16.0)),
+                    1,
+                    Color32::WHITE,
+                );
             }
         }
 
@@ -671,12 +820,21 @@ impl Embedded {
         } else {
             format!("{}  · LIVE", fmt_time(shown))
         };
-        painter.text(Pos2::new(pp.right() + 10.0, c.y), Align2::LEFT_CENTER, time, FontId::proportional(14.0), Color32::WHITE);
+        painter.text(
+            Pos2::new(pp.right() + 10.0, c.y),
+            Align2::LEFT_CENTER,
+            time,
+            FontId::proportional(14.0),
+            Color32::WHITE,
+        );
 
         // right side, laid out right-to-left
         let mut right = row.right();
         let mut take = |w: f32| {
-            let r = Rect::from_min_max(Pos2::new(right - w, row.top()), Pos2::new(right, row.bottom()));
+            let r = Rect::from_min_max(
+                Pos2::new(right - w, row.top()),
+                Pos2::new(right, row.bottom()),
+            );
             right -= w + 8.0;
             r
         };
@@ -691,56 +849,79 @@ impl Embedded {
         let inward = if v.fullscreen { -1.0 } else { 1.0 };
         for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
             let corner = Pos2::new(fc.x + sx * k, fc.y + sy * k);
-            painter.line_segment([corner, Pos2::new(corner.x - sx * l * inward, corner.y)], st);
-            painter.line_segment([corner, Pos2::new(corner.x, corner.y - sy * l * inward)], st);
+            painter.line_segment(
+                [corner, Pos2::new(corner.x - sx * l * inward, corner.y)],
+                st,
+            );
+            painter.line_segment(
+                [corner, Pos2::new(corner.x, corner.y - sy * l * inward)],
+                st,
+            );
         }
 
         // quality
         let qr = take(150.0);
-        ui.scope_builder(egui::UiBuilder::new().max_rect(qr).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
-            let mut q = v.quality;
-            egui::ComboBox::from_id_salt("quality")
-                .selected_text(egui::RichText::new(&self.profile_label).size(13.0))
-                .width(140.0)
-                .show_ui(ui, |ui| {
-                    for choice in yt::Quality::choices(v.screen_cap) {
-                        ui.selectable_value(&mut q, choice, choice.label());
-                    }
-                });
-            if q != v.quality {
-                act.quality = Some(q);
-            }
-        });
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(qr)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| {
+                let mut q = v.quality;
+                egui::ComboBox::from_id_salt("quality")
+                    .selected_text(egui::RichText::new(&self.profile_label).size(13.0))
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        for choice in yt::Quality::choices(v.screen_cap) {
+                            ui.selectable_value(&mut q, choice, choice.label());
+                        }
+                    });
+                if q != v.quality {
+                    act.quality = Some(q);
+                }
+            },
+        );
 
         // speed
         let sr = take(70.0);
-        ui.scope_builder(egui::UiBuilder::new().max_rect(sr).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
-            let mut s = self.speed;
-            egui::ComboBox::from_id_salt("speed")
-                .selected_text(egui::RichText::new(format!("{}×", trim_num(s))).size(13.0))
-                .width(60.0)
-                .show_ui(ui, |ui| {
-                    for x in [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0] {
-                        ui.selectable_value(&mut s, x, format!("{}×", trim_num(x)));
-                    }
-                });
-            if (s - self.speed).abs() > f64::EPSILON {
-                self.set_speed(s);
-            }
-        });
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(sr)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| {
+                let mut s = self.speed;
+                egui::ComboBox::from_id_salt("speed")
+                    .selected_text(egui::RichText::new(format!("{}×", trim_num(s))).size(13.0))
+                    .width(60.0)
+                    .show_ui(ui, |ui| {
+                        for x in [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0] {
+                            ui.selectable_value(&mut s, x, format!("{}×", trim_num(x)));
+                        }
+                    });
+                if (s - self.speed).abs() > f64::EPSILON {
+                    self.set_speed(s);
+                }
+            },
+        );
 
         // volume
         let vr = take(130.0);
-        ui.scope_builder(egui::UiBuilder::new().max_rect(vr).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
-            ui.label(egui::RichText::new("Vol").size(13.0).color(Color32::WHITE));
-            let mut vol = self.volume;
-            ui.spacing_mut().slider_width = 90.0;
-            if ui.add(egui::Slider::new(&mut vol, 0.0..=100.0).show_value(false)).changed() {
-                self.set_volume(vol);
-                act.volume_changed = true;
-            }
-        });
-
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(vr)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                ui.label(egui::RichText::new("Vol").size(13.0).color(Color32::WHITE));
+                let mut vol = self.volume;
+                ui.spacing_mut().slider_width = 90.0;
+                if ui
+                    .add(egui::Slider::new(&mut vol, 0.0..=100.0).show_value(false))
+                    .changed()
+                {
+                    self.set_volume(vol);
+                    act.volume_changed = true;
+                }
+            },
+        );
     }
 }
 

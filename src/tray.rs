@@ -31,9 +31,14 @@ mod imp {
             let show = MenuItem::new("Show ytmini", true, None);
             let play_pause = MenuItem::new("Pause", false, None);
             let quit = MenuItem::new("Quit ytmini", true, None);
-            let menu = Menu::with_items(&[&show, &play_pause, &PredefinedMenuItem::separator(), &quit])
-                .map_err(|e| e.to_string())?;
-            let (show_id, pp_id, quit_id) = (show.id().clone(), play_pause.id().clone(), quit.id().clone());
+            let menu =
+                Menu::with_items(&[&show, &play_pause, &PredefinedMenuItem::separator(), &quit])
+                    .map_err(|e| e.to_string())?;
+            let (show_id, pp_id, quit_id) = (
+                show.id().clone(),
+                play_pause.id().clone(),
+                quit.id().clone(),
+            );
             let ctx = ctx.clone();
             // Called from the OS event thread; wake the app so `logic` runs even
             // while the window is hidden.
@@ -63,7 +68,11 @@ mod imp {
                 .with_menu(Box::new(menu))
                 .build()
                 .map_err(|e| e.to_string())?;
-            Ok(Tray { _icon: icon, play_pause, last_label: None })
+            Ok(Tray {
+                _icon: icon,
+                play_pause,
+                last_label: None,
+            })
         }
 
         /// Reflect player state in the menu (`None` = nothing playing).
@@ -88,7 +97,13 @@ mod imp {
         const SS: u32 = 4;
         let (x0, y0, x1, y1, r, stroke) = (4.0f32, 9.0f32, 40.0f32, 35.0f32, 7.0f32, 3.0f32);
         let rr = |x: f32, y: f32, inset: f32| {
-            let (ax, ay, bx, by, rad) = (x0 + inset, y0 + inset, x1 - inset, y1 - inset, (r - inset).max(0.0));
+            let (ax, ay, bx, by, rad) = (
+                x0 + inset,
+                y0 + inset,
+                x1 - inset,
+                y1 - inset,
+                (r - inset).max(0.0),
+            );
             if x < ax || x > bx || y < ay || y > by {
                 return false;
             }
@@ -98,7 +113,8 @@ mod imp {
         };
         let tri = [(18.5f32, 15.5f32), (18.5f32, 28.5f32), (29.0f32, 22.0f32)];
         let in_tri = |x: f32, y: f32| {
-            let e = |a: (f32, f32), b: (f32, f32)| (b.0 - a.0) * (y - a.1) - (b.1 - a.1) * (x - a.0);
+            let e =
+                |a: (f32, f32), b: (f32, f32)| (b.0 - a.0) * (y - a.1) - (b.1 - a.1) * (x - a.0);
             let (d1, d2, d3) = (e(tri[0], tri[1]), e(tri[1], tri[2]), e(tri[2], tri[0]));
             (d1 >= 0.0 && d2 >= 0.0 && d3 >= 0.0) || (d1 <= 0.0 && d2 <= 0.0 && d3 <= 0.0)
         };
@@ -128,7 +144,9 @@ mod imp {
         {
             use objc2::MainThreadMarker;
             use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-            let Some(mtm) = MainThreadMarker::new() else { return };
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
             let app = NSApplication::sharedApplication(mtm);
             app.setActivationPolicy(if visible {
                 NSApplicationActivationPolicy::Regular

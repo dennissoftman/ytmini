@@ -59,13 +59,28 @@ pub fn sessions() -> Vec<Session> {
                 parents.push(root.join("Profiles"));
             }
             for parent in parents {
-                let Ok(rd) = std::fs::read_dir(&parent) else { continue };
+                let Ok(rd) = std::fs::read_dir(&parent) else {
+                    continue;
+                };
                 for e in rd.flatten() {
                     let profile = e.path();
-                    let dbs: &[&str] = if firefox { &["cookies.sqlite"] } else { &["Network/Cookies", "Cookies"] };
-                    let Some(db) = dbs.iter().map(|r| profile.join(r)).find(|p| p.is_file()) else { continue };
+                    let dbs: &[&str] = if firefox {
+                        &["cookies.sqlite"]
+                    } else {
+                        &["Network/Cookies", "Cookies"]
+                    };
+                    let Some(db) = dbs.iter().map(|r| profile.join(r)).find(|p| p.is_file()) else {
+                        continue;
+                    };
                     let modified = newest_mtime(&db);
-                    out.push(Session { browser: b.name, id: b.id, firefox, profile, db, modified });
+                    out.push(Session {
+                        browser: b.name,
+                        id: b.id,
+                        firefox,
+                        profile,
+                        db,
+                        modified,
+                    });
                 }
             }
         }
@@ -76,14 +91,20 @@ pub fn sessions() -> Vec<Session> {
 
 /// A previously used profile, if it still exists.
 pub fn find(id: &str, profile: &Path) -> Option<Session> {
-    sessions().into_iter().find(|s| s.id == id && s.profile == profile)
+    sessions()
+        .into_iter()
+        .find(|s| s.id == id && s.profile == profile)
 }
 
 /// Pending writes land in `-wal`, so count it as "used".
 fn newest_mtime(db: &Path) -> SystemTime {
     ["", "-wal", "-journal"]
         .iter()
-        .filter_map(|s| std::fs::metadata(format!("{}{s}", db.display())).and_then(|m| m.modified()).ok())
+        .filter_map(|s| {
+            std::fs::metadata(format!("{}{s}", db.display()))
+                .and_then(|m| m.modified())
+                .ok()
+        })
         .max()
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
@@ -91,8 +112,15 @@ fn newest_mtime(db: &Path) -> SystemTime {
 impl Session {
     /// "Firefox (default-release)" / "Chrome (Profile 1)"
     pub fn label(&self) -> String {
-        let p = self.profile.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let p = p.split_once('.').map_or(p.as_str(), |(_, rest)| rest).to_string(); // Firefox "xyz12.default"
+        let p = self
+            .profile
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let p = p
+            .split_once('.')
+            .map_or(p.as_str(), |(_, rest)| rest)
+            .to_string(); // Firefox "xyz12.default"
         format!("{} ({p})", self.browser)
     }
 
@@ -103,7 +131,10 @@ impl Session {
     /// they shut down; yt-dlp copies only the main file, so it would miss a
     /// fresh sign-in. Opening the copy with SQLite applies the log.
     fn snapshot_to(&self, dst: &Path) -> Result<PathBuf> {
-        let rel = self.db.strip_prefix(&self.profile).context("cookie db outside profile")?;
+        let rel = self
+            .db
+            .strip_prefix(&self.profile)
+            .context("cookie db outside profile")?;
         let name = self.profile.file_name().context("profile has no name")?;
         let to = dst.join(name).join(rel);
         let _ = std::fs::remove_dir_all(dst);
@@ -111,8 +142,9 @@ impl Session {
         for suffix in ["", "-wal", "-journal"] {
             let f = PathBuf::from(format!("{}{suffix}", self.db.display()));
             if f.is_file() {
-                std::fs::copy(&f, format!("{}{suffix}", to.display()))
-                    .with_context(|| format!("copying {}'s cookies (close it and retry)", self.browser))?;
+                std::fs::copy(&f, format!("{}{suffix}", to.display())).with_context(|| {
+                    format!("copying {}'s cookies (close it and retry)", self.browser)
+                })?;
             }
         }
         crate::yt::restrict_perms(&to)?;
@@ -125,15 +157,24 @@ impl Session {
     pub fn has_login(&self) -> Result<bool> {
         let dir = crate::yt::config_dir()?.join("signin-check");
         let db = self.snapshot_to(&dir)?;
-        let (table, host) = if self.firefox { ("moz_cookies", "host") } else { ("cookies", "host_key") };
-        let names = LOGIN_COOKIES.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(",");
+        let (table, host) = if self.firefox {
+            ("moz_cookies", "host")
+        } else {
+            ("cookies", "host_key")
+        };
+        let names = LOGIN_COOKIES
+            .iter()
+            .map(|n| format!("'{n}'"))
+            .collect::<Vec<_>>()
+            .join(",");
         let sql = format!(
             "select count(*) from {table} where name in ({names}) \
              and ({host} like '%youtube.com' or {host} like '%google.com')"
         );
         let n: i64 = {
             let conn = rusqlite::Connection::open(&db)?;
-            conn.query_row(&sql, [], |r| r.get(0)).context("reading cookie names")?
+            conn.query_row(&sql, [], |r| r.get(0))
+                .context("reading cookie names")?
         };
         let _ = std::fs::remove_dir_all(&dir);
         Ok(n > 0)
@@ -146,11 +187,20 @@ impl Session {
         self.snapshot_to(&dir)?;
         if !self.firefox {
             // Windows Chromium keeps the cookie key in "Local State" next to the profiles.
-            if let Some(ls) = self.profile.parent().map(|p| p.join("Local State")).filter(|p| p.is_file()) {
+            if let Some(ls) = self
+                .profile
+                .parent()
+                .map(|p| p.join("Local State"))
+                .filter(|p| p.is_file())
+            {
                 let _ = std::fs::copy(ls, dir.join("Local State"));
             }
         }
-        let p = if self.firefox { dir } else { dir.join(self.profile.file_name().context("profile has no name")?) };
+        let p = if self.firefox {
+            dir
+        } else {
+            dir.join(self.profile.file_name().context("profile has no name")?)
+        };
         Ok(format!("{}:{}", self.id, p.display()))
     }
 
@@ -163,7 +213,8 @@ impl Session {
             c.args(["-a", "Firefox", SIGN_IN_URL]);
             c
         } else {
-            let exe = exe(self.id).with_context(|| format!("couldn't find the {} app", self.browser))?;
+            let exe =
+                exe(self.id).with_context(|| format!("couldn't find the {} app", self.browser))?;
             let mut c = Command::new(exe);
             if !self.firefox {
                 if let Some(name) = self.profile.file_name() {
@@ -173,8 +224,12 @@ impl Session {
             c.arg(SIGN_IN_URL);
             c
         };
-        c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-        let mut child = c.spawn().with_context(|| format!("opening {}", self.browser))?;
+        c.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = c
+            .spawn()
+            .with_context(|| format!("opening {}", self.browser))?;
         // Reap in the background (it either exits at once, handing off to the
         // running browser, or *is* the browser).
         std::thread::spawn(move || child.wait());
@@ -232,7 +287,10 @@ fn exe(id: &str) -> Option<PathBuf> {
             _ => return None,
         };
         let dirs = ["/usr/bin", "/usr/local/bin", "/snap/bin"];
-        names.iter().flat_map(|n| dirs.iter().map(move |d| PathBuf::from(d).join(n))).collect()
+        names
+            .iter()
+            .flat_map(|n| dirs.iter().map(move |d| PathBuf::from(d).join(n)))
+            .collect()
     };
     cands.into_iter().find(|p| p.is_file())
 }

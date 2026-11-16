@@ -67,7 +67,10 @@ impl Tools {
                 deno: find_exe("deno", &dirs).or_else(|| crate::deps::Dep::Deno.managed()),
                 path_env,
             }),
-            (y, p) => Err(Missing { ytdlp: y.is_none(), player: !p }),
+            (y, p) => Err(Missing {
+                ytdlp: y.is_none(),
+                player: !p,
+            }),
         }
     }
 
@@ -83,7 +86,10 @@ impl Tools {
 
     /// Extra yt-dlp options for mpv's ytdl hook (`ytdl-raw-options`).
     pub fn ytdl_raw_options(&self) -> Vec<String> {
-        self.deno.iter().map(|d| format!("js-runtimes=deno:{}", d.display())).collect()
+        self.deno
+            .iter()
+            .map(|d| format!("js-runtimes=deno:{}", d.display()))
+            .collect()
     }
 }
 
@@ -92,8 +98,14 @@ impl Tools {
 fn bundled_helper(name: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    let file = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
-    [dir.join("../Helpers").join(&file), dir.join(&file)].into_iter().find(|p| is_executable(p))
+    let file = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    [dir.join("../Helpers").join(&file), dir.join(&file)]
+        .into_iter()
+        .find(|p| is_executable(p))
 }
 
 /// Put the package-manager locations on this process's PATH (call at startup,
@@ -145,7 +157,9 @@ fn find_exe(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
 }
 
 fn is_executable(p: &Path) -> bool {
-    let Ok(meta) = fs::metadata(p) else { return false };
+    let Ok(meta) = fs::metadata(p) else {
+        return false;
+    };
     if !meta.is_file() {
         return false;
     }
@@ -188,7 +202,9 @@ pub fn install_hint() -> &'static str {
 /// `~/Library/Application Support/ytmini` on macOS, `~/.config/ytmini` on Linux,
 /// `%APPDATA%\ytmini` on Windows.
 pub fn config_dir() -> Result<PathBuf> {
-    let d = dirs::config_dir().context("no config directory on this system")?.join("ytmini");
+    let d = dirs::config_dir()
+        .context("no config directory on this system")?
+        .join("ytmini");
     fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;
     Ok(d)
 }
@@ -217,20 +233,56 @@ pub struct Browser {
 }
 
 pub const ALL_BROWSERS: &[Browser] = &[
-    Browser { name: "Safari", id: "safari", family: Family::Safari },
-    Browser { name: "Chrome", id: "chrome", family: Family::Chromium },
-    Browser { name: "Firefox", id: "firefox", family: Family::Firefox },
-    Browser { name: "Brave", id: "brave", family: Family::Chromium },
-    Browser { name: "Edge", id: "edge", family: Family::Chromium },
-    Browser { name: "Chromium", id: "chromium", family: Family::Chromium },
-    Browser { name: "Opera", id: "opera", family: Family::Chromium },
-    Browser { name: "Vivaldi", id: "vivaldi", family: Family::Chromium },
+    Browser {
+        name: "Safari",
+        id: "safari",
+        family: Family::Safari,
+    },
+    Browser {
+        name: "Chrome",
+        id: "chrome",
+        family: Family::Chromium,
+    },
+    Browser {
+        name: "Firefox",
+        id: "firefox",
+        family: Family::Firefox,
+    },
+    Browser {
+        name: "Brave",
+        id: "brave",
+        family: Family::Chromium,
+    },
+    Browser {
+        name: "Edge",
+        id: "edge",
+        family: Family::Chromium,
+    },
+    Browser {
+        name: "Chromium",
+        id: "chromium",
+        family: Family::Chromium,
+    },
+    Browser {
+        name: "Opera",
+        id: "opera",
+        family: Family::Chromium,
+    },
+    Browser {
+        name: "Vivaldi",
+        id: "vivaldi",
+        family: Family::Chromium,
+    },
 ];
 
 /// Browsers that have a profile on this machine (that's what yt-dlp reads,
 /// so it's a better signal than "the app is installed").
 pub fn detect_browsers() -> Vec<Browser> {
-    ALL_BROWSERS.iter().copied().filter(|b| profile_dirs(b.id).iter().any(|p| p.exists())).collect()
+    ALL_BROWSERS
+        .iter()
+        .copied()
+        .filter(|b| profile_dirs(b.id).iter().any(|p| p.exists()))
+        .collect()
 }
 
 pub fn profile_dirs(id: &str) -> Vec<PathBuf> {
@@ -239,7 +291,12 @@ pub fn profile_dirs(id: &str) -> Vec<PathBuf> {
     {
         let s = home.join("Library/Application Support");
         let rel: &[&str] = match id {
-            "safari" => return vec![home.join("Library/Safari"), "/Applications/Safari.app".into()],
+            "safari" => {
+                return vec![
+                    home.join("Library/Safari"),
+                    "/Applications/Safari.app".into(),
+                ]
+            }
             "chrome" => &["Google/Chrome"],
             "firefox" => &["Firefox"],
             "brave" => &["BraveSoftware/Brave-Browser"],
@@ -272,10 +329,16 @@ pub fn profile_dirs(id: &str) -> Vec<PathBuf> {
         let cfg = home.join(".config");
         match id {
             "chrome" => vec![cfg.join("google-chrome")],
-            "firefox" => vec![home.join(".mozilla/firefox"), home.join("snap/firefox/common/.mozilla/firefox")],
+            "firefox" => vec![
+                home.join(".mozilla/firefox"),
+                home.join("snap/firefox/common/.mozilla/firefox"),
+            ],
             "brave" => vec![cfg.join("BraveSoftware/Brave-Browser")],
             "edge" => vec![cfg.join("microsoft-edge")],
-            "chromium" => vec![cfg.join("chromium"), home.join("snap/chromium/common/chromium")],
+            "chromium" => vec![
+                cfg.join("chromium"),
+                home.join("snap/chromium/common/chromium"),
+            ],
             "opera" => vec![cfg.join("opera")],
             "vivaldi" => vec![cfg.join("vivaldi")],
             _ => vec![],
@@ -285,7 +348,12 @@ pub fn profile_dirs(id: &str) -> Vec<PathBuf> {
 
 /// One-line heads-up about what will happen when importing from this browser.
 pub fn browser_note(spec: &str) -> &'static str {
-    let id = spec.split([':', '+']).next().unwrap_or("").trim().to_ascii_lowercase();
+    let id = spec
+        .split([':', '+'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     let family = ALL_BROWSERS.iter().find(|b| b.id == id).map(|b| b.family);
     match family {
         Some(Family::Firefox) => "No prompts — just make sure you're signed in to YouTube.",
@@ -307,7 +375,9 @@ pub fn browser_note(spec: &str) -> &'static str {
 /// A logged-in YouTube cookie jar contains these Google session cookies.
 /// (Only checks for names; never reads values out.)
 pub fn logged_in(cookies: &Path) -> bool {
-    fs::read_to_string(cookies).map(|s| s.contains("LOGIN_INFO") || s.contains("SAPISID")).unwrap_or(false)
+    fs::read_to_string(cookies)
+        .map(|s| s.contains("LOGIN_INFO") || s.contains("SAPISID"))
+        .unwrap_or(false)
 }
 
 /// Export cookies from a browser into `dest` using yt-dlp. Blocking (may sit on a
@@ -325,7 +395,15 @@ pub fn import_cookies(tools: &Tools, spec: &str, dest: &Path) -> Result<()> {
         .ytdlp_cmd()
         .args(["--cookies-from-browser", spec, "--cookies"])
         .arg(&tmp)
-        .args(["--skip-download", "--flat-playlist", "--playlist-end", "1", "-q", "-j", ":ytrec"])
+        .args([
+            "--skip-download",
+            "--flat-playlist",
+            "--playlist-end",
+            "1",
+            "-q",
+            "-j",
+            ":ytrec",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
@@ -370,9 +448,18 @@ pub enum Source {
     Playlists,
     Search(String),
     /// A channel's uploads. `url` is the channel's base URL.
-    Channel { url: String, name: String },
-    ChannelPlaylists { url: String, name: String },
-    Playlist { id: String, title: String },
+    Channel {
+        url: String,
+        name: String,
+    },
+    ChannelPlaylists {
+        url: String,
+        name: String,
+    },
+    Playlist {
+        id: String,
+        title: String,
+    },
 }
 
 impl Source {
@@ -391,7 +478,10 @@ impl Source {
 
     /// Pages reached by navigating (channel/playlist), as opposed to top tabs.
     pub fn is_page(&self) -> bool {
-        matches!(self, Source::Channel { .. } | Source::ChannelPlaylists { .. } | Source::Playlist { .. })
+        matches!(
+            self,
+            Source::Channel { .. } | Source::ChannelPlaylists { .. } | Source::Playlist { .. }
+        )
     }
 
     /// yt-dlp URL; `end` is the last (1-based) item we'll ask for.
@@ -404,7 +494,9 @@ impl Source {
             Source::Playlists => "https://www.youtube.com/feed/playlists".into(),
             Source::Search(q) => format!("ytsearch{end}:{q}"),
             Source::Channel { url, .. } => format!("{}/videos", url.trim_end_matches('/')),
-            Source::ChannelPlaylists { url, .. } => format!("{}/playlists", url.trim_end_matches('/')),
+            Source::ChannelPlaylists { url, .. } => {
+                format!("{}/playlists", url.trim_end_matches('/'))
+            }
             Source::Playlist { id, .. } => format!("https://www.youtube.com/playlist?list={id}"),
         }
     }
@@ -453,7 +545,11 @@ impl RawEntry {
             .flatten();
         let channel_url = self
             .channel_url
-            .or_else(|| self.channel_id.as_ref().map(|c| format!("https://www.youtube.com/channel/{c}")))
+            .or_else(|| {
+                self.channel_id
+                    .as_ref()
+                    .map(|c| format!("https://www.youtube.com/channel/{c}"))
+            })
             .or(self.uploader_url);
         Some(Video {
             id: self.id,
@@ -501,18 +597,30 @@ impl Video {
         } else if let Some(i) = s.find("v=") {
             s[i + 2..].chars().take(11).collect()
         } else {
-            let i = s.find("youtu.be/").map(|i| i + 9).or_else(|| s.find("/shorts/").map(|i| i + 8))?;
+            let i = s
+                .find("youtu.be/")
+                .map(|i| i + 9)
+                .or_else(|| s.find("/shorts/").map(|i| i + 8))?;
             s[i..].chars().take(11).collect()
         };
-        let ok = id.len() == 11 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-        ok.then_some(Video { id, ..Default::default() })
+        let ok = id.len() == 11
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        ok.then_some(Video {
+            id,
+            ..Default::default()
+        })
     }
 
     pub fn title(&self) -> &str {
         self.title.as_deref().unwrap_or(&self.id)
     }
     pub fn channel(&self) -> &str {
-        self.channel.as_deref().or(self.uploader.as_deref()).unwrap_or("")
+        self.channel
+            .as_deref()
+            .or(self.uploader.as_deref())
+            .unwrap_or("")
     }
     pub fn url(&self) -> String {
         format!("https://www.youtube.com/watch?v={}", self.id)
@@ -532,7 +640,6 @@ impl Video {
         Some(format!("{} views", s.replace(".0", "")))
     }
 
-
     /// `H:MM:SS` / `M:SS`, or `LIVE` when there's no duration.
     pub fn duration_label(&self) -> String {
         match self.duration {
@@ -550,7 +657,14 @@ impl Video {
 }
 
 /// Fetch `count` videos starting at 0-based `start`. Blocking.
-pub fn fetch(tools: &Tools, cookies: &Path, source: &Source, start: usize, count: usize) -> Result<Vec<Video>> {
+#[cfg(test)]
+pub fn fetch(
+    tools: &Tools,
+    cookies: &Path,
+    source: &Source,
+    start: usize,
+    count: usize,
+) -> Result<Vec<Video>> {
     let first = start + 1;
     let last = start + count;
     let out = tools
@@ -558,7 +672,12 @@ pub fn fetch(tools: &Tools, cookies: &Path, source: &Source, start: usize, count
         .arg("--cookies")
         .arg(cookies)
         .args(["--flat-playlist", "-j", "--no-warnings"])
-        .args(["--playlist-start", &first.to_string(), "--playlist-end", &last.to_string()])
+        .args([
+            "--playlist-start",
+            &first.to_string(),
+            "--playlist-end",
+            &last.to_string(),
+        ])
         .arg(source.url(last))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -577,11 +696,121 @@ pub fn fetch(tools: &Tools, cookies: &Path, source: &Source, start: usize, count
     Ok(vids)
 }
 
+/// How far a stream may go (yt-dlp stops early when the list ends).
+const STREAM_MAX: usize = 2000;
+
+/// A running `yt-dlp --lazy-playlist` that yields videos as YouTube pages
+/// arrive. We read lines only when more videos are wanted; once the pipe
+/// buffer (~a page) is full yt-dlp blocks, so it stays one page ahead and
+/// "load more" never refetches earlier pages. Dropping it kills the process.
+pub struct Stream {
+    child: Child,
+    out: std::io::BufReader<std::process::ChildStdout>,
+    stderr: std::sync::Arc<std::sync::Mutex<String>>,
+    ended: bool,
+}
+
+impl Stream {
+    /// Start at 0-based `start` (for resuming a stream that was closed while idle).
+    pub fn open(tools: &Tools, cookies: &Path, source: &Source, start: usize) -> Result<Stream> {
+        let mut child = tools
+            .ytdlp_cmd()
+            .env("PYTHONUNBUFFERED", "1")
+            .arg("--cookies")
+            .arg(cookies)
+            .args(["--flat-playlist", "--lazy-playlist", "-j", "--no-warnings"])
+            .args([
+                "--playlist-start",
+                &(start + 1).to_string(),
+                "--playlist-end",
+                &STREAM_MAX.to_string(),
+            ])
+            .arg(source.url(STREAM_MAX))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("running yt-dlp")?;
+        let out = std::io::BufReader::new(child.stdout.take().context("no stdout")?);
+        let stderr = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        if let Some(mut err) = child.stderr.take() {
+            let buf = stderr.clone();
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut chunk = [0u8; 4096];
+                while let Ok(n) = err.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    let mut b = buf.lock().unwrap_or_else(|e| e.into_inner());
+                    b.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                    if b.len() > 16_384 {
+                        let cut = b.len() - 8192;
+                        let cut = (cut..b.len()).find(|&i| b.is_char_boundary(i)).unwrap_or(0);
+                        b.drain(..cut);
+                    }
+                }
+            });
+        }
+        Ok(Stream {
+            child,
+            out,
+            stderr,
+            ended: false,
+        })
+    }
+
+    /// The next video; `Ok(None)` at the end of the list.
+    pub fn next_video(&mut self) -> Result<Option<Video>> {
+        use std::io::BufRead;
+        let mut line = String::new();
+        while !self.ended {
+            line.clear();
+            if self.out.read_line(&mut line).unwrap_or(0) == 0 {
+                self.ended = true;
+                break;
+            }
+            if let Some(v) = serde_json::from_str::<RawEntry>(&line)
+                .ok()
+                .and_then(RawEntry::into_video)
+            {
+                return Ok(Some(v));
+            }
+        }
+        let status = self.child.wait().context("waiting for yt-dlp")?;
+        if !status.success() {
+            std::thread::sleep(std::time::Duration::from_millis(50)); // let the stderr reader finish
+            let err = self
+                .stderr
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            bail!("{}", summarize_err(&err));
+        }
+        Ok(None)
+    }
+}
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        if !self.ended {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+    }
+}
+
 /// yt-dlp's stderr can be long; keep the ERROR lines (or the tail).
 fn summarize_err(stderr: &str) -> String {
     let errors: Vec<&str> = stderr.lines().filter(|l| l.contains("ERROR")).collect();
     let lines: Vec<&str> = if errors.is_empty() {
-        stderr.lines().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect()
+        stderr
+            .lines()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     } else {
         errors
     };
@@ -621,7 +850,10 @@ pub fn power_state() -> Power {
         };
         let saver = pmset(&["-g"]).lines().any(|l| {
             let mut w = l.split_whitespace();
-            matches!((w.next(), w.next()), (Some("lowpowermode" | "powermode"), Some("1")))
+            matches!(
+                (w.next(), w.next()),
+                (Some("lowpowermode" | "powermode"), Some("1"))
+            )
         });
         let on_battery = pmset(&["-g", "batt"]).contains("'Battery Power'");
         Power { on_battery, saver }
@@ -647,11 +879,18 @@ pub fn power_state() -> Power {
         if unsafe { GetSystemPowerStatus(&mut st) } == 0 {
             return Power::default();
         }
-        Power { on_battery: st.ac_line_status == 0, saver: st.system_status_flag == 1 }
+        Power {
+            on_battery: st.ac_line_status == 0,
+            saver: st.system_status_flag == 1,
+        }
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let read = |p: &Path| fs::read_to_string(p).map(|s| s.trim().to_string()).unwrap_or_default();
+        let read = |p: &Path| {
+            fs::read_to_string(p)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default()
+        };
         let saver = read(Path::new("/sys/firmware/acpi/platform_profile")) == "low-power";
         let mut has_mains = false;
         let mut mains_online = false;
@@ -663,7 +902,10 @@ pub fn power_state() -> Power {
                 }
             }
         }
-        Power { on_battery: has_mains && !mains_online, saver }
+        Power {
+            on_battery: has_mains && !mains_online,
+            saver,
+        }
     }
 }
 
@@ -684,7 +926,11 @@ pub fn watch_power(initial: Power, on_change: impl Fn(Power) + Send + 'static) {
             let mut changed = power_change_detector();
             let mut last_full = Instant::now();
             loop {
-                std::thread::sleep(Duration::from_secs(if cfg!(target_os = "macos") { 1 } else { 2 }));
+                std::thread::sleep(Duration::from_secs(if cfg!(target_os = "macos") {
+                    1
+                } else {
+                    2
+                }));
                 let due = last_full.elapsed() >= Duration::from_secs(60);
                 if !(changed() || due) {
                     continue;
@@ -709,7 +955,10 @@ fn power_change_detector() -> Box<dyn FnMut() -> bool + Send> {
         fn notify_register_check(name: *const c_char, out_token: *mut c_int) -> u32;
         fn notify_check(token: c_int, check: *mut c_int) -> u32;
     }
-    const KEYS: [&std::ffi::CStr; 2] = [c"com.apple.system.powersources.source", c"com.apple.system.lowpowermode"];
+    const KEYS: [&std::ffi::CStr; 2] = [
+        c"com.apple.system.powersources.source",
+        c"com.apple.system.lowpowermode",
+    ];
     let mut tokens = Vec::new();
     for key in KEYS {
         let mut tok: c_int = 0;
@@ -768,7 +1017,12 @@ impl Quality {
     /// Choices for the menu: Auto, every tier the screen can show, audio only.
     pub fn choices(screen_cap: u32) -> Vec<Quality> {
         let mut v = vec![Quality::Auto];
-        v.extend(TIERS.iter().filter(|&&h| h <= screen_cap).map(|&h| Quality::Max(h)));
+        v.extend(
+            TIERS
+                .iter()
+                .filter(|&&h| h <= screen_cap)
+                .map(|&h| Quality::Max(h)),
+        );
         v.push(Quality::AudioOnly);
         v
     }
@@ -779,7 +1033,11 @@ impl Quality {
 pub fn screen_cap(width_px: f32, height_px: f32) -> u32 {
     let video_h = height_px.min(width_px * 9.0 / 16.0);
     // 3% slack so e.g. a 1050-line screen still counts as a 1080p screen.
-    TIERS.iter().copied().find(|&h| h as f32 <= video_h * 1.03).unwrap_or(360)
+    TIERS
+        .iter()
+        .copied()
+        .find(|&h| h as f32 <= video_h * 1.03)
+        .unwrap_or(360)
 }
 
 /// Concrete mpv settings for one playback.
@@ -798,7 +1056,11 @@ pub struct Profile {
 /// hardware-decode it, and software AV1 at high res is a battery killer.
 fn format_for(h: u32, fps30: bool, saver: bool) -> String {
     let fps = if fps30 { "[fps<=30]" } else { "" };
-    let (codec, audio) = if saver { ("[vcodec^=avc1]", "ba[abr<=128]") } else { ("[vcodec!^=av01]", "ba") };
+    let (codec, audio) = if saver {
+        ("[vcodec^=avc1]", "ba[abr<=128]")
+    } else {
+        ("[vcodec!^=av01]", "ba")
+    };
     format!("bv*[height<={h}]{fps}{codec}+{audio}/bv*[height<={h}]{fps}+ba/bv*[height<={h}]+ba/b[height<={h}]/b")
 }
 
@@ -849,14 +1111,23 @@ pub fn play(
     mark_watched: bool,
     resume: Option<f64>,
 ) -> Result<Child> {
-    let mpv = tools.mpv.as_ref().context("no mpv executable for the separate-window player")?;
+    let mpv = tools
+        .mpv
+        .as_ref()
+        .context("no mpv executable for the separate-window player")?;
     let log = config_dir()?.join("mpv.log");
     let log_file = fs::File::create(&log).context("creating mpv.log")?;
     let mut c = Command::new(mpv);
     c.env("PATH", &tools.path_env)
         // `-append` takes one key=value as-is, so a path with spaces/commas is safe.
-        .arg(format!("--ytdl-raw-options-append=cookies={}", cookies.display()))
-        .arg(format!("--script-opts-append=ytdl_hook-ytdl_path={}", tools.ytdlp.display()))
+        .arg(format!(
+            "--ytdl-raw-options-append=cookies={}",
+            cookies.display()
+        ))
+        .arg(format!(
+            "--script-opts-append=ytdl_hook-ytdl_path={}",
+            tools.ytdlp.display()
+        ))
         .arg(format!("--ytdl-format={}", profile.ytdl_format))
         // mpv defaults to software decoding; hardware decoding is the biggest battery win.
         .arg("--hwdec=auto-safe")
@@ -866,7 +1137,12 @@ pub fn play(
         .arg(format!("--title={} — ytmini", video.title()))
         // yt-dlp reports the view to YouTube so it lands in the account's watch history.
         .args(mark_watched.then_some("--ytdl-raw-options-append=mark-watched="))
-        .args(tools.ytdl_raw_options().iter().map(|o| format!("--ytdl-raw-options-append={o}")))
+        .args(
+            tools
+                .ytdl_raw_options()
+                .iter()
+                .map(|o| format!("--ytdl-raw-options-append={o}")),
+        )
         .args(resume.map(|t| format!("--start={t:.1}")))
         .args(profile.fast.then_some("--profile=fast"))
         .args(profile.audio_only.then_some("--no-video"))
@@ -883,9 +1159,20 @@ pub fn play(
 /// Blocking (talks to mpv over IPC), so run it on a worker thread.
 pub fn switch_profile(url: &str, profile: &Profile) -> Result<()> {
     let mut ipc = Ipc::connect(&ipc_path())?;
-    let pos = ipc.request(serde_json::json!(["get_property", "time-pos"])).ok().and_then(|v| v.as_f64());
-    ipc.request(serde_json::json!(["set_property", "ytdl-format", profile.ytdl_format]))?;
-    ipc.request(serde_json::json!(["set_property", "vid", if profile.audio_only { "no" } else { "auto" }]))?;
+    let pos = ipc
+        .request(serde_json::json!(["get_property", "time-pos"]))
+        .ok()
+        .and_then(|v| v.as_f64());
+    ipc.request(serde_json::json!([
+        "set_property",
+        "ytdl-format",
+        profile.ytdl_format
+    ]))?;
+    ipc.request(serde_json::json!([
+        "set_property",
+        "vid",
+        if profile.audio_only { "no" } else { "auto" }
+    ]))?;
     let opts = pos.map(|p| format!("start={p:.1}")).unwrap_or_default();
     // mpv ≥ 0.38: loadfile <url> <flags> <index> <options>
     ipc.request(serde_json::json!(["loadfile", url, "replace", -1, opts]))?;
@@ -895,8 +1182,15 @@ pub fn switch_profile(url: &str, profile: &Profile) -> Result<()> {
 /// Position and duration of the separate-window mpv (for saving progress).
 pub fn ipc_progress() -> Option<(f64, f64)> {
     let mut ipc = Ipc::connect(&ipc_path()).ok()?;
-    let pos = ipc.request(serde_json::json!(["get_property", "time-pos"])).ok()?.as_f64()?;
-    let dur = ipc.request(serde_json::json!(["get_property", "duration"])).ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let pos = ipc
+        .request(serde_json::json!(["get_property", "time-pos"]))
+        .ok()?
+        .as_f64()?;
+    let dur = ipc
+        .request(serde_json::json!(["get_property", "duration"]))
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
     Some((pos, dur))
 }
 
@@ -917,10 +1211,18 @@ impl Ipc {
         };
         #[cfg(windows)]
         let (r, w): (Box<dyn std::io::Read>, Box<dyn std::io::Write>) = {
-            let f = fs::OpenOptions::new().read(true).write(true).open(path).context("connecting to mpv")?;
+            let f = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .context("connecting to mpv")?;
             (Box::new(f.try_clone()?), Box::new(f))
         };
-        Ok(Ipc { reader: std::io::BufReader::new(r), writer: w, next_id: 1 })
+        Ok(Ipc {
+            reader: std::io::BufReader::new(r),
+            writer: w,
+            next_id: 1,
+        })
     }
 
     fn request(&mut self, command: serde_json::Value) -> Result<serde_json::Value> {
@@ -936,7 +1238,9 @@ impl Ipc {
             if self.reader.read_line(&mut line)? == 0 {
                 bail!("mpv closed the IPC connection");
             }
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
             if v.get("request_id").and_then(|x| x.as_u64()) != Some(id) {
                 continue; // an event or someone else's reply
             }
@@ -966,7 +1270,11 @@ mod tests {
     use super::*;
 
     fn v(d: Option<f64>) -> Video {
-        Video { id: "abcdefghijk".into(), duration: d, ..Default::default() }
+        Video {
+            id: "abcdefghijk".into(),
+            duration: d,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -980,15 +1288,31 @@ mod tests {
 
     #[test]
     fn power_profiles() {
-        let saver = Power { on_battery: true, saver: true };
-        let batt = Power { on_battery: true, saver: false };
+        let saver = Power {
+            on_battery: true,
+            saver: true,
+        };
+        let batt = Power {
+            on_battery: true,
+            saver: false,
+        };
         let ac = Power::default();
-        assert!(profile(Quality::Auto, saver, 1440).ytdl_format.starts_with("bv*[height<=720][fps<=30][vcodec^=avc1]"));
-        assert!(profile(Quality::Auto, batt, 1440).ytdl_format.starts_with("bv*[height<=1080][fps<=30]"));
-        assert!(profile(Quality::Auto, ac, 1440).ytdl_format.starts_with("bv*[height<=1440][vcodec!^=av01]"));
+        assert!(profile(Quality::Auto, saver, 1440)
+            .ytdl_format
+            .starts_with("bv*[height<=720][fps<=30][vcodec^=avc1]"));
+        assert!(profile(Quality::Auto, batt, 1440)
+            .ytdl_format
+            .starts_with("bv*[height<=1080][fps<=30]"));
+        assert!(profile(Quality::Auto, ac, 1440)
+            .ytdl_format
+            .starts_with("bv*[height<=1440][vcodec!^=av01]"));
         // a manual choice wins over the power state, but never exceeds the screen
-        assert!(profile(Quality::Max(1080), saver, 1440).ytdl_format.starts_with("bv*[height<=1080][vcodec!^=av01]+ba/"));
-        assert!(profile(Quality::Max(2160), ac, 1080).ytdl_format.starts_with("bv*[height<=1080]"));
+        assert!(profile(Quality::Max(1080), saver, 1440)
+            .ytdl_format
+            .starts_with("bv*[height<=1080][vcodec!^=av01]+ba/"));
+        assert!(profile(Quality::Max(2160), ac, 1080)
+            .ytdl_format
+            .starts_with("bv*[height<=1080]"));
     }
 
     #[test]
@@ -1005,9 +1329,18 @@ mod tests {
     fn parse_play_arg() {
         let id = |s: &str| Video::from_url_or_id(s).map(|v| v.id);
         assert_eq!(id("dQw4w9WgXcQ").as_deref(), Some("dQw4w9WgXcQ"));
-        assert_eq!(id("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=1").as_deref(), Some("dQw4w9WgXcQ"));
-        assert_eq!(id("https://youtu.be/dQw4w9WgXcQ").as_deref(), Some("dQw4w9WgXcQ"));
-        assert_eq!(id("https://youtube.com/shorts/dQw4w9WgXcQ").as_deref(), Some("dQw4w9WgXcQ"));
+        assert_eq!(
+            id("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=1").as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
+        assert_eq!(
+            id("https://youtu.be/dQw4w9WgXcQ").as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
+        assert_eq!(
+            id("https://youtube.com/shorts/dQw4w9WgXcQ").as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
         assert_eq!(id("hello"), None);
     }
 
@@ -1023,7 +1356,10 @@ mod live {
     use super::*;
 
     fn setup() -> (Tools, PathBuf) {
-        (Tools::locate().expect("yt-dlp and mpv installed"), cookie_file().unwrap())
+        (
+            Tools::locate().expect("yt-dlp and mpv installed"),
+            cookie_file().unwrap(),
+        )
     }
 
     #[test]
@@ -1033,8 +1369,16 @@ mod live {
         let s = Source::Search("rust programming".into());
         let p1 = fetch(&t, &c, &s, 0, PAGE).unwrap();
         let p2 = fetch(&t, &c, &s, PAGE, PAGE).unwrap();
-        assert!(p1.len() >= 20 && p2.len() >= 20, "{} {}", p1.len(), p2.len());
-        let dup = p2.iter().filter(|b| p1.iter().any(|a| a.id == b.id)).count();
+        assert!(
+            p1.len() >= 20 && p2.len() >= 20,
+            "{} {}",
+            p1.len(),
+            p2.len()
+        );
+        let dup = p2
+            .iter()
+            .filter(|b| p1.iter().any(|a| a.id == b.id))
+            .count();
         eprintln!("page sizes {} {}, overlap {dup}", p1.len(), p2.len());
         assert!(dup < p2.len() / 2, "page 2 mostly repeats page 1");
     }
@@ -1044,24 +1388,69 @@ mod live {
     fn channel_and_playlists() {
         let (t, c) = setup();
         let feed = fetch(&t, &c, &Source::Feed, 0, 5).unwrap();
-        let v = feed.iter().find(|v| v.channel_url.is_some()).expect("feed entry with channel url");
+        let v = feed
+            .iter()
+            .find(|v| v.channel_url.is_some())
+            .expect("feed entry with channel url");
         let (url, name) = (v.channel_url.clone().unwrap(), v.channel().to_string());
-        let vids = fetch(&t, &c, &Source::Channel { url: url.clone(), name: name.clone() }, 0, 5).unwrap();
-        eprintln!("channel {name}: {} videos, first: {}", vids.len(), vids[0].title());
+        let vids = fetch(
+            &t,
+            &c,
+            &Source::Channel {
+                url: url.clone(),
+                name: name.clone(),
+            },
+            0,
+            5,
+        )
+        .unwrap();
+        eprintln!(
+            "channel {name}: {} videos, first: {}",
+            vids.len(),
+            vids[0].title()
+        );
         assert!(!vids.is_empty() && vids.iter().all(|v| !v.is_playlist));
 
         let blender = "https://www.youtube.com/@BlenderOfficial".to_string();
-        let lists = fetch(&t, &c, &Source::ChannelPlaylists { url: blender, name: "Blender".into() }, 0, 5).unwrap();
+        let lists = fetch(
+            &t,
+            &c,
+            &Source::ChannelPlaylists {
+                url: blender,
+                name: "Blender".into(),
+            },
+            0,
+            5,
+        )
+        .unwrap();
         assert!(lists.iter().all(|l| l.is_playlist), "all playlists");
-        assert!(lists.iter().all(|l| l.thumb_id.as_ref().is_some_and(|i| i.len() == 11)), "thumbs");
+        assert!(
+            lists
+                .iter()
+                .all(|l| l.thumb_id.as_ref().is_some_and(|i| i.len() == 11)),
+            "thumbs"
+        );
         let first = &lists[0];
         eprintln!("playlist: {} ({})", first.title(), first.id);
-        let inside = fetch(&t, &c, &Source::Playlist { id: first.id.clone(), title: first.title().into() }, 0, 5).unwrap();
+        let inside = fetch(
+            &t,
+            &c,
+            &Source::Playlist {
+                id: first.id.clone(),
+                title: first.title().into(),
+            },
+            0,
+            5,
+        )
+        .unwrap();
         eprintln!("  {} videos, first: {}", inside.len(), inside[0].title());
         assert!(!inside.is_empty() && inside.iter().all(|v| !v.is_playlist));
 
         let mine = fetch(&t, &c, &Source::Playlists, 0, 10).unwrap();
-        eprintln!("my playlists: {:?}", mine.iter().map(|p| p.title()).collect::<Vec<_>>());
+        eprintln!(
+            "my playlists: {:?}",
+            mine.iter().map(|p| p.title()).collect::<Vec<_>>()
+        );
         assert!(mine.iter().any(|p| p.id == "LL"), "Liked videos present");
     }
 
@@ -1069,7 +1458,12 @@ mod live {
     #[ignore]
     fn personal_tabs() {
         let (t, c) = setup();
-        for s in [Source::Feed, Source::Subscriptions, Source::WatchLater, Source::History] {
+        for s in [
+            Source::Feed,
+            Source::Subscriptions,
+            Source::WatchLater,
+            Source::History,
+        ] {
             match fetch(&t, &c, &s, 0, 5) {
                 Ok(v) => eprintln!("{s:?}: {} videos", v.len()),
                 Err(e) => eprintln!("{s:?}: error {e:#}"),
@@ -1081,10 +1475,24 @@ mod live {
     #[ignore]
     fn mpv_starts_and_dies() {
         let (t, c) = setup();
-        let v = fetch(&t, &c, &Source::Search("big buck bunny".into()), 0, 1).unwrap().remove(0);
-        let mut child = play(&t, &c, &v, &profile(Quality::Auto, power_state(), 1080), false, None).unwrap();
+        let v = fetch(&t, &c, &Source::Search("big buck bunny".into()), 0, 1)
+            .unwrap()
+            .remove(0);
+        let mut child = play(
+            &t,
+            &c,
+            &v,
+            &profile(Quality::Auto, power_state(), 1080),
+            false,
+            None,
+        )
+        .unwrap();
         std::thread::sleep(std::time::Duration::from_secs(8));
-        assert!(child.try_wait().unwrap().is_none(), "mpv exited early: {:?}", last_player_error());
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "mpv exited early: {:?}",
+            last_player_error()
+        );
         child.kill().unwrap();
         child.wait().unwrap();
     }
@@ -1094,13 +1502,31 @@ mod live {
     fn live_quality_switch_keeps_position() {
         use std::time::Duration;
         let (t, c) = setup();
-        let v = fetch(&t, &c, &Source::Search("big buck bunny 1080p".into()), 0, 1).unwrap().remove(0);
-        let mut child = play(&t, &c, &v, &profile(Quality::Max(1080), Power::default(), 2160), false, None).unwrap();
+        let v = fetch(&t, &c, &Source::Search("big buck bunny 1080p".into()), 0, 1)
+            .unwrap()
+            .remove(0);
+        let mut child = play(
+            &t,
+            &c,
+            &v,
+            &profile(Quality::Max(1080), Power::default(), 2160),
+            false,
+            None,
+        )
+        .unwrap();
         std::thread::sleep(Duration::from_secs(12));
-        let get = |prop: &str| Ipc::connect(&ipc_path()).unwrap().request(serde_json::json!(["get_property", prop]));
+        let get = |prop: &str| {
+            Ipc::connect(&ipc_path())
+                .unwrap()
+                .request(serde_json::json!(["get_property", prop]))
+        };
         let before = get("time-pos").unwrap().as_f64().unwrap();
         eprintln!("before: pos {before:.1}, height {:?}", get("height").ok());
-        switch_profile(&v.url(), &profile(Quality::Max(480), Power::default(), 2160)).unwrap();
+        switch_profile(
+            &v.url(),
+            &profile(Quality::Max(480), Power::default(), 2160),
+        )
+        .unwrap();
         std::thread::sleep(Duration::from_secs(10));
         let after = get("time-pos").unwrap().as_f64().unwrap();
         let height = get("height").unwrap().as_i64().unwrap();
@@ -1140,10 +1566,16 @@ pub fn set_watch_later(cookies: &Path, video_id: &str, add: bool) -> Result<()> 
         .map(|(_, v)| v.clone())
         .context("not signed in (no SAPISID cookie)")?;
     let origin = "https://www.youtube.com";
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
     let digest = Sha1::digest(format!("{ts} {sapisid} {origin}").as_bytes());
     let hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    let cookie: String = pairs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ");
+    let cookie: String = pairs
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("; ");
     let action = if add {
         serde_json::json!({"action": "ACTION_ADD_VIDEO", "addedVideoId": video_id})
     } else {
@@ -1160,7 +1592,9 @@ pub fn set_watch_later(cookies: &Path, video_id: &str, add: bool) -> Result<()> 
         .build()
         .into();
     let mut resp = agent
-        .post(format!("{origin}/youtubei/v1/browse/edit_playlist?prettyPrint=false"))
+        .post(format!(
+            "{origin}/youtubei/v1/browse/edit_playlist?prettyPrint=false"
+        ))
         .header("Cookie", &cookie)
         .header("Authorization", &format!("SAPISIDHASH {ts}_{hash}"))
         .header("Origin", origin)
@@ -1175,6 +1609,39 @@ pub fn set_watch_later(cookies: &Path, video_id: &str, add: bool) -> Result<()> 
         bail!("YouTube refused the change (HTTP {status})");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod stream_live {
+    /// Streams 3 pages of search results: no duplicates, later pages fast.
+    /// `cargo test -- --ignored stream_pages --nocapture`
+    #[test]
+    #[ignore]
+    fn stream_pages() {
+        let tools = super::Tools::locate().unwrap();
+        let cookies = super::config_dir().unwrap().join("cookies.txt");
+        let t = std::time::Instant::now();
+        let mut s = super::Stream::open(
+            &tools,
+            &cookies,
+            &super::Source::Search("rust programming".into()),
+            0,
+        )
+        .unwrap();
+        let mut ids = std::collections::HashSet::new();
+        for page in 0..3 {
+            let p = std::time::Instant::now();
+            for _ in 0..super::PAGE {
+                let v = s.next_video().unwrap().expect("more results");
+                assert!(ids.insert(v.id.clone()), "duplicate {}", v.id);
+            }
+            eprintln!(
+                "page {page}: {:.2}s (total {:.2}s)",
+                p.elapsed().as_secs_f32(),
+                t.elapsed().as_secs_f32()
+            );
+        }
+    }
 }
 
 #[cfg(test)]

@@ -27,9 +27,16 @@ fn main() -> eframe::Result {
             .with_app_id("ytmini")
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([520.0, 400.0])
-            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).unwrap_or_default()),
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+                    .unwrap_or_default(),
+            ),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
-    eframe::run_native("ytmini", options, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))
+    eframe::run_native(
+        "ytmini",
+        options,
+        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+    )
 }

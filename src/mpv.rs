@@ -80,7 +80,8 @@ struct RenderParam {
 
 #[repr(C)]
 struct OpenGlInitParams {
-    get_proc_address: Option<unsafe extern "C" fn(ctx: *mut c_void, name: *const c_char) -> *mut c_void>,
+    get_proc_address:
+        Option<unsafe extern "C" fn(ctx: *mut c_void, name: *const c_char) -> *mut c_void>,
     get_proc_address_ctx: *mut c_void,
 }
 
@@ -120,8 +121,10 @@ struct Lib {
     request_log_messages: unsafe extern "C" fn(*mut Handle, *const c_char) -> c_int,
     wait_event: unsafe extern "C" fn(*mut Handle, f64) -> *mut Event,
     set_wakeup_callback: unsafe extern "C" fn(*mut Handle, Option<Callback>, *mut c_void),
-    render_context_create: unsafe extern "C" fn(*mut *mut RenderCtx, *mut Handle, *mut RenderParam) -> c_int,
-    render_context_set_update_callback: unsafe extern "C" fn(*mut RenderCtx, Option<Callback>, *mut c_void),
+    render_context_create:
+        unsafe extern "C" fn(*mut *mut RenderCtx, *mut Handle, *mut RenderParam) -> c_int,
+    render_context_set_update_callback:
+        unsafe extern "C" fn(*mut RenderCtx, Option<Callback>, *mut c_void),
     render_context_update: unsafe extern "C" fn(*mut RenderCtx) -> u64,
     render_context_render: unsafe extern "C" fn(*mut RenderCtx, *mut RenderParam) -> c_int,
     render_context_free: unsafe extern "C" fn(*mut RenderCtx),
@@ -129,14 +132,22 @@ struct Lib {
 
 fn candidates() -> Vec<std::path::PathBuf> {
     let mut v = Vec::new();
-    if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    {
         // .app/Contents/MacOS/../Frameworks, or next to the exe
         v.push(dir.join("../Frameworks/libmpv.2.dylib"));
         v.push(dir.join("libmpv.2.dylib"));
         v.push(dir.join("libmpv-2.dll"));
     }
     let names: &[&str] = if cfg!(target_os = "macos") {
-        &["/opt/homebrew/lib/libmpv.2.dylib", "/usr/local/lib/libmpv.2.dylib", "/opt/local/lib/libmpv.2.dylib", "libmpv.2.dylib"]
+        &[
+            "/opt/homebrew/lib/libmpv.2.dylib",
+            "/usr/local/lib/libmpv.2.dylib",
+            "/opt/local/lib/libmpv.2.dylib",
+            "libmpv.2.dylib",
+        ]
     } else if cfg!(windows) {
         &["libmpv-2.dll", "mpv-2.dll", "mpv-1.dll"]
     } else {
@@ -161,14 +172,21 @@ fn load() -> Result<Lib, String> {
             Err(e) => errors.push(format!("{}: {e}", path.display())),
         }
     }
-    Err(format!("libmpv not found ({})", errors.last().cloned().unwrap_or_else(|| "no candidates".into())))
+    Err(format!(
+        "libmpv not found ({})",
+        errors
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "no candidates".into())
+    ))
 }
 
 fn bind(lib: libloading::Library) -> Result<Lib, String> {
     macro_rules! sym {
         ($name:literal) => {
             // SAFETY: the signature matches mpv's client.h/render.h for this symbol.
-            *unsafe { lib.get(concat!($name, "\0").as_bytes()) }.map_err(|e| format!("{}: {e}", $name))?
+            *unsafe { lib.get(concat!($name, "\0").as_bytes()) }
+                .map_err(|e| format!("{}: {e}", $name))?
         };
     }
     let l = Lib {
@@ -195,7 +213,11 @@ fn bind(lib: libloading::Library) -> Result<Lib, String> {
     // SAFETY: plain getter.
     let ver = unsafe { (l.client_api_version)() };
     if ver >> 16 != 2 {
-        return Err(format!("unsupported libmpv client API {}.{} (need 2.x)", ver >> 16, ver & 0xffff));
+        return Err(format!(
+            "unsupported libmpv client API {}.{} (need 2.x)",
+            ver >> 16,
+            ver & 0xffff
+        ));
     }
     Ok(l)
 }
@@ -216,7 +238,10 @@ pub fn bundled_or_system() -> Option<bool> {
 static LOADED_FROM: OnceLock<String> = OnceLock::new();
 
 fn exe_dir() -> String {
-    std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.display().to_string())).unwrap_or_default()
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.display().to_string()))
+        .unwrap_or_default()
 }
 
 /// Is an embeddable libmpv available? (Loads it on first call.)
@@ -234,7 +259,11 @@ fn check(code: c_int, what: &str) -> Result<(), String> {
     }
     let msg = lib()
         // SAFETY: mpv_error_string returns a static string.
-        .map(|l| unsafe { CStr::from_ptr((l.error_string)(code)) }.to_string_lossy().into_owned())
+        .map(|l| {
+            unsafe { CStr::from_ptr((l.error_string)(code)) }
+                .to_string_lossy()
+                .into_owned()
+        })
         .unwrap_or_default();
     Err(format!("{what}: {msg}"))
 }
@@ -266,7 +295,10 @@ impl Mpv {
         for (k, v) in options {
             let (k, v) = (cstr(k), cstr(v));
             // SAFETY: valid handle and C strings.
-            check(unsafe { (l.set_option_string)(h, k.as_ptr(), v.as_ptr()) }, &format!("option {k:?}"))?;
+            check(
+                unsafe { (l.set_option_string)(h, k.as_ptr(), v.as_ptr()) },
+                &format!("option {k:?}"),
+            )?;
         }
         // SAFETY: valid, not yet initialized handle.
         check(unsafe { (l.initialize)(h) }, "mpv_initialize")?;
@@ -282,34 +314,54 @@ impl Mpv {
         let mut ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
         ptrs.push(std::ptr::null());
         // SAFETY: NULL-terminated array of valid C strings that outlive the call.
-        check(unsafe { (self.l().command)(self.h, ptrs.as_mut_ptr()) }, args.first().copied().unwrap_or("command"))
+        check(
+            unsafe { (self.l().command)(self.h, ptrs.as_mut_ptr()) },
+            args.first().copied().unwrap_or("command"),
+        )
     }
 
     pub fn set_str(&self, name: &str, value: &str) -> Result<(), String> {
         let (n, v) = (cstr(name), cstr(value));
         let mut p = v.as_ptr();
         // SAFETY: MPV_FORMAT_STRING takes a pointer to a char*.
-        check(unsafe { (self.l().set_property)(self.h, n.as_ptr(), FORMAT_STRING, (&raw mut p).cast()) }, name)
+        check(
+            unsafe {
+                (self.l().set_property)(self.h, n.as_ptr(), FORMAT_STRING, (&raw mut p).cast())
+            },
+            name,
+        )
     }
 
     pub fn set_f64(&self, name: &str, mut value: f64) -> Result<(), String> {
         let n = cstr(name);
         // SAFETY: MPV_FORMAT_DOUBLE takes a pointer to a double.
-        check(unsafe { (self.l().set_property)(self.h, n.as_ptr(), FORMAT_DOUBLE, (&raw mut value).cast()) }, name)
+        check(
+            unsafe {
+                (self.l().set_property)(self.h, n.as_ptr(), FORMAT_DOUBLE, (&raw mut value).cast())
+            },
+            name,
+        )
     }
 
     pub fn set_flag(&self, name: &str, value: bool) -> Result<(), String> {
         let n = cstr(name);
         let mut v: c_int = value.into();
         // SAFETY: MPV_FORMAT_FLAG takes a pointer to an int.
-        check(unsafe { (self.l().set_property)(self.h, n.as_ptr(), FORMAT_FLAG, (&raw mut v).cast()) }, name)
+        check(
+            unsafe {
+                (self.l().set_property)(self.h, n.as_ptr(), FORMAT_FLAG, (&raw mut v).cast())
+            },
+            name,
+        )
     }
 
     pub fn get_f64(&self, name: &str) -> Option<f64> {
         let n = cstr(name);
         let mut v = 0.0f64;
         // SAFETY: MPV_FORMAT_DOUBLE writes a double.
-        let r = unsafe { (self.l().get_property)(self.h, n.as_ptr(), FORMAT_DOUBLE, (&raw mut v).cast()) };
+        let r = unsafe {
+            (self.l().get_property)(self.h, n.as_ptr(), FORMAT_DOUBLE, (&raw mut v).cast())
+        };
         (r >= 0).then_some(v)
     }
 
@@ -375,12 +427,14 @@ pub fn prop_f64(p: &EventProperty) -> Option<f64> {
 
 pub fn prop_string(p: &EventProperty) -> Option<String> {
     // SAFETY: MPV_FORMAT_STRING data is a char**.
-    (p.format == FORMAT_STRING && !p.data.is_null()).then(|| c_to_string(unsafe { *(p.data as *const *const c_char) }))
+    (p.format == FORMAT_STRING && !p.data.is_null())
+        .then(|| c_to_string(unsafe { *(p.data as *const *const c_char) }))
 }
 
 pub fn prop_flag(p: &EventProperty) -> Option<bool> {
     // SAFETY: MPV_FORMAT_FLAG data is an int.
-    (p.format == FORMAT_FLAG && !p.data.is_null()).then(|| unsafe { *(p.data as *const c_int) } != 0)
+    (p.format == FORMAT_FLAG && !p.data.is_null())
+        .then(|| unsafe { *(p.data as *const c_int) } != 0)
 }
 
 pub fn c_to_string(p: *const c_char) -> String {
@@ -421,13 +475,25 @@ impl Render {
         };
         let api = c"opengl";
         let mut params = [
-            RenderParam { kind: RENDER_PARAM_API_TYPE, data: api.as_ptr() as *mut c_void },
-            RenderParam { kind: RENDER_PARAM_OPENGL_INIT_PARAMS, data: (&raw mut init).cast() },
-            RenderParam { kind: RENDER_PARAM_INVALID, data: std::ptr::null_mut() },
+            RenderParam {
+                kind: RENDER_PARAM_API_TYPE,
+                data: api.as_ptr() as *mut c_void,
+            },
+            RenderParam {
+                kind: RENDER_PARAM_OPENGL_INIT_PARAMS,
+                data: (&raw mut init).cast(),
+            },
+            RenderParam {
+                kind: RENDER_PARAM_INVALID,
+                data: std::ptr::null_mut(),
+            },
         ];
         let mut ctx = std::ptr::null_mut();
         // SAFETY: params are valid for the call; GL context is current (caller contract).
-        check(unsafe { (l.render_context_create)(&mut ctx, mpv.h, params.as_mut_ptr()) }, "mpv_render_context_create")?;
+        check(
+            unsafe { (l.render_context_create)(&mut ctx, mpv.h, params.as_mut_ptr()) },
+            "mpv_render_context_create",
+        )?;
         Ok(Render { ctx, _gpa: gpa })
     }
 
@@ -448,15 +514,34 @@ impl Render {
     /// Draw the current video frame into `fbo` (size `w`×`h` pixels).
     /// No Y flip: egui's texture coordinates already match mpv's FBO output.
     pub fn render(&self, fbo: u32, w: i32, h: i32) -> Result<(), String> {
-        let mut fbo = OpenGlFbo { fbo: fbo as c_int, w, h, internal_format: 0 };
+        let mut fbo = OpenGlFbo {
+            fbo: fbo as c_int,
+            w,
+            h,
+            internal_format: 0,
+        };
         let mut flip: c_int = 0;
         let mut params = [
-            RenderParam { kind: RENDER_PARAM_OPENGL_FBO, data: (&raw mut fbo).cast() },
-            RenderParam { kind: RENDER_PARAM_FLIP_Y, data: (&raw mut flip).cast() },
-            RenderParam { kind: RENDER_PARAM_INVALID, data: std::ptr::null_mut() },
+            RenderParam {
+                kind: RENDER_PARAM_OPENGL_FBO,
+                data: (&raw mut fbo).cast(),
+            },
+            RenderParam {
+                kind: RENDER_PARAM_FLIP_Y,
+                data: (&raw mut flip).cast(),
+            },
+            RenderParam {
+                kind: RENDER_PARAM_INVALID,
+                data: std::ptr::null_mut(),
+            },
         ];
         // SAFETY: valid ctx and params; GL context current (caller contract).
-        check(unsafe { (lib().expect("loaded").render_context_render)(self.ctx, params.as_mut_ptr()) }, "render")
+        check(
+            unsafe {
+                (lib().expect("loaded").render_context_render)(self.ctx, params.as_mut_ptr())
+            },
+            "render",
+        )
     }
 }
 

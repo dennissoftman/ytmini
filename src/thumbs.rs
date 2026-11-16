@@ -96,7 +96,8 @@ impl Thumbs {
             .build()
             .into();
         for _ in 0..WORKERS {
-            let (req_rx, done_tx, ctx, agent) = (req_rx.clone(), done_tx.clone(), ctx.clone(), agent.clone());
+            let (req_rx, done_tx, ctx, agent) =
+                (req_rx.clone(), done_tx.clone(), ctx.clone(), agent.clone());
             let (limits, writes) = (limits.clone(), writes.clone());
             std::thread::Builder::new()
                 .name("thumbs".into())
@@ -117,7 +118,12 @@ impl Thumbs {
                 })
                 .expect("spawning thumbnail worker");
         }
-        Thumbs { slots: HashMap::new(), req_tx, done_rx, frame: 0 }
+        Thumbs {
+            slots: HashMap::new(),
+            req_tx,
+            done_rx,
+            frame: 0,
+        }
     }
 
     /// Upload finished loads as textures and trim the LRU. Call once per frame.
@@ -127,13 +133,20 @@ impl Thumbs {
             let slot = match result {
                 Ok(img) => {
                     let name = format!("{}-{}", key.0, key.1.tag());
-                    Slot::Ready(ctx.load_texture(name, img, TextureOptions::LINEAR), self.frame)
+                    Slot::Ready(
+                        ctx.load_texture(name, img, TextureOptions::LINEAR),
+                        self.frame,
+                    )
                 }
                 Err(_) => Slot::Failed,
             };
             self.slots.insert(key, slot);
         }
-        let ready = self.slots.values().filter(|s| matches!(s, Slot::Ready(..))).count();
+        let ready = self
+            .slots
+            .values()
+            .filter(|s| matches!(s, Slot::Ready(..)))
+            .count();
         if ready > MAX_TEXTURES {
             let mut ages: Vec<(u64, Key)> = self
                 .slots
@@ -191,7 +204,11 @@ fn load(agent: &ureq::Agent, key: &Key, on_write: impl FnOnce()) -> Result<Color
     // at 640×360 as JPEG ~40 KB — 3× more thumbnails per MB of cache.
     // Stored under the requested variant even if we fell back to a smaller
     // source, so old videos without hq720 don't cost a 404 every time.
-    let stored = if oversized { encode_jpeg(&img).unwrap_or(downloaded) } else { downloaded };
+    let stored = if oversized {
+        encode_jpeg(&img).unwrap_or(downloaded)
+    } else {
+        downloaded
+    };
     cache::write_thumb(&disk_key, &stored);
     on_write();
     Ok(to_color_image(img))
@@ -207,13 +224,18 @@ fn fit_width(img: image::DynamicImage, max_w: u32) -> image::DynamicImage {
 
 fn encode_jpeg(img: &image::DynamicImage) -> Option<Vec<u8>> {
     let mut out = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80).encode_image(&img.to_rgb8()).ok()?;
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80)
+        .encode_image(&img.to_rgb8())
+        .ok()?;
     Some(out)
 }
 
 fn to_color_image(img: image::DynamicImage) -> ColorImage {
     let rgba = img.to_rgba8();
-    ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw())
+    ColorImage::from_rgba_unmultiplied(
+        [rgba.width() as usize, rgba.height() as usize],
+        rgba.as_raw(),
+    )
 }
 
 fn download_first(agent: &ureq::Agent, urls: &[String]) -> Result<Vec<u8>, String> {
@@ -222,7 +244,11 @@ fn download_first(agent: &ureq::Agent, urls: &[String]) -> Result<Vec<u8>, Strin
         match agent.get(url).call() {
             Ok(mut resp) => {
                 let mut bytes = Vec::new();
-                resp.body_mut().as_reader().take(MAX_BYTES).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+                resp.body_mut()
+                    .as_reader()
+                    .take(MAX_BYTES)
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| e.to_string())?;
                 return Ok(bytes);
             }
             Err(e) => last_err = e.to_string(), // 404 → try the next one
@@ -238,7 +264,11 @@ mod bench {
     #[ignore]
     fn thumb_reload_cost() {
         let dir = dirs::cache_dir().unwrap().join("ytmini/thumbs");
-        let files: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).collect();
+        let files: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
         assert!(!files.is_empty(), "run the app once to fill the cache");
         let t = std::time::Instant::now();
         let mut bytes_total = 0;
@@ -249,6 +279,10 @@ mod bench {
             std::hint::black_box(img);
         }
         let per = t.elapsed() / files.len() as u32;
-        eprintln!("{} thumbs, avg {} KB on disk, read+decode {per:?} each", files.len(), bytes_total / files.len() / 1024);
+        eprintln!(
+            "{} thumbs, avg {} KB on disk, read+decode {per:?} each",
+            files.len(),
+            bytes_total / files.len() / 1024
+        );
     }
 }

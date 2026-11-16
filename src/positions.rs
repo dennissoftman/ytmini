@@ -52,7 +52,9 @@ fn path() -> Option<std::path::PathBuf> {
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 impl Positions {
@@ -61,7 +63,11 @@ impl Positions {
             .and_then(|p| std::fs::read(p).ok())
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
-        Positions { map, dirty: false, last_save: Instant::now() }
+        Positions {
+            map,
+            dirty: false,
+            last_save: Instant::now(),
+        }
     }
 
     pub fn get(&self, id: &str) -> Option<&Entry> {
@@ -81,14 +87,28 @@ impl Positions {
         if pos <= 0.0 {
             return;
         }
-        self.map.insert(id.to_string(), Entry { pos, dur, at: now() });
+        self.map.insert(
+            id.to_string(),
+            Entry {
+                pos,
+                dur,
+                at: now(),
+            },
+        );
         self.dirty = true;
     }
 
     /// Mark as fully watched (duration unknown → just flagged by a large position).
     pub fn mark_watched(&mut self, id: &str, dur: Option<f64>) {
         let d = dur.filter(|d| *d > 0.0).unwrap_or(1.0);
-        self.map.insert(id.to_string(), Entry { pos: d, dur: d, at: now() });
+        self.map.insert(
+            id.to_string(),
+            Entry {
+                pos: d,
+                dur: d,
+                at: now(),
+            },
+        );
         self.dirty = true;
     }
 
@@ -107,7 +127,8 @@ impl Positions {
             return;
         }
         if self.map.len() > MAX_ENTRIES {
-            let mut by_age: Vec<(u64, String)> = self.map.iter().map(|(k, e)| (e.at, k.clone())).collect();
+            let mut by_age: Vec<(u64, String)> =
+                self.map.iter().map(|(k, e)| (e.at, k.clone())).collect();
             by_age.sort();
             for (_, k) in by_age.into_iter().take(self.map.len() - MAX_ENTRIES) {
                 self.map.remove(&k);
@@ -129,7 +150,11 @@ mod tests {
     use super::*;
 
     fn with(pos: f64, dur: f64) -> Positions {
-        let mut p = Positions { map: HashMap::new(), dirty: false, last_save: Instant::now() };
+        let mut p = Positions {
+            map: HashMap::new(),
+            dirty: false,
+            last_save: Instant::now(),
+        };
         p.update("abcdefghijk", pos, dur);
         p
     }

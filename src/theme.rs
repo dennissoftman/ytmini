@@ -69,24 +69,29 @@ pub fn pal() -> Palette {
 macro_rules! getters {
     ($($name:ident),*) => { $(#[inline] pub fn $name() -> Color32 { pal().$name })* };
 }
-getters!(accent, on_accent, bg, sidebar, panel, card, card_hover, thumb_bg, text, text_dim, err, err_bg);
+getters!(
+    accent, on_accent, bg, sidebar, panel, card, card_hover, thumb_bg, text, text_dim, err, err_bg
+);
 
 /// macOS accent colour (`AppleAccentColor`): (light-mode, dark-mode) variants.
 fn system_accent() -> Option<(Color32, Color32)> {
     if !cfg!(target_os = "macos") {
         return None;
     }
-    let out = std::process::Command::new("defaults").args(["read", "-g", "AppleAccentColor"]).output().ok()?;
+    let out = std::process::Command::new("defaults")
+        .args(["read", "-g", "AppleAccentColor"])
+        .output()
+        .ok()?;
     let n: i32 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?; // absent = multicolour (blue)
     let rgb = |r, g, b| Color32::from_rgb(r, g, b);
     Some(match n {
         -1 => (rgb(0x8C, 0x8C, 0x8C), rgb(0x98, 0x98, 0x98)), // graphite
-        0 => (rgb(0xFF, 0x38, 0x3C), rgb(0xFF, 0x45, 0x3A)), // red
-        1 => (rgb(0xF7, 0x82, 0x1B), rgb(0xFF, 0x9F, 0x0A)), // orange
-        2 => (rgb(0xE0, 0xA8, 0x00), rgb(0xFF, 0xD6, 0x0A)), // yellow
-        3 => (rgb(0x28, 0xA7, 0x45), rgb(0x30, 0xD1, 0x58)), // green
-        5 => (rgb(0x95, 0x3D, 0x96), rgb(0xBF, 0x5A, 0xF2)), // purple
-        6 => (rgb(0xF7, 0x4F, 0x9E), rgb(0xFF, 0x37, 0x5F)), // pink
+        0 => (rgb(0xFF, 0x38, 0x3C), rgb(0xFF, 0x45, 0x3A)),  // red
+        1 => (rgb(0xF7, 0x82, 0x1B), rgb(0xFF, 0x9F, 0x0A)),  // orange
+        2 => (rgb(0xE0, 0xA8, 0x00), rgb(0xFF, 0xD6, 0x0A)),  // yellow
+        3 => (rgb(0x28, 0xA7, 0x45), rgb(0x30, 0xD1, 0x58)),  // green
+        5 => (rgb(0x95, 0x3D, 0x96), rgb(0xBF, 0x5A, 0xF2)),  // purple
+        6 => (rgb(0xF7, 0x4F, 0x9E), rgb(0xFF, 0x37, 0x5F)),  // pink
         _ => return None,                                     // blue
     })
 }
@@ -102,7 +107,12 @@ pub fn init(ctx: &egui::Context) {
         _ => egui::ThemePreference::System,
     };
     ctx.options_mut(|o| o.theme_preference = pref);
-    PAL.with(|p| p.set(Palette { dark: !ctx.theme().default_visuals().dark_mode, ..DARK })); // force first apply
+    PAL.with(|p| {
+        p.set(Palette {
+            dark: !ctx.theme().default_visuals().dark_mode,
+            ..DARK
+        })
+    }); // force first apply
     update(ctx);
 }
 
@@ -115,7 +125,9 @@ pub fn update(ctx: &egui::Context) {
     let mut p = if dark { DARK } else { LIGHT };
     if let Some((l, d)) = SYS_ACCENT.with(|a| a.get()) {
         p.accent = if dark { d } else { l };
-        if p.accent == Color32::from_rgb(0xFF, 0xD6, 0x0A) || p.accent == Color32::from_rgb(0xE0, 0xA8, 0x00) {
+        if p.accent == Color32::from_rgb(0xFF, 0xD6, 0x0A)
+            || p.accent == Color32::from_rgb(0xE0, 0xA8, 0x00)
+        {
             p.on_accent = Color32::BLACK; // yellow
         }
     }
@@ -141,11 +153,19 @@ fn apply_style(ctx: &egui::Context, p: Palette) {
         style.spacing.interact_size.y = 24.0;
 
         let v = &mut style.visuals;
-        *v = if p.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+        *v = if p.dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        };
         v.panel_fill = p.bg;
         v.window_fill = p.panel;
         v.window_stroke = Stroke::new(1.0, p.card_hover);
-        v.extreme_bg_color = if p.dark { Color32::from_rgb(0x2A, 0x2A, 0x2D) } else { Color32::from_rgb(0xEE, 0xEE, 0xF0) }; // text fields
+        v.extreme_bg_color = if p.dark {
+            Color32::from_rgb(0x2A, 0x2A, 0x2D)
+        } else {
+            Color32::from_rgb(0xEE, 0xEE, 0xF0)
+        }; // text fields
         v.faint_bg_color = p.card;
         v.override_text_color = None;
         v.hyperlink_color = p.accent;
@@ -182,21 +202,41 @@ fn apply_style(ctx: &egui::Context, p: Palette) {
 fn add_fonts(ctx: &egui::Context) {
     use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
     let add = |name: &str, path: &str, priority: FontPriority, mono: bool| -> bool {
-        let Ok(bytes) = std::fs::read(path) else { return false };
-        let mut fams = vec![InsertFontFamily { family: FontFamily::Proportional, priority }];
+        let Ok(bytes) = std::fs::read(path) else {
+            return false;
+        };
+        let mut fams = vec![InsertFontFamily {
+            family: FontFamily::Proportional,
+            priority,
+        }];
         if mono {
-            fams.push(InsertFontFamily { family: FontFamily::Monospace, priority: FontPriority::Lowest });
+            fams.push(InsertFontFamily {
+                family: FontFamily::Monospace,
+                priority: FontPriority::Lowest,
+            });
         }
-        ctx.add_font(FontInsert::new(name, egui::FontData::from_owned(bytes), fams));
+        ctx.add_font(FontInsert::new(
+            name,
+            egui::FontData::from_owned(bytes),
+            fams,
+        ));
         true
     };
     if cfg!(target_os = "macos") {
-        add("sf-pro", "/System/Library/Fonts/SFNS.ttf", FontPriority::Highest, false);
+        add(
+            "sf-pro",
+            "/System/Library/Fonts/SFNS.ttf",
+            FontPriority::Highest,
+            false,
+        );
     }
     let fallbacks: &[&str] = if cfg!(target_os = "macos") {
         &["/System/Library/Fonts/Supplemental/Arial Unicode.ttf"]
     } else if cfg!(windows) {
-        &["C:\\Windows\\Fonts\\arialuni.ttf", "C:\\Windows\\Fonts\\seguisym.ttf"]
+        &[
+            "C:\\Windows\\Fonts\\arialuni.ttf",
+            "C:\\Windows\\Fonts\\seguisym.ttf",
+        ]
     } else {
         &[
             "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",

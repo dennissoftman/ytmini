@@ -26,10 +26,14 @@ pub struct Limits {
 
 impl Limits {
     pub fn new(cap_mb: u64, days: u64) -> Limits {
-        Limits { cap_bytes: AtomicU64::new(cap_mb * 1024 * 1024), max_age_days: AtomicU64::new(days) }
+        Limits {
+            cap_bytes: AtomicU64::new(cap_mb * 1024 * 1024),
+            max_age_days: AtomicU64::new(days),
+        }
     }
     pub fn set(&self, cap_mb: u64, days: u64) {
-        self.cap_bytes.store(cap_mb * 1024 * 1024, Ordering::Relaxed);
+        self.cap_bytes
+            .store(cap_mb * 1024 * 1024, Ordering::Relaxed);
         self.max_age_days.store(days, Ordering::Relaxed);
     }
 }
@@ -96,8 +100,13 @@ pub fn read_list(name: &str) -> Option<CachedList> {
 
 pub fn write_list(name: &str, videos: &[Video]) {
     let Some(p) = list_path(name) else { return };
-    let saved_at = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    if let Ok(json) = serde_json::to_vec(&CachedList { saved_at, videos: videos.to_vec() }) {
+    let saved_at = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    if let Ok(json) = serde_json::to_vec(&CachedList {
+        saved_at,
+        videos: videos.to_vec(),
+    }) {
         atomic_write(&p, &json);
     }
 }
@@ -113,7 +122,9 @@ pub fn enforce(limits: &Limits) -> u64 {
 
     let mut files: Vec<(PathBuf, u64, SystemTime)> = Vec::new();
     for sub in ["thumbs", "lists"] {
-        let Ok(rd) = fs::read_dir(root.join(sub)) else { continue };
+        let Ok(rd) = fs::read_dir(root.join(sub)) else {
+            continue;
+        };
         for e in rd.flatten() {
             let Ok(m) = e.metadata() else { continue };
             if !m.is_file() {
@@ -130,7 +141,7 @@ pub fn enforce(limits: &Limits) -> u64 {
     let mut total: u64 = files.iter().map(|f| f.1).sum();
     if total > cap {
         files.sort_by_key(|f| f.2); // oldest first
-        // Evict a bit below the cap so we don't run this on every write.
+                                    // Evict a bit below the cap so we don't run this on every write.
         let target = cap / 10 * 9;
         for (path, len, _) in files {
             if total <= target {
