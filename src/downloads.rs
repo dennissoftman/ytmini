@@ -147,10 +147,11 @@ pub enum Progress {
 }
 
 /// yt-dlp format for a download of at most `height` (0 = audio only).
-/// No AV1 (most Macs can't hardware-decode it, so it'd cost battery offline).
+/// VP9 first (hardware-decoded and much sharper than H.264 per byte); no
+/// AV1 (most Macs can't hardware-decode it, so it'd cost battery offline).
 fn video_format(height: u32) -> String {
     format!(
-        "bv*[height<={height}][vcodec!^=av01][fps<=30]/bv*[height<={height}][vcodec!^=av01]/bv*[height<={height}]/b[height<={height}]"
+        "bv*[height<={height}][vcodec^=vp][fps<=30]/bv*[height<={height}][vcodec!^=av01][fps<=30]/bv*[height<={height}][vcodec!^=av01]/bv*[height<={height}]/b[height<={height}]"
     )
 }
 

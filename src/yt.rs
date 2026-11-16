@@ -1134,22 +1134,26 @@ pub struct Profile {
 }
 
 /// yt-dlp format chain: preferred variant first, then progressively looser.
-/// We skip AV1 in the first pick: most Macs before M3 (and many PCs) can't
-/// hardware-decode it, and software AV1 at high res is a battery killer.
-fn format_for(h: u32, fps30: bool, saver: bool) -> String {
+///
+/// VP9 first: Apple silicon decodes it in hardware like H.264, but at the
+/// same size it looks far better (VMAF at 720p: VP9 99, H.264 65), and our
+/// measurements showed no meaningful power difference between them or
+/// between 720p and 1080p VP9 (~0.3 W over idle either way). AV1 is skipped
+/// in the first picks: Macs before M3 decode it in software, which does cost
+/// battery.
+fn format_for(h: u32, fps30: bool) -> String {
     let fps = if fps30 { "[fps<=30]" } else { "" };
-    let (codec, audio) = if saver {
-        ("[vcodec^=avc1]", "ba[abr<=128]")
-    } else {
-        ("[vcodec!^=av01]", "ba")
-    };
-    format!("bv*[height<={h}]{fps}{codec}+{audio}/bv*[height<={h}]{fps}+ba/bv*[height<={h}]+ba/b[height<={h}]/b")
+    format!(
+        "bv*[height<={h}]{fps}[vcodec^=vp]+ba/bv*[height<={h}]{fps}[vcodec!^=av01]+ba/bv*[height<={h}]{fps}+ba/bv*[height<={h}]+ba/b[height<={h}]/b"
+    )
 }
 
 pub fn profile(q: Quality, p: Power, screen_cap: u32) -> Profile {
-    let mk = |h: u32, fps30: bool, saver: bool, why: &str| Profile {
-        ytdl_format: format_for(h, fps30, saver),
-        fast: saver || h <= 480,
+    let mk = |h: u32, fps30: bool, why: &str| Profile {
+        ytdl_format: format_for(h, fps30),
+        // mpv's `fast` profile only saved power when it was paired with
+        // low-quality H.264; with hardware VP9 the default scaler is cheap.
+        fast: false,
         audio_only: false,
         label: format!("{h}p{}{why}", if fps30 { "30" } else { "" }),
     };
@@ -1161,10 +1165,12 @@ pub fn profile(q: Quality, p: Power, screen_cap: u32) -> Profile {
             label: "audio only".into(),
         },
         // Manual pick, still never above the screen (window may have moved).
-        Quality::Max(h) => mk(h.min(screen_cap), false, false, ""),
-        Quality::Auto if p.saver => mk(screen_cap.min(720), true, true, " · battery saver"),
-        Quality::Auto if p.on_battery => mk(screen_cap.min(1080), true, false, " · on battery"),
-        Quality::Auto => mk(screen_cap, false, false, ""),
+        Quality::Max(h) => mk(h.min(screen_cap), false, ""),
+        // Power-aware Auto: 1080p30 VP9. Higher frame rates and resolutions
+        // are where the real cost is; 1080p itself is nearly free.
+        Quality::Auto if p.saver => mk(screen_cap.min(1080), true, " · battery saver"),
+        Quality::Auto if p.on_battery => mk(screen_cap.min(1080), true, " · on battery"),
+        Quality::Auto => mk(screen_cap, false, ""),
     }
 }
 
@@ -1376,19 +1382,21 @@ mod tests {
             saver: false,
         };
         let ac = Power::default();
-        assert!(profile(Quality::Auto, saver, 1440)
+        let sp = profile(Quality::Auto, saver, 1440);
+        assert!(sp
             .ytdl_format
-            .starts_with("bv*[height<=720][fps<=30][vcodec^=avc1]"));
+            .starts_with("bv*[height<=1080][fps<=30][vcodec^=vp]+ba/"));
+        assert!(!sp.fast);
         assert!(profile(Quality::Auto, batt, 1440)
             .ytdl_format
             .starts_with("bv*[height<=1080][fps<=30]"));
         assert!(profile(Quality::Auto, ac, 1440)
             .ytdl_format
-            .starts_with("bv*[height<=1440][vcodec!^=av01]"));
+            .starts_with("bv*[height<=1440][vcodec^=vp]+ba/bv*[height<=1440][vcodec!^=av01]"));
         // a manual choice wins over the power state, but never exceeds the screen
         assert!(profile(Quality::Max(1080), saver, 1440)
             .ytdl_format
-            .starts_with("bv*[height<=1080][vcodec!^=av01]+ba/"));
+            .starts_with("bv*[height<=1080][vcodec^=vp]+ba/"));
         assert!(profile(Quality::Max(2160), ac, 1080)
             .ytdl_format
             .starts_with("bv*[height<=1080]"));

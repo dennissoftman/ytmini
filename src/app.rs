@@ -2733,7 +2733,7 @@ impl App {
                             ui.checkbox(&mut s.prepare_on_hover, "Start videos faster (prepare the one you're pointing at)");
                             ui.label(
                                 RichText::new(format!(
-                                    "Auto never exceeds what this screen can show ({}p), and drops to 1080p30 on battery, 720p30 in Low Power Mode.",
+                                    "Auto never exceeds what this screen can show ({}p). On battery and in Low Power Mode it plays 1080p30. Sharp VP9 is preferred everywhere: this Mac decodes it in hardware, so it costs no more battery than blurry H.264.",
                                     self.screen_cap
                                 ))
                                 .small()
