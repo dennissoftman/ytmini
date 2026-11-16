@@ -739,6 +739,9 @@ pub struct Direct {
     pub user_agent: Option<String>,
     /// A download on disk rather than resolved URLs.
     pub offline: bool,
+    /// The video's title, when the lookup told us (for videos opened from a
+    /// bare link: mpv can't learn it from stream URLs).
+    pub title: Option<String>,
 }
 
 impl Direct {
@@ -807,6 +810,7 @@ pub fn direct_from_info(j: &serde_json::Value) -> Result<Direct> {
         .pointer("/http_headers/User-Agent")
         .and_then(|u| u.as_str())
         .map(str::to_string);
+    let title = j.get("title").and_then(|t| t.as_str()).map(str::to_string);
     if let Some(parts) = j.get("requested_formats").and_then(|r| r.as_array()) {
         let video_part = parts
             .iter()
@@ -820,6 +824,7 @@ pub fn direct_from_info(j: &serde_json::Value) -> Result<Direct> {
                 audio: audio_part.and_then(url),
                 user_agent,
                 offline: false,
+                title,
             });
         }
         if let Some(a) = audio_part.and_then(url) {
@@ -828,6 +833,7 @@ pub fn direct_from_info(j: &serde_json::Value) -> Result<Direct> {
                 audio: None,
                 user_agent,
                 offline: false,
+                title,
             });
         }
     }
@@ -837,6 +843,7 @@ pub fn direct_from_info(j: &serde_json::Value) -> Result<Direct> {
         audio: None,
         user_agent,
         offline: false,
+        title,
     })
 }
 

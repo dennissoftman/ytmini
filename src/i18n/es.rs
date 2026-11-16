@@ -234,6 +234,7 @@ pub const T: &[(&str, &str)] = &[
     ("{}B", "{} mil M"),
     ("{}K", "{} mil"),
     ("{}M", "{} M"),
+    ("Back (Esc)", "Atrás (Esc)"),
     ("←  Back", "←  Atrás"),
     ("←  Home", "←  Inicio"),
     ("← Back to videos", "← Volver a los vídeos"),

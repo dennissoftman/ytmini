@@ -407,6 +407,9 @@ pub struct App {
     /// The default route's local address, and when it was last checked.
     net_route: Option<std::net::IpAddr>,
     net_checked: std::time::Instant,
+    /// dev (`YTMINI_PLAY_SEQ=id,id,…`): videos to play one after another,
+    /// each once the current one has played 4 s (start-up timing).
+    play_seq: Vec<String>,
     /// DeArrow branding per video id (None while being fetched).
     dearrow: HashMap<String, Option<crate::dearrow::Branding>>,
     dearrow_tx: Option<Sender<String>>,
@@ -544,6 +547,9 @@ impl App {
             resolve_wait: None,
             net_route: yt::route_fingerprint(),
             net_checked: std::time::Instant::now(),
+            play_seq: std::env::var("YTMINI_PLAY_SEQ")
+                .map(|v| v.split(',').rev().map(str::to_string).collect())
+                .unwrap_or_default(),
             hover: None,
             dl_active: HashMap::new(),
             tray,
@@ -1538,6 +1544,7 @@ impl App {
                     audio,
                     user_agent: None,
                     offline: true,
+                    title: None,
                 })
             })
             .or_else(|| self.prepared_for(&video.id, &profile.ytdl_format));
@@ -5102,6 +5109,7 @@ impl eframe::App for App {
         if let Some(e) = &mut self.embedded {
             e.poll_events();
             if std::mem::take(&mut e.resolved_failed) {
+                crate::native::report_failure(&e.id);
                 // probably a new network: the other stored URLs won't work either
                 self.prepared.clear();
             }
@@ -5183,6 +5191,23 @@ impl eframe::App for App {
             }
         }
         self.prepare_next(&ctx);
+        // (after 6 s, like a person picking a video: start-up work is done)
+        if !self.play_seq.is_empty()
+            && self.tools.is_some()
+            && ctx.input(|i| i.time) > 6.0
+            && self.embedded.as_ref().is_none_or(|p| p.started && p.pos > 4.0)
+        {
+            if let Some(v) = self.play_seq.pop().as_deref().and_then(Video::from_url_or_id) {
+                if std::env::var_os("YTMINI_DEBUG").is_some() {
+                    eprintln!("play_seq: {}", v.id);
+                }
+                self.play(&v);
+                ctx.request_repaint();
+            }
+        }
+        if !self.play_seq.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
         let grid_in =
             ctx.animate_bool_with_time(egui::Id::unique("grid_in"), self.embedded.is_none(), 0.25);
         egui::Frame::new().fill(bg()).show(ui, |ui| {

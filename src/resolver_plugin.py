@@ -46,6 +46,7 @@ def _pick(info):
     fmt = lambda f: {'url': f.get('url'), 'vcodec': f.get('vcodec')}
     return {
         'url': info.get('url'),
+        'title': info.get('title'),
         'vcodec': info.get('vcodec'),
         'requested_formats': [fmt(f) for f in info.get('requested_formats') or []],
         'http_headers': {'User-Agent': (info.get('http_headers') or {}).get('User-Agent')},

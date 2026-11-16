@@ -14,6 +14,7 @@ mod i18n;
 mod innertube;
 mod links;
 mod mpv;
+mod native;
 mod nowplaying;
 mod player;
 mod positions;

@@ -26,6 +26,21 @@ pub struct Client {
     english: bool,
 }
 
+/// One connection pool for all YouTube API calls, so each call reuses an
+/// open HTTPS connection instead of a new handshake (~0.1 s). Cookies are
+/// per request (headers), never stored in the agent.
+pub fn shared_agent() -> ureq::Agent {
+    static AGENT: std::sync::LazyLock<ureq::Agent> = std::sync::LazyLock::new(|| {
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(15)))
+            .http_status_as_error(false)
+            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
+            .build()
+            .into()
+    });
+    AGENT.clone()
+}
+
 /// Serialises cookies.txt rewrites across tab threads.
 static JAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -48,12 +63,7 @@ impl Client {
             .iter()
             .find_map(|n| pairs.iter().find(|(k, _)| k == n))
             .map(|(_, v)| v.clone());
-        let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(15)))
-            .http_status_as_error(false)
-            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
-            .build()
-            .into();
+        let agent = shared_agent();
         Ok(Client {
             pairs: std::sync::Mutex::new(pairs),
             sapisid,
@@ -65,12 +75,7 @@ impl Client {
 
     /// No cookies at all: for public data we'd rather not tie to the account.
     pub fn anonymous() -> Client {
-        let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(15)))
-            .http_status_as_error(false)
-            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
-            .build()
-            .into();
+        let agent = shared_agent();
         Client {
             pairs: std::sync::Mutex::new(Vec::new()),
             sapisid: None,
@@ -85,18 +90,52 @@ impl Client {
     }
 
     /// POST /youtubei/v1/<endpoint> with `body` merged into the client context.
-    pub fn post(&self, endpoint: &str, mut body: Value) -> Result<Value> {
+    pub fn post(&self, endpoint: &str, body: Value) -> Result<Value> {
+        let v = self.post_as(
+            endpoint,
+            body,
+            json!({"clientName": "WEB", "clientVersion": CLIENT_VERSION}),
+            1,
+            None,
+        )?;
+        if endpoint == "browse" {
+            note_premium(&v);
+        }
+        Ok(v)
+    }
+
+    /// Like `post`, but as another YouTube client (`client` holds its
+    /// clientName/clientVersion and device fields; `number` is its numeric
+    /// id; `user_agent` overrides the browser one).
+    pub fn post_as(
+        &self,
+        endpoint: &str,
+        mut body: Value,
+        mut client: Value,
+        number: u32,
+        user_agent: Option<&str>,
+    ) -> Result<Value> {
         let (hl, gl) = crate::i18n::youtube_locale();
         let hl = if self.english { "en".to_string() } else { hl };
-        body["context"] = json!({"client": {"clientName": "WEB", "clientVersion": CLIENT_VERSION, "hl": hl, "gl": gl}});
+        let version = client
+            .get("clientVersion")
+            .and_then(Value::as_str)
+            .unwrap_or(CLIENT_VERSION)
+            .to_string();
+        client["hl"] = json!(hl);
+        client["gl"] = json!(gl);
+        body["context"] = json!({ "client": client });
         let mut req = self
             .agent
             .post(format!("{ORIGIN}/youtubei/v1/{endpoint}?prettyPrint=false"))
             .header("Origin", ORIGIN)
             .header("X-Origin", ORIGIN)
-            .header("X-Youtube-Client-Name", "1")
-            .header("X-Youtube-Client-Version", CLIENT_VERSION)
+            .header("X-Youtube-Client-Name", &number.to_string())
+            .header("X-Youtube-Client-Version", &version)
             .header("Content-Type", "application/json");
+        if let Some(ua) = user_agent {
+            req = req.header("User-Agent", ua);
+        }
         let cookie = {
             let p = self.pairs.lock().unwrap_or_else(|e| e.into_inner());
             p.iter()
@@ -146,6 +185,28 @@ impl Client {
             bail!("{SESSION_EXPIRED}");
         }
         Ok(v)
+    }
+}
+
+/// Whether the account has YouTube Premium: 0 unknown, 1 no, 2 yes. Learned
+/// from the logo in any home/browse reply (the same check yt-dlp makes).
+static PREMIUM: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn note_premium(v: &Value) {
+    let Some(logo) = v.pointer("/topbar/desktopTopbarRenderer/logo/topbarLogoRenderer") else {
+        return;
+    };
+    let yes = logo.pointer("/iconImage/iconType").and_then(Value::as_str)
+        == Some("YOUTUBE_PREMIUM_LOGO");
+    PREMIUM.store(if yes { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `Some(true)` once a reply showed the Premium logo; `None` until known.
+pub fn premium() -> Option<bool> {
+    match PREMIUM.load(std::sync::atomic::Ordering::Relaxed) {
+        2 => Some(true),
+        1 => Some(false),
+        _ => None,
     }
 }
 

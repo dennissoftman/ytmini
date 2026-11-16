@@ -1,0 +1,828 @@
+//! Native stream lookup: ask YouTube's player API for the stream URLs
+//! ourselves and solve its JS challenges in a long-running, sandboxed deno.
+//! ~0.2 s, against ~1.4 s for even a warm yt-dlp (which first downloads the
+//! whole watch page).
+//!
+//! YouTube changes this often, so everything here is a fast path only: any
+//! surprise (an error, a live stream, a format we don't pick ourselves, a
+//! URL that doesn't answer) returns an error and `resolver` asks yt-dlp. URLs
+//! that later fail to play count as strikes; after two, this session goes
+//! back to yt-dlp alone.
+//!
+//! The challenge solver is yt-dlp's own (yt-dlp/ejs, bundled with the
+//! yt-dlp we manage), so it's updated along with yt-dlp. Deno runs it with no
+//! permissions: it gets the player script on stdin and can't touch files or
+//! the network. Cookies go only to youtube.com, as in `innertube`.
+
+use crate::innertube::Client;
+use crate::yt::{self, Direct, Tools, Video};
+use anyhow::{bail, Context, Result};
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+const SOLVER_HOST: &str = include_str!("native_solver.js");
+/// How often to check which player script YouTube currently serves.
+const PLAYER_CHECK: Duration = Duration::from_secs(30 * 60);
+/// The solver is stopped after this long unused.
+const IDLE_MAX: Duration = Duration::from_secs(20 * 60);
+/// Native URLs that failed to play before this session stops using them.
+const MAX_STRIKES: u32 = 2;
+const BROWSER_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+
+/// A YouTube client to ask as (the same ones yt-dlp uses by default).
+struct Spec {
+    name: &'static str,
+    number: u32,
+    client: fn() -> Value,
+    user_agent: &'static str,
+}
+
+/// Premium accounts: no proof-of-origin token needed for its streams, and it
+/// has the Premium-only formats.
+const WEB_CREATOR: Spec = Spec {
+    name: "web_creator",
+    number: 62,
+    client: || json!({"clientName": "WEB_CREATOR", "clientVersion": "1.20260708.06.00"}),
+    user_agent: BROWSER_UA,
+};
+
+/// Everyone else: a TV client, whose streams need no token either.
+const TV_SAMSUNG_UA: &str = "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1";
+const TV_SAMSUNG: Spec = Spec {
+    name: "tv_samsung",
+    number: 7,
+    client: || {
+        json!({
+            "clientName": "TVHTML5",
+            "clientVersion": "5.20260707",
+            "deviceMake": "Samsung",
+            "deviceModel": "UKS9800",
+            "userAgent": TV_SAMSUNG_UA,
+            "osName": "Tizen",
+            "osVersion": "2.4.0",
+        })
+    },
+    user_agent: TV_SAMSUNG_UA,
+};
+
+fn debug() -> bool {
+    std::env::var_os("YTMINI_DEBUG").is_some()
+}
+
+// ---------- player script ----------
+
+struct Player {
+    id: String,
+    code: Arc<String>,
+    sts: u64,
+    checked: Instant,
+}
+
+static PLAYER: Mutex<Option<Player>> = Mutex::new(None);
+
+fn agent() -> ureq::Agent {
+    crate::innertube::shared_agent()
+}
+
+fn get_text(agent: &ureq::Agent, url: &str) -> Result<String> {
+    let mut r = agent.get(url).call().context("contacting YouTube")?;
+    anyhow::ensure!(r.status() == 200, "HTTP {} for {url}", r.status());
+    Ok(r.body_mut().with_config().limit(16 << 20).read_to_string()?)
+}
+
+/// The current player script (id, code, signature timestamp). Public and
+/// fetched without cookies; re-checked every half hour.
+fn player() -> Result<(String, Arc<String>, u64)> {
+    let mut slot = PLAYER.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(p) = slot.as_ref().filter(|p| p.checked.elapsed() < PLAYER_CHECK) {
+        return Ok((p.id.clone(), p.code.clone(), p.sts));
+    }
+    let agent = agent();
+    let api = get_text(&agent, "https://www.youtube.com/iframe_api")?;
+    let id = player_id(&api).context("no player id in iframe_api")?;
+    if let Some(p) = slot.as_mut().filter(|p| p.id == id) {
+        p.checked = Instant::now();
+        return Ok((p.id.clone(), p.code.clone(), p.sts));
+    }
+    let code = get_text(
+        &agent,
+        &format!("https://www.youtube.com/s/player/{id}/player_ias.vflset/en_US/base.js"),
+    )?;
+    let sts = signature_timestamp(&code).context("no signatureTimestamp in the player")?;
+    if debug() {
+        eprintln!("native: player {id} (sts {sts})");
+    }
+    let p = Player {
+        id,
+        code: Arc::new(code),
+        sts,
+        checked: Instant::now(),
+    };
+    let out = (p.id.clone(), p.code.clone(), p.sts);
+    *slot = Some(p);
+    Ok(out)
+}
+
+/// `…/s/player/<8 hex>/…` (slashes may be escaped as `\/`).
+fn player_id(text: &str) -> Option<String> {
+    let mut rest = text;
+    while let Some(i) = rest.find("player") {
+        rest = &rest[i + "player".len()..];
+        let r = rest.strip_prefix("\\/").or_else(|| rest.strip_prefix('/'));
+        if let Some(r) = r {
+            let id: String = r.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+            let after = &r[id.len()..];
+            if id.len() == 8 && (after.starts_with('/') || after.starts_with("\\/")) {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+/// `signatureTimestamp:20768` or `sts:20768`.
+fn signature_timestamp(code: &str) -> Option<u64> {
+    for key in ["signatureTimestamp", "sts"] {
+        let mut rest = code;
+        while let Some(i) = rest.find(key) {
+            rest = &rest[i + key.len()..];
+            let r = rest.trim_start().strip_prefix(':').map(str::trim_start);
+            if let Some(r) = r {
+                let digits: String = r.chars().take_while(char::is_ascii_digit).collect();
+                if digits.len() == 5 {
+                    return digits.parse().ok();
+                }
+            }
+        }
+    }
+    None
+}
+
+// ---------- challenge solver (deno) ----------
+
+struct Solver {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    used: Instant,
+}
+
+impl Drop for Solver {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+static SOLVER: Mutex<Option<Solver>> = Mutex::new(None);
+
+/// yt-dlp's bundled challenge solver scripts (lib, core).
+fn ejs_dir(tools: &Tools) -> Option<PathBuf> {
+    let dir = tools
+        .ytdlp
+        .parent()?
+        .join("_internal/yt_dlp_ejs/yt/solver");
+    (dir.join("lib.min.js").is_file() && dir.join("core.min.js").is_file()).then_some(dir)
+}
+
+/// The full solver script, written to ytmini's private config folder.
+fn solver_script(tools: &Tools) -> Result<PathBuf> {
+    let dir = ejs_dir(tools).context("yt-dlp's challenge solver isn't available")?;
+    let lib = std::fs::read_to_string(dir.join("lib.min.js"))?;
+    let core = std::fs::read_to_string(dir.join("core.min.js"))?;
+    let script =
+        format!("{lib}\nObject.assign(globalThis, lib);\n{core}\n{SOLVER_HOST}");
+    let file = yt::config_dir()?.join("plugins").join("ytmini_solver.js");
+    if std::fs::read_to_string(&file).ok().as_deref() != Some(script.as_str()) {
+        std::fs::create_dir_all(file.parent().context("plugins dir")?)?;
+        let tmp = file.with_extension("tmp");
+        std::fs::write(&tmp, &script)?;
+        std::fs::rename(&tmp, &file)?;
+    }
+    Ok(file)
+}
+
+fn spawn_solver(tools: &Tools) -> Result<Solver> {
+    let deno = tools.deno.as_ref().context("no deno")?;
+    let script = solver_script(tools)?;
+    let mut c = std::process::Command::new(deno);
+    // no --allow-* flags: no files, network, env or subprocesses
+    c.args([
+        "run",
+        "--no-prompt",
+        "--no-remote",
+        "--no-npm",
+        "--no-config",
+        "--no-lock",
+        "--node-modules-dir=none",
+    ])
+    .arg(&script)
+    .env_clear()
+    .env("NO_COLOR", "1")
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(if debug() {
+        Stdio::inherit()
+    } else {
+        Stdio::null()
+    });
+    if let Some(home) = std::env::var_os("HOME") {
+        // deno keeps its compile cache under the home folder
+        c.env("HOME", home);
+    }
+    let mut child = c.spawn().context("starting deno")?;
+    let stdin = child.stdin.take().context("deno stdin")?;
+    let stdout = BufReader::new(child.stdout.take().context("deno stdout")?);
+    Ok(Solver {
+        child,
+        stdin,
+        stdout,
+        used: Instant::now(),
+    })
+}
+
+impl Solver {
+    fn ask(&mut self, req: &Value) -> Result<Value> {
+        writeln!(self.stdin, "{req}")?;
+        self.stdin.flush()?;
+        let mut line = String::new();
+        anyhow::ensure!(self.stdout.read_line(&mut line)? > 0, "deno exited");
+        self.used = Instant::now();
+        Ok(serde_json::from_str(&line)?)
+    }
+}
+
+/// Solve n and sig challenges with the given player. Returns
+/// challenge → answer maps.
+fn solve(
+    tools: &Tools,
+    player_id: &str,
+    code: &str,
+    n: &[String],
+    sig: &[String],
+) -> Result<(HashMap<String, String>, HashMap<String, String>)> {
+    let mut requests = Vec::new();
+    if !n.is_empty() {
+        requests.push(json!({"type": "n", "challenges": n}));
+    }
+    if !sig.is_empty() {
+        requests.push(json!({"type": "sig", "challenges": sig}));
+    }
+    if requests.is_empty() {
+        return Ok(Default::default());
+    }
+    let mut slot = SOLVER.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_none() {
+        *slot = Some(spawn_solver(tools)?);
+    }
+    let solver = slot.as_mut().expect("just set");
+    let mut req = json!({"player_url": player_id, "requests": requests});
+    let mut out = solver.ask(&req);
+    if out
+        .as_ref()
+        .is_ok_and(|o| o.get("type").and_then(Value::as_str) == Some("need_player"))
+    {
+        req["player"] = json!(code);
+        out = solver.ask(&req);
+    }
+    let out = match out {
+        Ok(o) => o,
+        Err(e) => {
+            *slot = None; // broken pipe etc.: start afresh next time
+            return Err(e);
+        }
+    };
+    if out.get("type").and_then(Value::as_str) != Some("result") {
+        bail!(
+            "challenge solver: {}",
+            out.get("error").and_then(Value::as_str).unwrap_or("no result")
+        );
+    }
+    let responses = out
+        .get("responses")
+        .and_then(Value::as_array)
+        .context("solver: no responses")?;
+    let mut maps = (HashMap::new(), HashMap::new());
+    let kinds = (!n.is_empty())
+        .then_some("n")
+        .into_iter()
+        .chain((!sig.is_empty()).then_some("sig"));
+    for (kind, r) in kinds.zip(responses) {
+        if r.get("type").and_then(Value::as_str) != Some("result") {
+            bail!("challenge solver couldn't solve {kind}");
+        }
+        let data = r.get("data").and_then(Value::as_object).context("solver data")?;
+        let m: HashMap<String, String> = data
+            .iter()
+            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+            .collect();
+        if kind == "n" {
+            maps.0 = m;
+        } else {
+            maps.1 = m;
+        }
+    }
+    Ok(maps)
+}
+
+// ---------- formats ----------
+
+#[derive(Debug, Clone)]
+struct Fmt {
+    /// Plain URL, or the signatureCipher's (url, s, sp).
+    url: String,
+    cipher: Option<(String, String)>,
+    video: bool,
+    codec: String,
+    height: u32,
+    fps: u32,
+    bitrate: u64,
+    /// 0 low, 1 medium, 2 high (audio)
+    quality: u8,
+    channels: u32,
+    /// the original/default audio track (or the only one)
+    default_track: bool,
+    /// dynamic-range-compressed or voice-boosted variant
+    altered: bool,
+}
+
+fn parse_fmt(f: &Value) -> Option<Fmt> {
+    // segmented (OTF) and live formats need more than a plain URL
+    if f.get("type").and_then(Value::as_str) == Some("FORMAT_STREAM_TYPE_OTF")
+        || f.get("targetDurationSec").is_some()
+    {
+        return None;
+    }
+    let mime = f.get("mimeType")?.as_str()?;
+    let video = mime.starts_with("video/");
+    if !video && !mime.starts_with("audio/") {
+        return None;
+    }
+    let codec = mime
+        .split("codecs=\"")
+        .nth(1)?
+        .split(['"', ','])
+        .next()?
+        .trim()
+        .to_string();
+    let (url, cipher) = match f.get("url").and_then(Value::as_str) {
+        Some(u) => (u.to_string(), None),
+        None => {
+            let sc = f.get("signatureCipher").and_then(Value::as_str)?;
+            let q = parse_query(sc);
+            let get = |k: &str| q.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+            (get("url")?, Some((get("s")?, get("sp").unwrap_or("signature".into()))))
+        }
+    };
+    let num = |k: &str| f.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let track = f.get("audioTrack");
+    Some(Fmt {
+        url,
+        cipher,
+        video,
+        codec,
+        height: num("height") as u32,
+        fps: num("fps") as u32,
+        bitrate: num("bitrate"),
+        quality: match f.get("audioQuality").and_then(Value::as_str) {
+            Some("AUDIO_QUALITY_HIGH") => 2,
+            Some("AUDIO_QUALITY_MEDIUM") => 1,
+            _ => 0,
+        },
+        channels: num("audioChannels") as u32,
+        default_track: track.is_none_or(|t| {
+            t.get("audioIsDefault").and_then(Value::as_bool).unwrap_or(false)
+        }),
+        altered: f.get("isDrc").and_then(Value::as_bool).unwrap_or(false)
+            || f.get("xtags").is_some(),
+    })
+}
+
+/// Our yt-dlp format strings (`yt::profile`): max height and whether 30 fps
+/// is the cap. Anything else (audio only, custom) isn't ours to pick.
+fn parse_format(format: &str) -> Option<(u32, bool)> {
+    let first = format.split('/').next()?;
+    let h = first.strip_prefix("bv*[height<=")?;
+    let h: u32 = h.split(']').next()?.parse().ok()?;
+    Some((h, first.contains("[fps<=30]")))
+}
+
+/// yt-dlp's audio codec preference (opus > vorbis > aac > … > eac3 > ac3);
+/// unknown codecs (e.g. iamf) aren't picked.
+fn audio_codec_rank(codec: &str) -> Option<u8> {
+    let c = codec.to_ascii_lowercase();
+    Some(if c == "opus" {
+        5
+    } else if c == "vorbis" {
+        4
+    } else if c.starts_with("mp4a") {
+        3
+    } else if c == "ec-3" {
+        2
+    } else if c == "ac-3" {
+        1
+    } else {
+        return None;
+    })
+}
+
+/// The same picks as our yt-dlp format chain: VP9 first, then anything but
+/// AV1, then anything; within that the tallest, then highest frame rate,
+/// then bitrate. Audio: original track, best quality, channels, codec,
+/// bitrate (yt-dlp's default order).
+fn pick(formats: &[Fmt], max_h: u32, fps30: bool) -> Option<(Fmt, Fmt)> {
+    let fits = |f: &&Fmt| f.video && f.height <= max_h && (!fps30 || f.fps <= 30);
+    let groups: [&dyn Fn(&Fmt) -> bool; 3] = [
+        &|f| f.codec.starts_with("vp"),
+        &|f| !f.codec.starts_with("av01"),
+        &|_| true,
+    ];
+    let video = groups.iter().find_map(|g| {
+        formats
+            .iter()
+            .filter(fits)
+            .filter(|f| g(f))
+            .max_by_key(|f| (f.height, f.fps, f.bitrate))
+    })?;
+    let audio = formats
+        .iter()
+        .filter(|f| !f.video && !f.altered)
+        .filter_map(|f| Some((audio_codec_rank(&f.codec)?, f)))
+        .max_by_key(|(rank, f)| (f.default_track, f.quality, f.channels, *rank, f.bitrate))?
+        .1;
+    Some((video.clone(), audio.clone()))
+}
+
+// ---------- URLs ----------
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let decoded = (b[i] == b'%')
+            .then(|| Some(hex(*b.get(i + 1)?)? * 16 + hex(*b.get(i + 2)?)?))
+            .flatten();
+        match (decoded, b[i]) {
+            (Some(v), _) => {
+                out.push(v);
+                i += 3;
+            }
+            (None, b'+') => {
+                out.push(b' ');
+                i += 1;
+            }
+            (None, c) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn percent_encode(s: &str) -> String {
+    s.bytes()
+        .map(|c| match c {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (c as char).to_string()
+            }
+            _ => format!("%{c:02X}"),
+        })
+        .collect()
+}
+
+/// `a=1&b=2` → [(a, 1), (b, 2)], decoded.
+fn parse_query(q: &str) -> Vec<(String, String)> {
+    q.split('&')
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let (k, v) = p.split_once('=').unwrap_or((p, ""));
+            (percent_decode(k), percent_decode(v))
+        })
+        .collect()
+}
+
+/// A query parameter of `url`, decoded.
+fn query_param(url: &str, key: &str) -> Option<String> {
+    let q = url.split_once('?')?.1;
+    parse_query(q).into_iter().find(|(k, _)| k == key).map(|(_, v)| v)
+}
+
+/// `url` with `key` set to `value` (replaced, or appended).
+fn set_param(url: &str, key: &str, value: &str) -> String {
+    let (base, q) = url.split_once('?').unwrap_or((url, ""));
+    let mut found = false;
+    let mut parts: Vec<String> = q
+        .split('&')
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let k = p.split_once('=').map_or(p, |(k, _)| k);
+            if percent_decode(k) == key {
+                found = true;
+                format!("{k}={}", percent_encode(value))
+            } else {
+                p.to_string()
+            }
+        })
+        .collect();
+    if !found {
+        parts.push(format!("{}={}", percent_encode(key), percent_encode(value)));
+    }
+    format!("{base}?{}", parts.join("&"))
+}
+
+/// The playable URL for `f`, with its challenges answered.
+fn finish_url(
+    f: &Fmt,
+    n: &HashMap<String, String>,
+    sig: &HashMap<String, String>,
+) -> Result<String> {
+    let mut url = f.url.clone();
+    if let Some((s, sp)) = &f.cipher {
+        let answer = sig.get(s).context("signature not solved")?;
+        url = set_param(&url, sp, answer);
+    }
+    if let Some(challenge) = query_param(&url, "n") {
+        let answer = n.get(&challenge).context("n not solved")?;
+        url = set_param(&url, "n", answer);
+    }
+    Ok(url)
+}
+
+// ---------- strikes ----------
+
+struct Health {
+    /// videos whose current URLs came from here
+    ours: HashSet<String>,
+    strikes: u32,
+}
+
+static HEALTH: std::sync::LazyLock<Mutex<Health>> = std::sync::LazyLock::new(|| {
+    Mutex::new(Health {
+        ours: HashSet::new(),
+        strikes: 0,
+    })
+});
+
+/// A video's stream failed to play: if its URLs came from here, count it.
+pub fn report_failure(video_id: &str) {
+    let mut h = HEALTH.lock().unwrap_or_else(|e| e.into_inner());
+    if h.ours.remove(video_id) {
+        h.strikes += 1;
+        if debug() {
+            eprintln!("native: URLs for {video_id} failed to play (strike {})", h.strikes);
+        }
+    }
+}
+
+fn enabled() -> bool {
+    std::env::var_os("YTMINI_NO_NATIVE").is_none()
+        && HEALTH.lock().unwrap_or_else(|e| e.into_inner()).strikes < MAX_STRIKES
+}
+
+// ---------- lookup ----------
+
+/// Resolve `video`'s streams for one of our format strings (blocking).
+pub fn resolve(tools: &Tools, cookies: &Path, video: &Video, format: &str) -> Result<Direct> {
+    if !enabled() {
+        bail!("off for this session");
+    }
+    let (max_h, fps30) = parse_format(format).context("format not handled natively")?;
+    if tools.deno.is_none() || ejs_dir(tools).is_none() {
+        bail!("no challenge solver");
+    }
+    let (player_id, code, sts) = player()?;
+    let spec = if crate::innertube::premium() == Some(true) {
+        &WEB_CREATOR
+    } else {
+        &TV_SAMSUNG
+    };
+    let client = Client::new(cookies)?;
+    let r = client.post_as(
+        "player",
+        json!({
+            "videoId": video.id,
+            "playbackContext": {"contentPlaybackContext": {
+                "html5Preference": "HTML5_PREF_WANTS",
+                "signatureTimestamp": sts,
+            }},
+            "contentCheckOk": true,
+            "racyCheckOk": true,
+        }),
+        (spec.client)(),
+        spec.number,
+        Some(spec.user_agent),
+    )?;
+    let status = r
+        .pointer("/playabilityStatus/status")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    if status != "OK" {
+        bail!("{} says {status}", spec.name);
+    }
+    if r.pointer("/videoDetails/isLive").and_then(Value::as_bool) == Some(true)
+        || r.pointer("/videoDetails/isPostLiveDvr").and_then(Value::as_bool) == Some(true)
+    {
+        bail!("live stream");
+    }
+    let formats: Vec<Fmt> = r
+        .pointer("/streamingData/adaptiveFormats")
+        .and_then(Value::as_array)
+        .context("no adaptive formats")?
+        .iter()
+        .filter_map(parse_fmt)
+        .collect();
+    let (v, a) = pick(&formats, max_h, fps30).context("no format fits")?;
+    let mut n = Vec::new();
+    let mut sig = Vec::new();
+    for f in [&v, &a] {
+        if let Some((s, _)) = &f.cipher {
+            sig.push(s.clone());
+        }
+        if let Some(c) = query_param(&f.url, "n") {
+            if !n.contains(&c) {
+                n.push(c);
+            }
+        }
+    }
+    let (n_map, sig_map) = solve(tools, &player_id, &code, &n, &sig)?;
+    let video_url = finish_url(&v, &n_map, &sig_map)?;
+    let audio_url = finish_url(&a, &n_map, &sig_map)?;
+    // one byte, to be sure YouTube accepts what we built
+    let resp = agent()
+        .get(&video_url)
+        .header("User-Agent", spec.user_agent)
+        .header("Range", "bytes=0-0")
+        .call()
+        .context("checking the stream")?;
+    let code = resp.status().as_u16();
+    if !(code == 200 || code == 206) {
+        bail!("stream check: HTTP {code}");
+    }
+    {
+        let mut h = HEALTH.lock().unwrap_or_else(|e| e.into_inner());
+        if h.ours.len() > 200 {
+            h.ours.clear();
+        }
+        h.ours.insert(video.id.clone());
+    }
+    if debug() {
+        eprintln!(
+            "native: {} via {} → {} {}p{} + {} ({}ch)",
+            video.id, spec.name, v.codec, v.height, v.fps, a.codec, a.channels
+        );
+    }
+    Ok(Direct {
+        video: video_url,
+        audio: Some(audio_url),
+        user_agent: Some(spec.user_agent.to_string()),
+        offline: false,
+        title: r
+            .pointer("/videoDetails/title")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+/// Fetch the player script and have the solver parse it, so the first video
+/// opens as fast as later ones (~1.5 s otherwise). No video is looked up.
+/// Blocking; call off the UI thread.
+pub fn warm_up(tools: &Tools) {
+    if !enabled() || tools.deno.is_none() || ejs_dir(tools).is_none() {
+        return;
+    }
+    let t = Instant::now();
+    let r = (|| -> Result<()> {
+        let (id, code, _) = player()?;
+        let mut slot = SOLVER.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(spawn_solver(tools)?);
+        }
+        let solver = slot.as_mut().expect("just set");
+        let out = solver.ask(&json!({"player_url": id, "player": *code, "requests": []}))?;
+        anyhow::ensure!(
+            out.get("type").and_then(Value::as_str) == Some("result"),
+            "solver didn't take the player"
+        );
+        Ok(())
+    })();
+    if debug() {
+        match r {
+            Ok(()) => eprintln!("native: warmed up in {:.2}s", t.elapsed().as_secs_f32()),
+            Err(e) => eprintln!("native: warm-up failed: {e:#}"),
+        }
+    }
+}
+
+/// Stop the solver if it sat unused for a while.
+pub fn reap_idle() {
+    let mut slot = SOLVER.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.as_ref().is_some_and(|s| s.used.elapsed() > IDLE_MAX) {
+        *slot = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_player_id() {
+        assert_eq!(
+            player_id(r#"var x="https:\/\/www.youtube.com\/s\/player\/ad8d59ae\/www-widgetapi.vflset";"#),
+            Some("ad8d59ae".into())
+        );
+        assert_eq!(player_id("/s/player/0123abcd/player_ias.vflset"), Some("0123abcd".into()));
+        assert_eq!(player_id("player/xyz"), None);
+    }
+
+    #[test]
+    fn finds_sts() {
+        assert_eq!(signature_timestamp("a,signatureTimestamp:20768,b"), Some(20768));
+        assert_eq!(signature_timestamp("{sts: 20123}"), Some(20123));
+        assert_eq!(signature_timestamp("nothing"), None);
+    }
+
+    #[test]
+    fn reads_our_format_strings() {
+        let p = yt::profile(
+            yt::Quality::Auto,
+            yt::Power {
+                saver: true,
+                on_battery: true,
+            },
+            1440,
+        );
+        assert_eq!(parse_format(&p.ytdl_format), Some((1080, true)));
+        assert_eq!(parse_format("ba/b"), None);
+    }
+
+    #[test]
+    fn query_roundtrip() {
+        let u = "https://x.googlevideo.com/videoplayback?expire=1&n=ab%2Dc&mime=video%2Fwebm";
+        assert_eq!(query_param(u, "n").as_deref(), Some("ab-c"));
+        let u2 = set_param(u, "n", "zz_1");
+        assert_eq!(query_param(&u2, "n").as_deref(), Some("zz_1"));
+        assert!(u2.contains("mime=video%2Fwebm"));
+        let u3 = set_param(u, "sig", "a=b");
+        assert_eq!(query_param(&u3, "sig").as_deref(), Some("a=b"));
+    }
+
+    fn fmt(video: bool, codec: &str, h: u32, fps: u32, br: u64) -> Fmt {
+        Fmt {
+            url: String::new(),
+            cipher: None,
+            video,
+            codec: codec.into(),
+            height: h,
+            fps,
+            bitrate: br,
+            quality: 0,
+            channels: 2,
+            default_track: true,
+            altered: false,
+        }
+    }
+
+    #[test]
+    fn picks_like_ytdlp() {
+        let mut a = fmt(false, "opus", 0, 0, 140_000);
+        a.quality = 1;
+        let mut aac51 = fmt(false, "mp4a.40.2", 0, 0, 390_000);
+        aac51.quality = 2;
+        aac51.channels = 6;
+        let mut drc = aac51.clone();
+        drc.altered = true;
+        drc.bitrate = 999_999;
+        let mut dub = aac51.clone();
+        dub.default_track = false;
+        dub.bitrate = 999_999;
+        let fs = vec![
+            fmt(true, "vp9", 1080, 60, 4_600_000),
+            fmt(true, "vp9", 720, 30, 1_800_000),
+            fmt(true, "avc1.4D401F", 720, 30, 2_500_000),
+            fmt(true, "av01.0.08M.08", 720, 30, 900_000),
+            a,
+            aac51,
+            drc,
+            dub,
+        ];
+        // Big Buck Bunny on battery: yt-dlp picked 247 (vp9 720p30) + 258
+        let (v, au) = pick(&fs, 1080, true).unwrap();
+        assert_eq!((v.codec.as_str(), v.height, v.fps), ("vp9", 720, 30));
+        assert_eq!((au.codec.as_str(), au.channels, au.bitrate), ("mp4a.40.2", 6, 390_000));
+        let (v, _) = pick(&fs, 1080, false).unwrap();
+        assert_eq!((v.height, v.fps), (1080, 60));
+        // no VP9: anything but AV1
+        let fs2: Vec<Fmt> = fs.iter().filter(|f| !f.codec.starts_with("vp")).cloned().collect();
+        let (v, _) = pick(&fs2, 1080, true).unwrap();
+        assert!(v.codec.starts_with("avc1"));
+    }
+}

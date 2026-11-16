@@ -181,6 +181,25 @@ fn give_back(h: Option<Helper>) {
 /// Resolve `video`'s stream URLs for `format` (blocking).
 pub fn resolve(tools: &Tools, cookies: &Path, video: &Video, format: &str) -> Result<Direct> {
     let t = Instant::now();
+    // our own lookup first (~0.2 s); yt-dlp when it can't
+    match crate::native::resolve(tools, cookies, video, format) {
+        Ok(d) => {
+            if debug() {
+                eprintln!(
+                    "resolver: {} in {:.2}s (native)",
+                    video.id,
+                    t.elapsed().as_secs_f32()
+                );
+            }
+            return Ok(d);
+        }
+        Err(e) => {
+            if debug() {
+                eprintln!("native: {} skipped: {e:#}", video.id);
+            }
+        }
+    }
+    let t = Instant::now();
     let Some((helper, generation)) = take(cookies) else {
         if debug() {
             eprintln!("resolver: all helpers busy, one-off yt-dlp for {}", video.id);
@@ -226,6 +245,7 @@ pub fn resolve(tools: &Tools, cookies: &Path, video: &Video, format: &str) -> Re
 /// Start a helper ahead of the first lookup (no network: it only loads
 /// yt-dlp), so the first video opens warm. Blocking; call off the UI thread.
 pub fn warm_up(tools: &Tools, cookies: &Path) {
+    crate::native::warm_up(tools);
     match take(cookies) {
         Some((None, generation)) => give_back(spawn(tools, cookies, generation).ok()),
         Some((Some(h), _)) => give_back(Some(h)),
@@ -242,6 +262,7 @@ pub fn reset() {
 
 /// Stop helpers nobody used for a while (cheap; call now and then).
 pub fn reap_idle() {
+    crate::native::reap_idle();
     let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
     pool.idle.retain(|h| h.used.elapsed() < IDLE_MAX);
 }

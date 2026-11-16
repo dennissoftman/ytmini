@@ -373,7 +373,11 @@ impl Embedded {
         // URLs/files we already have, which skips yt-dlp entirely.
         let target = match &direct {
             Some(d) => {
-                opts.push(("force-media-title", video.title().to_string()));
+                let title = match (&video.title, &d.title) {
+                    (None, Some(t)) => t.clone(),
+                    _ => video.title().to_string(),
+                };
+                opts.push(("force-media-title", title));
                 if let Some(ua) = &d.user_agent {
                     opts.push(("user-agent", ua.clone()));
                 }
@@ -434,7 +438,10 @@ impl Embedded {
             render: Some(render),
             mpv: Some(mpv),
             shared: Some(shared),
-            title: video.title().to_string(),
+            title: match (&video.title, direct.as_ref().and_then(|d| d.title.as_ref())) {
+                (None, Some(t)) => t.clone(),
+                _ => video.title().to_string(),
+            },
             id: video.id.clone(),
             url: video.url(),
             profile_label: if direct.as_ref().is_some_and(|d| d.offline) {
@@ -459,9 +466,12 @@ impl Embedded {
             cached_until: 0.0,
             error: None,
             last_log_error: None,
-            title_changed: false,
+            // learned from the lookup: the app takes it from here
+            title_changed: video.title.is_none()
+                && direct.as_ref().is_some_and(|d| d.title.is_some()),
             resumed_from: resume.map(|t| (t, Instant::now())),
-            title_from_mpv: video.title.is_none(),
+            title_from_mpv: video.title.is_none()
+                && direct.as_ref().is_none_or(|d| d.title.is_none()),
             scrub: None,
             last_scrub_seek: Instant::now(),
             last_activity: Instant::now(),
@@ -490,6 +500,14 @@ impl Embedded {
             return;
         };
         self.from_resolved = direct.is_some();
+        // opened from a bare link: the lookup knows the real title
+        if let Some(t) = direct.as_ref().and_then(|d| d.title.clone()) {
+            if self.title_from_mpv {
+                self.title = t;
+                self.title_changed = true;
+                self.title_from_mpv = false;
+            }
+        }
         let mpv = self.mpv();
         let target = match &direct {
             Some(d) => {
@@ -1134,28 +1152,19 @@ impl Embedded {
 
         // Header (hidden in fullscreen)
         if !v.fullscreen {
-            ui.horizontal(|ui| {
-                ui.add_space(12.0);
-                if ui
-                    .add(
-                        egui::Button::new(egui::RichText::new(t("←  Back")).size(15.0))
-                            .frame(false),
-                    )
-                    .clicked()
-                {
-                    act.back = true;
-                }
-                ui.add_space(8.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(8.0);
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(&self.title).size(16.0).strong())
-                                .truncate(),
-                        );
-                    });
-                });
-            });
+            // just the title, centered (Back is the ← over the video)
+            let w = ui.available_width();
+            ui.allocate_ui_with_layout(
+                Vec2::new(w, 26.0),
+                egui::Layout::top_down(egui::Align::Center),
+                |ui| {
+                    ui.set_max_width((w - 96.0).max(100.0));
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&self.title).size(16.0).strong())
+                            .truncate(),
+                    );
+                },
+            );
             ui.add_space(6.0);
         }
 
@@ -1449,6 +1458,31 @@ impl Embedded {
             );
             ui.multiply_opacity(ca);
             let painter = ui.painter_at(area);
+            // Back: a round ← in the top-left corner (Esc and the mouse's
+            // back button do the same)
+            if !v.fullscreen {
+                let r = Rect::from_min_size(area.left_top() + Vec2::splat(14.0), Vec2::splat(38.0));
+                let resp = ui
+                    .interact(r, ui.scope_id().with("back"), Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(t("Back (Esc)"));
+                let hov = ctx.animate_bool_with_time(resp.id, resp.hovered(), 0.12);
+                // dark fill for bright frames, faint ring for black ones
+                painter.circle(
+                    r.center(),
+                    19.0,
+                    Color32::from_black_alpha((130.0 + 60.0 * hov) as u8),
+                    Stroke::new(1.0, Color32::from_white_alpha((55.0 + 60.0 * hov) as u8)),
+                );
+                let c = r.center();
+                let st = Stroke::new(2.2, Color32::WHITE);
+                painter.line_segment([c + Vec2::new(-7.0, 0.0), c + Vec2::new(7.0, 0.0)], st);
+                painter.line_segment([c + Vec2::new(-7.0, 0.0), c + Vec2::new(-1.5, -5.5)], st);
+                painter.line_segment([c + Vec2::new(-7.0, 0.0), c + Vec2::new(-1.5, 5.5)], st);
+                if resp.clicked() {
+                    act.back = true;
+                }
+            }
             // soft gradient so controls read over bright video
             let top = bar.top() - 40.0;
             let mut mesh = egui::Mesh::default();
