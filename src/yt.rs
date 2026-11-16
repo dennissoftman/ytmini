@@ -9,6 +9,7 @@ use serde::Deserialize;
 use std::{
     ffi::OsString,
     fs,
+    io::Write as _,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
 };
@@ -452,7 +453,7 @@ pub struct Power {
     pub saver: bool,
 }
 
-/// Cheap (a couple of ms); called when playback starts.
+/// Cheap (a couple of ms on macOS, a syscall elsewhere).
 pub fn power_state() -> Power {
     #[cfg(target_os = "macos")]
     {
@@ -510,6 +511,25 @@ pub fn power_state() -> Power {
         }
         Power { on_battery: has_mains && !mains_online, saver }
     }
+}
+
+/// Re-reads the power state every few seconds on its own thread and calls
+/// `on_change` only when it differs from the last reading.
+pub fn watch_power(initial: Power, on_change: impl Fn(Power) + Send + 'static) {
+    std::thread::Builder::new()
+        .name("power".into())
+        .spawn(move || {
+            let mut last = initial;
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                let now = power_state();
+                if now != last {
+                    last = now;
+                    on_change(now);
+                }
+            }
+        })
+        .expect("spawning power watcher");
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -581,6 +601,17 @@ pub fn profile(q: Quality, p: Power) -> Profile {
 
 /// Launch mpv in its own window. Returns immediately; the caller owns the child
 /// and must `try_wait`/`kill` it.
+/// Where mpv listens for JSON IPC commands (a Unix socket, or a named pipe on Windows).
+pub fn ipc_path() -> PathBuf {
+    let name = format!("ytmini-mpv-{}", std::process::id());
+    if cfg!(windows) {
+        PathBuf::from(format!(r"\\.\pipe\{name}"))
+    } else {
+        // temp_dir keeps us under the ~104-byte Unix socket path limit on macOS.
+        std::env::temp_dir().join(format!("{name}.sock"))
+    }
+}
+
 pub fn play(tools: &Tools, cookies: &Path, video: &Video, profile: &Profile) -> Result<Child> {
     let log = config_dir()?.join("mpv.log");
     let log_file = fs::File::create(&log).context("creating mpv.log")?;
@@ -594,6 +625,7 @@ pub fn play(tools: &Tools, cookies: &Path, video: &Video, profile: &Profile) -> 
         .arg("--hwdec=auto-safe")
         .arg("--force-window=immediate")
         .arg("--keep-open=no")
+        .arg(format!("--input-ipc-server={}", ipc_path().display()))
         .arg(format!("--title={} — ytmini", video.title()))
         .args(profile.fast.then_some("--profile=fast"))
         .args(profile.audio_only.then_some("--no-video"))
@@ -603,6 +635,69 @@ pub fn play(tools: &Tools, cookies: &Path, video: &Video, profile: &Profile) -> 
         .stderr(log_file);
     hide_console(&mut c);
     c.spawn().context("starting mpv")
+}
+
+/// Switch a running mpv to a new profile without restarting the video: read the
+/// position, set the new format, reload the same URL from that position.
+/// Blocking (talks to mpv over IPC), so run it on a worker thread.
+pub fn switch_profile(url: &str, profile: &Profile) -> Result<()> {
+    let mut ipc = Ipc::connect(&ipc_path())?;
+    let pos = ipc.request(serde_json::json!(["get_property", "time-pos"])).ok().and_then(|v| v.as_f64());
+    ipc.request(serde_json::json!(["set_property", "ytdl-format", profile.ytdl_format]))?;
+    ipc.request(serde_json::json!(["set_property", "vid", if profile.audio_only { "no" } else { "auto" }]))?;
+    let opts = pos.map(|p| format!("start={p:.1}")).unwrap_or_default();
+    // mpv ≥ 0.38: loadfile <url> <flags> <index> <options>
+    ipc.request(serde_json::json!(["loadfile", url, "replace", -1, opts]))?;
+    Ok(())
+}
+
+/// Minimal mpv JSON IPC client: one request at a time, events are skipped.
+struct Ipc {
+    reader: std::io::BufReader<Box<dyn std::io::Read>>,
+    writer: Box<dyn std::io::Write>,
+    next_id: u64,
+}
+
+impl Ipc {
+    fn connect(path: &Path) -> Result<Ipc> {
+        #[cfg(unix)]
+        let (r, w): (Box<dyn std::io::Read>, Box<dyn std::io::Write>) = {
+            let s = std::os::unix::net::UnixStream::connect(path).context("connecting to mpv")?;
+            s.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+            (Box::new(s.try_clone()?), Box::new(s))
+        };
+        #[cfg(windows)]
+        let (r, w): (Box<dyn std::io::Read>, Box<dyn std::io::Write>) = {
+            let f = fs::OpenOptions::new().read(true).write(true).open(path).context("connecting to mpv")?;
+            (Box::new(f.try_clone()?), Box::new(f))
+        };
+        Ok(Ipc { reader: std::io::BufReader::new(r), writer: w, next_id: 1 })
+    }
+
+    fn request(&mut self, command: serde_json::Value) -> Result<serde_json::Value> {
+        use std::io::BufRead;
+        let id = self.next_id;
+        self.next_id += 1;
+        let msg = serde_json::json!({ "command": command, "request_id": id });
+        writeln!(self.writer, "{msg}")?;
+        self.writer.flush()?;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if self.reader.read_line(&mut line)? == 0 {
+                bail!("mpv closed the IPC connection");
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+            if v.get("request_id").and_then(|x| x.as_u64()) != Some(id) {
+                continue; // an event or someone else's reply
+            }
+            return match v.get("error").and_then(|e| e.as_str()) {
+                Some("success") => Ok(v.get("data").cloned().unwrap_or(serde_json::Value::Null)),
+                Some(e) => bail!("mpv: {e}"),
+                None => bail!("mpv: malformed reply"),
+            };
+        }
+    }
 }
 
 /// Last error-looking line from mpv's log, for the status bar.
@@ -693,6 +788,29 @@ mod live {
         let mut child = play(&t, &c, &v, &profile(Quality::Auto, power_state())).unwrap();
         std::thread::sleep(std::time::Duration::from_secs(8));
         assert!(child.try_wait().unwrap().is_none(), "mpv exited early: {:?}", last_player_error());
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    #[ignore]
+    fn live_quality_switch_keeps_position() {
+        use std::time::Duration;
+        let (t, c) = setup();
+        let v = fetch(&t, &c, &Source::Search("big buck bunny 1080p".into()), 0, 1).unwrap().remove(0);
+        let mut child = play(&t, &c, &v, &profile(Quality::P1080, Power::default())).unwrap();
+        std::thread::sleep(Duration::from_secs(12));
+        let get = |prop: &str| Ipc::connect(&ipc_path()).unwrap().request(serde_json::json!(["get_property", prop]));
+        let before = get("time-pos").unwrap().as_f64().unwrap();
+        eprintln!("before: pos {before:.1}, height {:?}", get("height").ok());
+        switch_profile(&v.url(), &profile(Quality::P480, Power::default())).unwrap();
+        std::thread::sleep(Duration::from_secs(10));
+        let after = get("time-pos").unwrap().as_f64().unwrap();
+        let height = get("height").unwrap().as_i64().unwrap();
+        eprintln!("after: pos {after:.1}, height {height}");
+        assert!(child.try_wait().unwrap().is_none(), "mpv died");
+        assert!(after >= before, "position went back: {before} -> {after}");
+        assert!(height <= 480, "still at {height}p");
         child.kill().unwrap();
         child.wait().unwrap();
     }

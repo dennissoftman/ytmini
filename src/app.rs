@@ -46,6 +46,8 @@ enum Screen {
 enum Msg {
     Fetched { source: Source, generation: u64, start: usize, result: Result<Vec<Video>, String> },
     Imported(Result<(), String>),
+    Power(yt::Power),
+    Switched(Result<(), String>),
 }
 
 #[derive(Default)]
@@ -65,8 +67,11 @@ struct Player {
     child: Child,
     title: String,
     id: String,
+    url: String,
     /// e.g. "720p30 · battery saver"
     profile: String,
+    /// The ytdl-format mpv is currently using.
+    format: String,
 }
 
 pub struct App {
@@ -92,6 +97,7 @@ pub struct App {
     focus_search: bool,
     thumbs: Thumbs,
     quality: yt::Quality,
+    power: yt::Power,
 }
 
 impl App {
@@ -121,7 +127,13 @@ impl App {
             focus_search: false,
             thumbs: Thumbs::new(ctx),
             quality: yt::Quality::Auto,
+            power: yt::power_state(),
         };
+        let (tx, ctx2) = (app.tx.clone(), ctx.clone());
+        yt::watch_power(app.power, move |p| {
+            let _ = tx.send(Msg::Power(p));
+            ctx2.request_repaint();
+        });
         app.check_tools(ctx);
         app
     }
@@ -223,6 +235,15 @@ impl App {
                         Err(e) => tab.error = Some(e),
                     }
                 }
+                Msg::Power(p) => {
+                    self.power = p;
+                    self.apply_profile_live(ctx);
+                }
+                Msg::Switched(r) => {
+                    if let Err(e) = r {
+                        self.status = Some((format!("Couldn't switch quality: {e}"), true));
+                    }
+                }
                 Msg::Imported(r) => {
                     self.importing = None;
                     match r {
@@ -245,7 +266,8 @@ impl App {
     fn play(&mut self, video: &Video) {
         self.stop_player();
         let Some(tools) = &self.tools else { return };
-        let profile = yt::profile(self.quality, yt::power_state());
+        self.power = yt::power_state();
+        let profile = yt::profile(self.quality, self.power);
         match yt::play(tools, &self.cookies, video, &profile) {
             Ok(child) => {
                 self.status = None;
@@ -253,17 +275,40 @@ impl App {
                     child,
                     title: video.title().to_string(),
                     id: video.id.clone(),
+                    url: video.url(),
                     profile: profile.label,
+                    format: profile.ytdl_format,
                 });
             }
             Err(e) => self.status = Some((format!("Couldn't start mpv: {e:#}"), true)),
         }
     }
 
+    /// If the effective quality changed (power state or menu), retune the
+    /// running player in place.
+    fn apply_profile_live(&mut self, ctx: &egui::Context) {
+        let profile = yt::profile(self.quality, self.power);
+        let Some(p) = &mut self.player else { return };
+        if p.format == profile.ytdl_format {
+            return;
+        }
+        p.format = profile.ytdl_format.clone();
+        p.profile = profile.label.clone();
+        let (tx, ctx, url) = (self.tx.clone(), ctx.clone(), p.url.clone());
+        std::thread::spawn(move || {
+            let r = yt::switch_profile(&url, &profile).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Msg::Switched(r));
+            ctx.request_repaint();
+        });
+    }
+
     fn stop_player(&mut self) {
         if let Some(mut p) = self.player.take() {
             let _ = p.child.kill();
             let _ = p.child.wait(); // reap — no zombies
+            if cfg!(unix) {
+                let _ = std::fs::remove_file(yt::ipc_path()); // killed mpv can't clean up its socket
+            }
         }
     }
 
@@ -434,6 +479,7 @@ impl App {
         let mut switch_to: Option<Source> = None;
         let mut search: Option<String> = None;
         let mut reimport = false;
+        let mut quality_changed = false;
 
         // ----- top bar -----
         egui::Panel::top("top")
@@ -458,6 +504,7 @@ impl App {
                             ui.label(RichText::new("Playback quality").small().color(TEXT_DIM));
                             for q in yt::Quality::ALL {
                                 if ui.radio_value(&mut self.quality, q, q.label()).clicked() {
+                                    quality_changed = true;
                                     ui.close();
                                 }
                             }
@@ -517,10 +564,26 @@ impl App {
                         let n = self.tabs.get(&self.active).map_or(0, |t| t.videos.len());
                         ui.label(RichText::new(format!("{n} videos")).color(TEXT_DIM));
                     }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let power = if self.power.saver {
+                            "battery saver"
+                        } else if self.power.on_battery {
+                            "on battery"
+                        } else {
+                            ""
+                        };
+                        if !power.is_empty() {
+                            ui.label(RichText::new(power).small().color(TEXT_DIM))
+                                .on_hover_text("Auto quality lowers resolution/frame rate to save power");
+                        }
+                    });
                 });
             });
         if stop {
             self.stop_player();
+        }
+        if quality_changed {
+            self.apply_profile_live(&ctx);
         }
 
         // ----- grid -----
