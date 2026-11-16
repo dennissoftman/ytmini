@@ -672,6 +672,70 @@ impl Video {
     }
 }
 
+/// Stream URLs resolved ahead of time (on hover), so playback can skip the
+/// ~4 s yt-dlp spends on YouTube's page, player script and JS challenge.
+#[derive(Clone, Debug)]
+pub struct Direct {
+    pub video: String,
+    /// Separate audio track (DASH), if any.
+    pub audio: Option<String>,
+    pub user_agent: Option<String>,
+    /// A download on disk rather than resolved URLs.
+    pub offline: bool,
+}
+
+/// Resolve `video` with yt-dlp for `format` (blocking, ~4 s).
+pub fn resolve(tools: &Tools, cookies: &Path, video: &Video, format: &str) -> Result<Direct> {
+    let out = tools
+        .ytdlp_cmd()
+        .arg("--cookies")
+        .arg(cookies)
+        .args(["-J", "--no-warnings", "--no-playlist", "-f", format])
+        .arg(video.url())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .context("running yt-dlp")?;
+    anyhow::ensure!(out.status.success(), "yt-dlp couldn't resolve the video");
+    let j: serde_json::Value = serde_json::from_slice(&out.stdout).context("yt-dlp output")?;
+    let url = |f: &serde_json::Value| f.get("url").and_then(|u| u.as_str()).map(str::to_string);
+    let user_agent = j
+        .pointer("/http_headers/User-Agent")
+        .and_then(|u| u.as_str())
+        .map(str::to_string);
+    if let Some(parts) = j.get("requested_formats").and_then(|r| r.as_array()) {
+        let video_part = parts
+            .iter()
+            .find(|f| f.get("vcodec").and_then(|v| v.as_str()) != Some("none"));
+        let audio_part = parts
+            .iter()
+            .find(|f| f.get("vcodec").and_then(|v| v.as_str()) == Some("none"));
+        if let Some(v) = video_part.and_then(url) {
+            return Ok(Direct {
+                video: v,
+                audio: audio_part.and_then(url),
+                user_agent,
+                offline: false,
+            });
+        }
+        if let Some(a) = audio_part.and_then(url) {
+            return Ok(Direct {
+                video: a,
+                audio: None,
+                user_agent,
+                offline: false,
+            });
+        }
+    }
+    let v = url(&j).context("no stream URL in yt-dlp's answer")?;
+    Ok(Direct {
+        video: v,
+        audio: None,
+        user_agent,
+        offline: false,
+    })
+}
+
 /// Fetch `count` videos starting at 0-based `start`. Blocking.
 #[cfg(test)]
 pub fn fetch(

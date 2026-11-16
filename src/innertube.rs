@@ -387,6 +387,24 @@ impl Client {
 }
 
 #[cfg(test)]
+mod history_live {
+    /// Removes the ids in YTMINI_REMOVE (comma-separated) from watch history.
+    /// `YTMINI_REMOVE=id1,id2 cargo test -- --ignored remove_history --nocapture`
+    #[test]
+    #[ignore]
+    fn remove_history() {
+        let cookies = crate::yt::config_dir().unwrap().join("cookies.txt");
+        let ids = std::env::var("YTMINI_REMOVE").unwrap();
+        for id in ids.split(',').filter(|s| !s.is_empty()) {
+            eprintln!(
+                "{id}: {:?}",
+                super::remove_from_history(&cookies, id).map_err(|e| format!("{e:#}"))
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod mark_live {
     /// Marks "Me at the zoo" watched natively, then checks History lists it first.
     /// `cargo test -- --ignored native_mark_watched --nocapture`
@@ -403,6 +421,56 @@ mod mark_live {
         eprintln!("position in history: {pos:?}");
         assert!(pos.is_some_and(|p| p < 3));
     }
+}
+
+/// Remove `video_id` from your YouTube watch history (what the website's
+/// "Remove from watch history" does). Looks through the first few pages of
+/// History for it. Returns false if it isn't there. Blocking.
+pub fn remove_from_history(cookies: &Path, video_id: &str) -> Result<bool> {
+    let client = Client::new(cookies)?;
+    let mut body = json!({ "browseId": "FEhistory" });
+    let mut endpoint = "browse";
+    for _ in 0..5 {
+        let r = client.post(endpoint, body)?;
+        let mut items = Vec::new();
+        find_all(&r, "lockupViewModel", &mut items);
+        for it in items {
+            if it.get("contentId").and_then(Value::as_str) != Some(video_id) {
+                continue;
+            }
+            let mut entries = Vec::new();
+            find_all(it, "listItemViewModel", &mut entries);
+            let token = entries.iter().find_map(|e| {
+                let title = e.pointer("/title/content")?.as_str()?;
+                if !title.contains("Remove from watch history") {
+                    return None;
+                }
+                let mut eps = Vec::new();
+                find_all(e, "feedbackEndpoint", &mut eps);
+                eps.first()?
+                    .get("feedbackToken")?
+                    .as_str()
+                    .map(str::to_string)
+            });
+            let token = token.context("no “Remove from watch history” item")?;
+            let r = client.post(
+                "feedback",
+                json!({ "feedbackTokens": [token], "isFeedbackTokenUnencrypted": false, "shouldMerge": false }),
+            )?;
+            let ok = r
+                .pointer("/feedbackResponses/0/isProcessed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            anyhow::ensure!(ok, "YouTube didn't confirm the removal");
+            return Ok(true);
+        }
+        let mut token = None;
+        collect(&r, &mut Vec::new(), &mut token);
+        let Some((_, t)) = token else { break };
+        endpoint = "browse";
+        body = json!({ "continuation": t });
+    }
+    Ok(false)
 }
 
 /// Add or remove `video_id` in Watch later. Blocking.

@@ -60,6 +60,11 @@ fn metrics(d: Density) -> Metrics {
     }
 }
 
+/// Hover a card this long and its stream gets resolved in the background.
+const HOVER_PREPARE: Duration = Duration::from_millis(350);
+/// Resolved stream URLs last ~6 h; use them only while clearly fresh.
+const PREPARED_TTL: Duration = Duration::from_secs(30 * 60);
+
 const BASE_TABS: [Source; 6] = [
     Source::Feed,
     Source::Subscriptions,
@@ -123,6 +128,8 @@ enum Msg {
     /// SponsorBlock segments for a video id.
     Segments(String, Vec<crate::sponsorblock::Segment>),
     Download(crate::downloads::Progress),
+    /// Hover-prepare finished: id, format, result.
+    Prepared(String, String, Result<yt::Direct, String>),
     /// Thumbnail for Now Playing, fetched for a video that wasn't cached.
     NowPlayingArt(String, Vec<u8>),
     /// Silent session refresh finished: (browser label, browser id, profile) or error.
@@ -198,6 +205,7 @@ enum Quick {
     MuteChannel,
     Download,
     DeleteDownload,
+    RemoveFromHistory,
     CopyLink,
     OpenInBrowser,
     Watched(bool),
@@ -282,6 +290,11 @@ pub struct App {
     np_artist: String,
     np_art: Option<Vec<u8>>,
     downloads: crate::downloads::Manifest,
+    /// Stream URLs resolved on hover: id → (ytdl-format, URLs, when).
+    prepared: HashMap<String, (String, yt::Direct, std::time::Instant)>,
+    preparing: Option<String>,
+    /// Card under the pointer and since when (hover-to-prepare).
+    hover: Option<(Video, std::time::Instant)>,
     /// In-flight downloads: id → progress 0–1.
     dl_active: HashMap<String, f32>,
 
@@ -378,6 +391,9 @@ impl App {
             np_artist: String::new(),
             np_art: None,
             downloads: crate::downloads::Manifest::load(),
+            prepared: HashMap::new(),
+            preparing: None,
+            hover: None,
             dl_active: HashMap::new(),
             tray,
             tray_rx,
@@ -938,6 +954,17 @@ impl App {
                     }
                 }
                 Msg::Download(p) => self.on_download(ctx, p),
+                Msg::Prepared(id, format, r) => {
+                    self.preparing = None;
+                    if let Ok(d) = r {
+                        if self.prepared.len() > 30 {
+                            self.prepared
+                                .retain(|_, (_, _, t)| t.elapsed() < PREPARED_TTL);
+                        }
+                        self.prepared
+                            .insert(id, (format, d, std::time::Instant::now()));
+                    }
+                }
                 Msg::NowPlayingArt(id, bytes) => {
                     if self.embedded.as_ref().is_some_and(|p| p.id == id) {
                         self.np_art = Some(bytes);
@@ -991,7 +1018,12 @@ impl App {
             });
         }
         // Report the view so it shows in YouTube's watch history (as the website does).
-        if self.settings.mark_watched && self.smoke.is_none() {
+        // YTMINI_NO_HISTORY: testing against a real account without
+        // touching its watch history / recommendations
+        if self.settings.mark_watched
+            && self.smoke.is_none()
+            && std::env::var_os("YTMINI_NO_HISTORY").is_none()
+        {
             let (tx, cookies, id) = (self.tx.clone(), self.cookies.clone(), video.id.clone());
             std::thread::spawn(move || {
                 if let Err(e) = crate::innertube::mark_watched(&cookies, &id) {
@@ -1047,6 +1079,30 @@ impl App {
             Some((id, t)) if id == video.id => Some(t),
             _ => self.positions.resume_at(&video.id),
         };
+        // a download, or URLs resolved while you hovered the card
+        let direct = self
+            .downloads
+            .get(&video.id)
+            .and_then(|e| {
+                let path = |p: Option<std::path::PathBuf>| p.map(|p| p.display().to_string());
+                let (v, a) = (path(e.video_path()), path(e.audio_path()));
+                let (video, audio) = match v {
+                    Some(v) => (v, a),
+                    None => (a?, None),
+                };
+                Some(yt::Direct {
+                    video,
+                    audio,
+                    user_agent: None,
+                    offline: true,
+                })
+            })
+            .or_else(|| self.prepared_for(&video.id, &profile.ytdl_format));
+        if let Some(d) = &direct {
+            if !d.offline && std::env::var_os("YTMINI_DEBUG").is_some() {
+                eprintln!("playing {} from pre-resolved URLs", video.id);
+            }
+        }
         match Embedded::start(
             &tools,
             &self.cookies,
@@ -1056,9 +1112,7 @@ impl App {
             resume,
             gpa,
             ctx,
-            self.downloads
-                .get(&video.id)
-                .map(|e| (e.video_path(), e.audio_path())),
+            direct,
         ) {
             Ok(p) => {
                 self.status = None;
@@ -1587,6 +1641,7 @@ impl App {
         }
         let mut more = false;
         let mut reimport_from_empty = false;
+        let mut hovered_video: Option<Video> = None;
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let source = self.active.clone();
             let playing_id = self.player.as_ref().map(|p| p.id.clone());
@@ -1706,11 +1761,20 @@ impl App {
                                     progress,
                                     m,
                                     in_watch_later: source == Source::WatchLater,
+                                    in_history: source == Source::History,
                                     download: dl_active
                                         .get(&v.id)
                                         .copied()
                                         .or_else(|| downloads.get(&v.id).map(|_| 1.0)),
                                 };
+                                let slot = egui::Rect::from_min_size(ui.cursor().min, card.size);
+                                if !v.is_playlist
+                                    && ui
+                                        .input(|i| i.pointer.hover_pos())
+                                        .is_some_and(|p| slot.contains(p))
+                                {
+                                    hovered_video = Some(v.clone());
+                                }
                                 match video_card(ui, thumbs, variant, v, card) {
                                     CardAction::Open => clicked = Some(v.clone()),
                                     CardAction::Channel => open_channel = Some(v.clone()),
@@ -1770,6 +1834,12 @@ impl App {
         if more {
             self.load_more(&ctx, self.active.clone());
         }
+        match (&self.hover, hovered_video) {
+            (Some((old, _)), Some(new)) if old.id == new.id => {}
+            (_, Some(new)) => self.hover = Some((new, std::time::Instant::now())),
+            (_, None) => self.hover = None,
+        }
+        self.maybe_prepare(&ctx);
         if let Some((q, v)) = quick {
             self.quick_action(&ctx, q, &v);
         }
@@ -1837,6 +1907,19 @@ impl App {
                 }
             }
             Quick::Download => self.start_download(ctx, v),
+            Quick::RemoveFromHistory => {
+                if let Some(tab) = self.tabs.get_mut(&Source::History) {
+                    tab.videos.retain(|x| x.id != v.id);
+                }
+                let (tx, cookies, id) = (self.tx.clone(), self.cookies.clone(), v.id.clone());
+                std::thread::spawn(move || {
+                    let msg = match crate::innertube::remove_from_history(&cookies, &id) {
+                        Ok(_) => ("Removed from your YouTube history.".to_string(), false),
+                        Err(e) => (format!("Couldn't remove it from history: {e:#}"), true),
+                    };
+                    let _ = tx.send(Msg::Status(msg.0, msg.1));
+                });
+            }
             Quick::DeleteDownload => {
                 self.downloads.remove(&v.id);
                 self.status = Some(("Download deleted.".into(), false));
@@ -2299,6 +2382,7 @@ impl App {
                 });
                 ui.checkbox(&mut s.mark_watched, "Add videos I watch to my YouTube history");
                 ui.checkbox(&mut s.volume_leveling, "Level volume (quiet voices up, loud parts down)");
+                ui.checkbox(&mut s.prepare_on_hover, "Start videos faster (prepare the one you're pointing at)");
                 ui.label(
                     RichText::new(format!(
                         "Auto never exceeds what this screen can show ({}p), and drops to 1080p30 on battery, 720p30 in Low Power Mode.",
@@ -2576,6 +2660,65 @@ impl App {
             }
         }
         self.was_focused = focused;
+    }
+
+    /// Fresh pre-resolved URLs for `id` in `format`, if we have them.
+    fn prepared_for(&self, id: &str, format: &str) -> Option<yt::Direct> {
+        self.prepared
+            .get(id)
+            .filter(|(f, _, t)| f == format && t.elapsed() < PREPARED_TTL)
+            .map(|(_, d, _)| d.clone())
+    }
+
+    /// Hovered a card for a moment (or a link is on the clipboard): resolve
+    /// its stream in the background, one at a time. In Low Power Mode it
+    /// waits for a longer hover, so passing over cards costs nothing.
+    fn maybe_prepare(&mut self, ctx: &egui::Context) {
+        if !self.settings.prepare_on_hover || self.preparing.is_some() {
+            return;
+        }
+        let dwell = if self.power.saver {
+            HOVER_PREPARE * 2 + HOVER_PREPARE / 3
+        } else {
+            HOVER_PREPARE
+        };
+        let Some(tools) = self.tools.clone() else {
+            return;
+        };
+        let candidate = match &self.hover {
+            Some((v, since)) if since.elapsed() >= dwell => Some(v.clone()),
+            Some((_, since)) => {
+                ctx.request_repaint_after(dwell.saturating_sub(since.elapsed()));
+                None
+            }
+            None => match &self.clip_link {
+                Some(crate::links::Link::Video { id, .. }) => Some(Video {
+                    id: id.clone(),
+                    ..Default::default()
+                }),
+                _ => None,
+            },
+        };
+        let Some(video) = candidate else { return };
+        let profile = yt::profile(self.settings.quality, self.power, self.screen_cap);
+        if profile.audio_only
+            || self.downloads.get(&video.id).is_some()
+            || self.prepared_for(&video.id, &profile.ytdl_format).is_some()
+        {
+            return;
+        }
+        self.preparing = Some(video.id.clone());
+        let (tx, ctx, cookies, format) = (
+            self.tx.clone(),
+            ctx.clone(),
+            self.cookies.clone(),
+            profile.ytdl_format,
+        );
+        std::thread::spawn(move || {
+            let r = yt::resolve(&tools, &cookies, &video, &format).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Msg::Prepared(video.id, format, r));
+            ctx.request_repaint();
+        });
     }
 
     fn start_download(&mut self, ctx: &egui::Context, v: &Video) {
@@ -3114,6 +3257,7 @@ struct CardInfo {
     progress: Option<crate::positions::Entry>,
     m: Metrics,
     in_watch_later: bool,
+    in_history: bool,
     /// None: not downloaded; Some(1.0): downloaded; less: in progress.
     download: Option<f32>,
 }
@@ -3132,6 +3276,7 @@ fn video_card(
         progress,
         m,
         in_watch_later,
+        in_history,
         download,
     } = info;
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
@@ -3340,6 +3485,9 @@ fn video_card(
             };
             if ui.button(label).clicked() {
                 *action = CardAction::Quick(Quick::Watched(to));
+            }
+            if in_history && ui.button("Remove from watch history").clicked() {
+                *action = CardAction::Quick(Quick::RemoveFromHistory);
             }
             ui.separator();
         }

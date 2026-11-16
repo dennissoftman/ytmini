@@ -157,6 +157,8 @@ pub struct Embedded {
     pub format: String,
     /// Playing a download: no quality switching.
     pub local: bool,
+    /// For YTMINI_DEBUG's "first frame after …".
+    opened_at: Option<Instant>,
 
     pub pos: f64,
     pub duration: f64,
@@ -265,8 +267,8 @@ impl Embedded {
         resume: Option<f64>,
         gpa: mpv::GetProcAddress,
         ctx: &egui::Context,
-        // A download: (video file, separate audio file). Played offline.
-        local: Option<(Option<std::path::PathBuf>, Option<std::path::PathBuf>)>,
+        // Pre-resolved stream URLs, or a download's files: skips the ytdl hook.
+        direct: Option<yt::Direct>,
     ) -> Result<Embedded, String> {
         let mut opts: Vec<(&str, String)> = vec![
             ("vo", "libmpv".into()),
@@ -298,17 +300,18 @@ impl Embedded {
         if profile.audio_only {
             opts.push(("vid", "no".into()));
         }
-        // what to load: the YouTube URL (resolved by the ytdl hook) or local files
-        let target = match &local {
-            Some((Some(v), audio)) => {
-                if let Some(a) = audio {
-                    // one-entry list; ':' never appears in our download paths
-                    opts.push(("audio-files", a.display().to_string()));
+        // What to load: the YouTube URL (resolved by mpv's ytdl hook), or
+        // URLs/files we already have, which skips yt-dlp entirely.
+        let target = match &direct {
+            Some(d) => {
+                opts.push(("ytdl", "no".into()));
+                opts.push(("force-media-title", video.title().to_string()));
+                if let Some(ua) = &d.user_agent {
+                    opts.push(("user-agent", ua.clone()));
                 }
-                v.display().to_string()
+                d.video.clone()
             }
-            Some((None, Some(a))) => a.display().to_string(),
-            _ => video.url(),
+            None => video.url(),
         };
         let mpv = Mpv::new(&opts)?;
         mpv.request_log_messages("error");
@@ -324,6 +327,11 @@ impl Embedded {
         ])?;
         for opt in tools.ytdl_raw_options() {
             mpv.command(&["change-list", "ytdl-raw-options", "append", &opt])?;
+        }
+        // separate audio track for pre-resolved/downloaded video ("append"
+        // adds one entry, so ':' in URLs is fine; only valid after init)
+        if let Some(a) = direct.as_ref().and_then(|d| d.audio.as_ref()) {
+            mpv.command(&["change-list", "audio-files", "append", a])?;
         }
 
         let render = Render::new(&mpv, gpa)?;
@@ -355,12 +363,13 @@ impl Embedded {
             title: video.title().to_string(),
             id: video.id.clone(),
             url: video.url(),
-            profile_label: if local.is_some() {
+            profile_label: if direct.as_ref().is_some_and(|d| d.offline) {
                 "offline".into()
             } else {
                 profile.label.clone()
             },
-            local: local.is_some(),
+            local: direct.as_ref().is_some_and(|d| d.offline),
+            opened_at: Some(Instant::now()),
             format: profile.ytdl_format.clone(),
             pos: 0.0,
             duration: 0.0,
@@ -431,6 +440,11 @@ impl Embedded {
                     self.error = None;
                 }
                 mpv::EVENT_PLAYBACK_RESTART => {
+                    if let Some(t) = self.opened_at.take() {
+                        if std::env::var_os("YTMINI_DEBUG").is_some() {
+                            eprintln!("first frame after {:.2}s", t.elapsed().as_secs_f32());
+                        }
+                    }
                     self.started = true;
                     self.buffering = false;
                     self.last_activity = Instant::now(); // flash the controls when playback (re)starts
@@ -760,6 +774,9 @@ impl Embedded {
         let mpv = self.mpv();
         let _ = mpv.set_str("ytdl-format", &profile.ytdl_format);
         let _ = mpv.set_str("vid", if profile.audio_only { "no" } else { "auto" });
+        // if we started from pre-resolved URLs, go back through yt-dlp
+        let _ = mpv.set_str("ytdl", "yes");
+        let _ = mpv.command(&["change-list", "audio-files", "clr", ""]);
         let pos = mpv.get_f64("time-pos").unwrap_or(self.pos);
         let _ = mpv.command(&[
             "loadfile",

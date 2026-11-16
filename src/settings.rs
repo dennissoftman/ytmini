@@ -62,6 +62,8 @@ pub struct Settings {
     pub density: Density,
     /// Sidebar shows icons only.
     pub sidebar_collapsed: bool,
+    /// Resolve a video's stream while you hover its card, so it starts faster.
+    pub prepare_on_hover: bool,
     /// Even out loudness between and within videos (mpv dynaudnorm).
     pub volume_leveling: bool,
     /// Skip SponsorBlock segments.
@@ -129,6 +131,7 @@ impl Default for Settings {
             signin_source: None,
             density: Density::Comfortable,
             sidebar_collapsed: false,
+            prepare_on_hover: true,
             volume_leveling: true,
             sponsorblock: true,
             sb_categories: crate::sponsorblock::default_categories(),
