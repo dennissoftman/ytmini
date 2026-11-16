@@ -66,9 +66,6 @@ pub struct Settings {
     pub prepare_on_hover: bool,
     /// Play the next video in the queue when one ends.
     pub autoplay: bool,
-    /// The Up next panel beside the player.
-    #[serde(default = "yes")]
-    pub up_next_panel: bool,
     /// Interface language, also sent to YouTube; `None` follows macOS.
     #[serde(default)]
     pub language: Option<crate::i18n::Lang>,
@@ -96,10 +93,6 @@ pub struct Settings {
     pub muted_channels: Vec<String>,
     /// Hide videos whose title contains any of these (case-insensitive).
     pub muted_words: Vec<String>,
-}
-
-fn yes() -> bool {
-    true
 }
 
 impl Settings {
@@ -151,7 +144,6 @@ impl Default for Settings {
             sidebar_collapsed: false,
             prepare_on_hover: true,
             autoplay: true,
-            up_next_panel: true,
             language: None,
             region: None,
             volume_leveling: true,

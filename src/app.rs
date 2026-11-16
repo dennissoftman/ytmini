@@ -314,6 +314,8 @@ pub struct App {
     topic_loading: std::collections::HashSet<String>,
     /// Home's "Show all": the endless For you feed instead of Home's sections.
     feed_all: bool,
+    /// The Up next overlay on the right side of the video.
+    up_next_open: bool,
     session_refresh: SessionRefresh,
     /// Last background "still signed in?" probe.
     session_checked: std::time::Instant,
@@ -436,6 +438,7 @@ impl App {
             topic_shelves: HashMap::new(),
             topic_loading: std::collections::HashSet::new(),
             feed_all: false,
+            up_next_open: false,
             session_refresh: SessionRefresh::Idle,
             session_checked: std::time::Instant::now(),
             np_last: None,
@@ -483,6 +486,10 @@ impl App {
                     });
                     app.play(&v);
                 }
+            }
+            // `--up-next`: open the Up next overlay (for screenshots)
+            if a == "--up-next" {
+                app.up_next_open = true;
             }
             if a == "--play" {
                 if let Some(v) = args.next().as_deref().and_then(Video::from_url_or_id) {
@@ -3113,22 +3120,52 @@ impl App {
     /// Beside the video: your queue (reorder, remove, clear), the rest of an
     /// ordered list you started from, then YouTube's suggestions. Returns a
     /// video to play now.
-    fn ui_up_next(&mut self, ui: &mut egui::Ui) -> Option<Video> {
+    fn ui_up_next(&mut self, ctx: &egui::Context, video: egui::Rect) -> Option<Video> {
+        let a =
+            ctx.animate_bool_with_time(egui::Id::unique("up_next_fade"), self.up_next_open, 0.18);
+        if a <= 0.0 || !video.is_positive() {
+            return None;
+        }
+        let mut play: Option<Video> = None;
+        let w = 360.0f32.min(video.width() - 24.0);
+        let slide = (1.0 - a) * 28.0;
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(video.right() - w - 12.0 + slide, video.top() + 12.0),
+            egui::pos2(
+                video.right() - 12.0 + slide,
+                video.bottom() - player::CONTROLS_H - 8.0,
+            ),
+        );
+        egui::Area::new(egui::Id::unique("up_next_overlay"))
+            .fixed_pos(rect.min)
+            .order(egui::Order::Foreground)
+            .interactable(self.up_next_open)
+            .show(ctx, |ui| {
+                ui.multiply_opacity(a);
+                ui.style_mut().visuals = egui::Visuals::dark();
+                egui::Frame::new()
+                    .fill(Color32::from_rgba_unmultiplied(14, 14, 16, 205))
+                    .corner_radius(14)
+                    .stroke(Stroke::new(1.0, Color32::from_white_alpha(18)))
+                    .inner_margin(Margin::same(10))
+                    .show(ui, |ui| {
+                        let inner = rect.size() - Vec2::splat(20.0);
+                        ui.set_min_size(inner);
+                        ui.set_max_size(inner);
+                        play = crate::theme::on_dark(|| self.up_next_body(ui));
+                    });
+            });
+        if a < 1.0 {
+            ctx.request_repaint();
+        }
+        play
+    }
+
+    fn up_next_body(&mut self, ui: &mut egui::Ui) -> Option<Video> {
         let mut play: Option<Video> = None;
         let cur = self.playing_id().map(str::to_string);
-        egui::Panel::right("up_next")
-            .resizable(false)
-            .exact_size(340.0)
-            .frame(egui::Frame::new().fill(bg()).inner_margin(Margin {
-                left: 10,
-                right: 12,
-                top: 8,
-                bottom: 8,
-            }))
-            .show_separator_line(false)
-            .show(ui, |ui| {
-                let thumbs = &mut self.thumbs;
-                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        let thumbs = &mut self.thumbs;
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 4.0;
                     // --- your queue ---
                     ui.horizontal(|ui| {
@@ -3136,7 +3173,10 @@ impl App {
                         if !self.up_next.is_empty() {
                             ui.label(RichText::new(self.up_next.len().to_string()).color(text_dim()));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.small_button(t("Clear")).clicked() {
+                                if ui
+                                    .add(egui::Button::new(RichText::new(t("Clear")).color(text_dim())).frame(false))
+                                    .clicked()
+                                {
                                     self.up_next.clear();
                                 }
                             });
@@ -3169,7 +3209,7 @@ impl App {
                                 }
                                 let b = egui::Rect::from_min_size(egui::pos2(x - 24.0, at.y), Vec2::splat(22.0));
                                 x -= 26.0;
-                                if ui.put(b, egui::Button::new(sym).small()).on_hover_text(tip).clicked() {
+                                if round_btn(ui, b, sym).on_hover_text(tip).clicked() {
                                     op = Some((i, d));
                                 }
                             }
@@ -3225,8 +3265,7 @@ impl App {
                         if r.hovered {
                             let b = egui::Rect::from_min_size(r.rect.right_top() + Vec2::new(-28.0, 4.0), Vec2::splat(22.0));
                             let queued = self.up_next.iter().any(|q| q.id == v.id);
-                            let resp = ui
-                                .put(b, egui::Button::new(if queued { "✓" } else { "+" }).small())
+                            let resp = round_btn(ui, b, if queued { "✓" } else { "+" })
                                 .on_hover_text(t("Add to queue"));
                             if resp.clicked() && !queued {
                                 add = Some(v.clone());
@@ -3237,7 +3276,6 @@ impl App {
                         self.up_next.push_back(v);
                     }
                 });
-            });
         play
     }
 
@@ -3298,6 +3336,7 @@ impl App {
                 let shift = m == M::SHIFT;
                 match k {
                     Key::F => toggle_fs = true,
+                    Key::Escape if self.up_next_open => self.up_next_open = false,
                     Key::Escape if fullscreen => toggle_fs = true,
                     Key::Escape => back = true,
                     Key::N if shift => go_next = true,
@@ -3376,9 +3415,7 @@ impl App {
             _ => self.eof_at = None,
         }
         let mut jump: Option<Video> = None;
-        if !fullscreen && self.settings.up_next_panel && self.embedded.is_some() {
-            jump = self.ui_up_next(ui);
-        }
+        let mut video_rect = egui::Rect::NOTHING;
         if let (Some(p), Some(surface), Some(gl)) =
             (&mut self.embedded, &mut self.surface, frame.gl())
         {
@@ -3392,14 +3429,15 @@ impl App {
                 prev: q_prev,
                 next: q_next,
                 autoplay_in,
-                panel_open: (!fullscreen).then_some(self.settings.up_next_panel),
+                panel_open: Some(self.up_next_open),
             };
             let act = p.ui(ui, view);
             go_next |= act.next;
             go_prev |= act.prev;
             if act.toggle_panel {
-                self.settings.up_next_panel = !self.settings.up_next_panel;
+                self.up_next_open = !self.up_next_open;
             }
+            video_rect = act.video_rect.unwrap_or(egui::Rect::NOTHING);
             if act.cancel_autoplay {
                 self.autoplay_cancelled = true;
             }
@@ -3415,6 +3453,11 @@ impl App {
             }
         }
 
+        if self.embedded.is_some() {
+            if let Some(v) = self.ui_up_next(&ctx, video_rect) {
+                jump = Some(v);
+            }
+        }
         if toggle_fs {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
         }
@@ -4466,6 +4509,35 @@ struct CardInfo {
     download: Option<f32>,
     /// A Short: 9:16 cover, no duration badge.
     portrait: bool,
+}
+
+/// A small round icon button floating over a row (queue / suggestions).
+fn round_btn(ui: &mut egui::Ui, rect: egui::Rect, sym: &str) -> egui::Response {
+    let resp = ui.interact(
+        rect,
+        ui.scope_id()
+            .with(("round_btn", rect.min.x as i32, rect.min.y as i32)),
+        Sense::click(),
+    );
+    let alpha = if resp.hovered() { 235 } else { 175 };
+    let p = ui.painter();
+    p.circle_filled(
+        rect.center(),
+        rect.width() / 2.0,
+        Color32::from_black_alpha(alpha),
+    );
+    p.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        sym,
+        FontId::proportional(12.0),
+        if resp.hovered() {
+            Color32::WHITE
+        } else {
+            Color32::from_gray(220)
+        },
+    );
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 struct RowResp {

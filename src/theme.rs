@@ -62,6 +62,16 @@ thread_local! {
     static SYS_ACCENT: Cell<Option<(Color32, Color32)>> = const { Cell::new(None) };
 }
 
+/// Run `f` with the dark palette (keeps the accent): UI drawn over video.
+pub fn on_dark<R>(f: impl FnOnce() -> R) -> R {
+    let old = pal();
+    let accent = SYS_ACCENT.with(|a| a.get()).map_or(DARK.accent, |(_, d)| d);
+    PAL.with(|p| p.set(Palette { accent, ..DARK }));
+    let r = f();
+    PAL.with(|p| p.set(old));
+    r
+}
+
 pub fn pal() -> Palette {
     PAL.with(|p| p.get())
 }

@@ -1012,6 +1012,8 @@ pub struct Actions {
     pub prev: bool,
     pub cancel_autoplay: bool,
     pub toggle_panel: bool,
+    /// Where the video is drawn (for overlays).
+    pub video_rect: Option<egui::Rect>,
 }
 
 pub struct ViewCtx<'a> {
@@ -1026,11 +1028,11 @@ pub struct ViewCtx<'a> {
     pub next: Option<String>,
     /// Autoplay countdown (seconds left) shown on the end card.
     pub autoplay_in: Option<f32>,
-    /// The Up next panel's state for the header toggle (`None`: no toggle).
+    /// The Up next overlay's state for its toggle (`None`: no toggle).
     pub panel_open: Option<bool>,
 }
 
-const CONTROLS_H: f32 = 64.0;
+pub const CONTROLS_H: f32 = 64.0;
 const HIDE_AFTER: Duration = Duration::from_millis(2500);
 
 impl Embedded {
@@ -1054,18 +1056,6 @@ impl Embedded {
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(8.0);
-                    if let Some(open) = v.panel_open {
-                        if ui
-                            .add(egui::Button::selectable(
-                                open,
-                                egui::RichText::new(t("Up next")).size(14.0),
-                            ))
-                            .on_hover_text(t("Your queue and YouTube's suggestions"))
-                            .clicked()
-                        {
-                            act.toggle_panel = true;
-                        }
-                    }
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         ui.add(
                             egui::Label::new(egui::RichText::new(&self.title).size(16.0).strong())
@@ -1078,6 +1068,7 @@ impl Embedded {
         }
 
         let area = ui.available_rect_before_wrap();
+        act.video_rect = Some(area);
         let resp = ui.allocate_rect(area, Sense::click());
         let painter = ui.painter_at(area);
         painter.rect_filled(area, 0, Color32::BLACK);
@@ -1584,6 +1575,34 @@ impl Embedded {
 
         // fullscreen
         let fs = take(row.height());
+        // Up next (queue + suggestions), over the right side of the video
+        let un = take(row.height());
+        if let Some(open) = v.panel_open {
+            if open {
+                ui.painter()
+                    .rect_filled(un, 6, Color32::from_white_alpha(35));
+            }
+            if btn(ui, un, "upnext").on_hover_text(t("Up next")).clicked() {
+                act.toggle_panel = true;
+            }
+            let c = un.center();
+            for dy in [-5.0f32, 0.0, 5.0] {
+                painter.line_segment(
+                    [Pos2::new(c.x - 8.0, c.y + dy), Pos2::new(c.x + 3.0, c.y + dy)],
+                    Stroke::new(2.0, Color32::WHITE),
+                );
+            }
+            // small play triangle: "up next"
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    Pos2::new(c.x + 5.0, c.y + 1.5),
+                    Pos2::new(c.x + 5.0, c.y + 8.5),
+                    Pos2::new(c.x + 10.0, c.y + 5.0),
+                ],
+                Color32::WHITE,
+                Stroke::NONE,
+            ));
+        }
         if btn(ui, fs, "fs").clicked() {
             act.toggle_fullscreen = true;
         }
