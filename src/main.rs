@@ -16,6 +16,7 @@ mod positions;
 mod settings;
 mod signin;
 mod sponsorblock;
+mod storyboard;
 mod theme;
 mod thumbs;
 mod tray;

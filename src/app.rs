@@ -130,6 +130,7 @@ enum Msg {
     Download(crate::downloads::Progress),
     /// Hover-prepare finished: id, format, result.
     Prepared(String, String, Result<yt::Direct, String>),
+    Storyboard(String, crate::storyboard::Storyboard),
     /// Thumbnail for Now Playing, fetched for a video that wasn't cached.
     NowPlayingArt(String, Vec<u8>),
     /// Silent session refresh finished: (browser label, browser id, profile) or error.
@@ -965,6 +966,11 @@ impl App {
                             .insert(id, (format, d, std::time::Instant::now()));
                     }
                 }
+                Msg::Storyboard(id, sb) => {
+                    if let Some(p) = self.embedded.as_mut().filter(|p| p.id == id) {
+                        p.storyboard = Some(sb);
+                    }
+                }
                 Msg::NowPlayingArt(id, bytes) => {
                     if self.embedded.as_ref().is_some_and(|p| p.id == id) {
                         self.np_art = Some(bytes);
@@ -1116,6 +1122,20 @@ impl App {
         ) {
             Ok(p) => {
                 self.status = None;
+                {
+                    let (tx, id, cookies, ctx2) = (
+                        self.tx.clone(),
+                        video.id.clone(),
+                        self.cookies.clone(),
+                        ctx.clone(),
+                    );
+                    std::thread::spawn(move || {
+                        if let Ok(sb) = crate::storyboard::fetch(&cookies, &id) {
+                            let _ = tx.send(Msg::Storyboard(id, sb));
+                            ctx2.request_repaint();
+                        }
+                    });
+                }
                 if self.settings.sponsorblock {
                     let (tx, id, cats, ctx2) = (
                         self.tx.clone(),

@@ -190,6 +190,13 @@ pub struct Embedded {
     skipped: Vec<usize>,
     /// "Skipped sponsor · Undo" toast: segment index and when.
     skip_toast: Option<(usize, Instant)>,
+    /// Seek-bar previews (filled in once fetched); sheets load on hover.
+    pub storyboard: Option<crate::storyboard::Storyboard>,
+    sb_sheets: std::collections::HashMap<u32, Option<egui::TextureHandle>>,
+    sb_chan: (
+        std::sync::mpsc::Sender<(u32, egui::ColorImage)>,
+        std::sync::mpsc::Receiver<(u32, egui::ColorImage)>,
+    ),
     /// A single click waiting out the double-click window before it pauses.
     pending_click: Option<(Instant, Pos2)>,
     /// Double-click-and-keep-tapping seek on the left/right side.
@@ -392,6 +399,9 @@ impl Embedded {
             segments: Vec::new(),
             skipped: Vec::new(),
             skip_toast: None,
+            storyboard: None,
+            sb_sheets: std::collections::HashMap::new(),
+            sb_chan: std::sync::mpsc::channel(),
             pending_click: None,
             streak: None,
         })
@@ -677,6 +687,59 @@ impl Embedded {
                 Color32::WHITE,
             );
         }
+    }
+
+    /// Storyboard frame for `t`, drawn above the seek bar centred on `x`,
+    /// bottom edge at `bottom`. Sheets download (no cookies) on first need.
+    fn preview(&mut self, ui: &egui::Ui, x: f32, bottom: f32, t: f64) {
+        while let Ok((n, img)) = self.sb_chan.1.try_recv() {
+            let tex = ui
+                .ctx()
+                .load_texture(format!("sb-{}-{n}", self.id), img, Default::default());
+            self.sb_sheets.insert(n, Some(tex));
+        }
+        let Some(sb) = &self.storyboard else { return };
+        let (sheet, i) = sb.frame_at(t, self.duration);
+        let tex = match self.sb_sheets.get(&sheet) {
+            Some(Some(tex)) => tex.clone(),
+            Some(None) => {
+                ui.ctx().request_repaint_after(Duration::from_millis(50));
+                return;
+            }
+            None => {
+                self.sb_sheets.insert(sheet, None);
+                let (url, tx, ctx) = (
+                    sb.sheet_url(sheet),
+                    self.sb_chan.0.clone(),
+                    ui.ctx().clone(),
+                );
+                std::thread::spawn(move || {
+                    if let Ok(img) = crate::storyboard::load_sheet(&url) {
+                        let _ = tx.send((sheet, img));
+                        ctx.request_repaint();
+                    }
+                });
+                return;
+            }
+        };
+        let [tw, th] = tex.size().map(|v| v as f32);
+        let (col, row) = ((i % sb.cols) as f32, (i / sb.cols) as f32);
+        let (fw, fh) = (sb.w as f32, sb.h as f32);
+        if (col + 1.0) * fw > tw + 1.0 || (row + 1.0) * fh > th + 1.0 {
+            return; // last sheet is shorter than a full grid
+        }
+        let uv = Rect::from_min_max(
+            Pos2::new(col * fw / tw, row * fh / th),
+            Pos2::new((col + 1.0) * fw / tw, (row + 1.0) * fh / th),
+        );
+        let w = 192.0;
+        let r = Rect::from_min_max(
+            Pos2::new(x - w / 2.0, bottom - w * fh / fw),
+            Pos2::new(x + w / 2.0, bottom),
+        );
+        let p = ui.painter();
+        p.rect_filled(r.expand(2.0), 6, Color32::from_black_alpha(220));
+        p.image(tex.id(), r, uv, Color32::WHITE);
     }
 
     fn on_click(&mut self, pos: Pos2, area: Rect, side: f64, act: &mut Actions) {
@@ -1127,6 +1190,12 @@ impl Embedded {
             painter.circle_filled(Pos2::new(played.right(), track.center().y), 7.0, v.accent);
             if let Some(hp) = sresp.hover_pos() {
                 let t = x_to_t(hp.x);
+                self.preview(
+                    ui,
+                    hp.x.clamp(seek.left() + 100.0, seek.right() - 100.0),
+                    seek.top() - 30.0,
+                    t,
+                );
                 let label = fmt_time(t);
                 let g = painter.layout_no_wrap(label, FontId::proportional(12.0), Color32::WHITE);
                 let r = Rect::from_center_size(

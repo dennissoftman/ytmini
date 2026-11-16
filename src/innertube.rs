@@ -423,6 +423,25 @@ mod mark_live {
     }
 }
 
+/// The video's storyboard spec (seek-bar preview sprites) and which level
+/// YouTube recommends for high-resolution previews. Blocking.
+pub fn storyboard_spec(cookies: &Path, video_id: &str) -> Result<(String, usize)> {
+    let r = Client::new(cookies)?.post("player", json!({ "videoId": video_id }))?;
+    let sb = r
+        .pointer("/storyboards/playerStoryboardSpecRenderer")
+        .context("no storyboard for this video")?;
+    let spec = sb
+        .get("spec")
+        .and_then(Value::as_str)
+        .context("no storyboard spec")?;
+    let level = sb
+        .get("highResolutionRecommendedLevel")
+        .or_else(|| sb.get("recommendedLevel"))
+        .and_then(Value::as_u64)
+        .unwrap_or(1) as usize;
+    Ok((spec.to_string(), level))
+}
+
 /// Remove `video_id` from your YouTube watch history (what the website's
 /// "Remove from watch history" does). Looks through the first few pages of
 /// History for it. Returns false if it isn't there. Blocking.
