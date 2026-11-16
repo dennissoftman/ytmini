@@ -161,6 +161,9 @@ fn apply_style(ctx: &egui::Context, p: Palette) {
         style.spacing.item_spacing = Vec2::new(8.0, 6.0);
         style.spacing.button_padding = Vec2::new(10.0, 4.0);
         style.spacing.interact_size.y = 24.0;
+        // hovers, toggles, collapsing and scroll jumps ease a little longer
+        // than egui's default 1/12 s: smoother, still snappy
+        style.animation_time = 0.16;
 
         let v = &mut style.visuals;
         *v = if p.dark {

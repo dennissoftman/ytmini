@@ -1051,6 +1051,12 @@ impl Embedded {
     }
 }
 
+/// Smoothstep: eases a linear 0→1 animation in and out.
+pub fn ease(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 fn load(mpv: &Mpv, target: &str, resume: Option<f64>) -> Result<(), String> {
     match resume {
         Some(t) => mpv.command(&[
@@ -1094,6 +1100,8 @@ pub struct Actions {
     pub toggle_panel: bool,
     /// Where the video is drawn (for overlays).
     pub video_rect: Option<egui::Rect>,
+    /// The controls (and so the overlay) are showing: the mouse moved lately.
+    pub controls_visible: bool,
     /// The header row and the width kept free at its right.
     pub header: Option<(egui::Rect, f32)>,
 }
@@ -1160,12 +1168,27 @@ impl Embedded {
         painter.rect_filled(area, 0, Color32::BLACK);
 
         // Activity → controls visible
-        if ctx.input(|i| i.pointer.delta() != Vec2::ZERO || i.pointer.any_down()) {
+        if ctx.input(|i| {
+            i.pointer.delta() != Vec2::ZERO
+                || i.pointer.any_down()
+                || i.smooth_scroll_delta != Vec2::ZERO
+        }) {
             self.poke();
         }
         let idle = self.last_activity.elapsed();
-        let show_controls =
-            self.paused || self.eof || !self.started || idle < HIDE_AFTER || self.scrub.is_some();
+        // pointing at the controls bar keeps it up (no hide/re-show flicker)
+        let over_bar = ctx.pointer_hover_pos().is_some_and(|p| {
+            area.contains(p)
+                && p.y >= area.bottom() - CONTROLS_H
+                && resp.ctx.input(|i| i.pointer.has_pointer())
+        });
+        let show_controls = self.paused
+            || self.eof
+            || !self.started
+            || idle < HIDE_AFTER
+            || self.scrub.is_some()
+            || over_bar;
+        act.controls_visible = show_controls;
         if !show_controls && resp.hovered() {
             ctx.set_cursor_icon(egui::CursorIcon::None);
         } else if !self.paused {
@@ -1180,11 +1203,17 @@ impl Embedded {
         );
         if w > 0 && h > 0 {
             self.render(v.gl, v.surface, w, h);
+            // a new video comes up from black instead of popping in
+            let shown = ctx.animate_bool_with_time(
+                egui::Id::unique(("frame_in", self.id.as_str())),
+                self.started,
+                0.35,
+            );
             painter.image(
                 v.surface.id,
                 area,
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
+                Color32::from_gray((255.0 * ease(shown)) as u8),
             );
         }
 
@@ -1235,9 +1264,17 @@ impl Embedded {
         } else if self.eof {
             match (&v.next, v.autoplay_in) {
                 (Some(next), Some(left)) => {
-                    let r =
-                        Rect::from_center_size(center, Vec2::new(area.width().min(420.0), 130.0));
+                    let a = ease(ctx.animate_bool_with_time(
+                        egui::Id::unique(("end_card", self.id.as_str())),
+                        true,
+                        0.3,
+                    ));
+                    let r = Rect::from_center_size(
+                        center + Vec2::new(0.0, (1.0 - a) * 16.0),
+                        Vec2::new(area.width().min(420.0), 130.0),
+                    );
                     ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
+                        ui.multiply_opacity(a);
                         egui::Frame::new()
                             .fill(Color32::from_black_alpha(215))
                             .corner_radius(12)
@@ -1401,12 +1438,19 @@ impl Embedded {
             self.skip_toast = None;
         }
 
-        // Controls
-        if show_controls && self.error.is_none() {
+        // Controls: fade in and out rather than pop
+        let ca = ease(ctx.animate_bool_with_time(
+            egui::Id::unique("controls_fade"),
+            show_controls,
+            if show_controls { 0.15 } else { 0.4 },
+        ));
+        if ca > 0.0 && self.error.is_none() {
             let bar = Rect::from_min_max(
                 Pos2::new(area.left(), area.bottom() - CONTROLS_H),
                 area.right_bottom(),
             );
+            ui.multiply_opacity(ca);
+            let painter = ui.painter_at(area);
             // soft gradient so controls read over bright video
             let top = bar.top() - 40.0;
             let mut mesh = egui::Mesh::default();

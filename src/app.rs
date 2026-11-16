@@ -370,6 +370,10 @@ pub struct App {
     feed_all: bool,
     /// The Up next overlay on the right side of the video.
     up_next_open: bool,
+    /// The player's controls are showing (the overlay follows them).
+    controls_visible: bool,
+    /// Where the overlay was drawn last frame (for "pointer is over it").
+    overlay_rect: Option<egui::Rect>,
     /// Index of the queue row being dragged.
     queue_drag: Option<usize>,
     /// Rating / channel / comments token of the playing video.
@@ -513,6 +517,8 @@ impl App {
             feed_all: false,
             up_next_open: false,
             queue_drag: None,
+            controls_visible: true,
+            overlay_rect: None,
             watch: None,
             panel_tab: PanelTab::UpNext,
             comments: CommentsState::default(),
@@ -3300,14 +3306,31 @@ impl App {
         video: egui::Rect,
         fullscreen: bool,
     ) -> Option<Video> {
-        let a =
-            ctx.animate_bool_with_time(egui::Id::unique("up_next_fade"), self.up_next_open, 0.18);
+        // Shown while the controls are (the mouse moved lately), while you
+        // point at it, drag in it or have the Save window open; otherwise it
+        // slides out to the right with the controls.
+        let hovered = ctx
+            .pointer_hover_pos()
+            .zip(self.overlay_rect)
+            .is_some_and(|(p, r)| r.contains(p));
+        let shown = self.up_next_open
+            && (self.controls_visible
+                || hovered
+                || self.queue_drag.is_some()
+                || self.save.is_some());
+        let lin = ctx.animate_bool_with_time(
+            egui::Id::unique("up_next_fade"),
+            shown,
+            if shown { 0.25 } else { 0.45 },
+        );
+        let a = player::ease(lin);
         if a <= 0.0 || !video.is_positive() {
+            self.overlay_rect = None;
             return None;
         }
         let mut play: Option<Video> = None;
         let w = 360.0f32.min(video.width() - 24.0);
-        let slide = (1.0 - a) * 28.0;
+        let slide = (1.0 - a) * 56.0;
         let rect = egui::Rect::from_min_max(
             egui::pos2(video.right() - w - 12.0 + slide, video.top() + 12.0),
             egui::pos2(
@@ -3318,7 +3341,7 @@ impl App {
         egui::Area::new(egui::Id::unique("up_next_overlay"))
             .fixed_pos(rect.min)
             .order(egui::Order::Foreground)
-            .interactable(self.up_next_open)
+            .interactable(shown)
             .show(ctx, |ui| {
                 ui.multiply_opacity(a);
                 ui.style_mut().visuals = egui::Visuals::dark();
@@ -3358,6 +3381,7 @@ impl App {
                         });
                     });
             });
+        self.overlay_rect = Some(rect);
         if a < 1.0 {
             ctx.request_repaint();
         }
@@ -4017,6 +4041,7 @@ impl App {
             }
             video_rect = act.video_rect.unwrap_or(egui::Rect::NOTHING);
             header = act.header;
+            self.controls_visible = act.controls_visible;
             if act.cancel_autoplay {
                 self.autoplay_cancelled = true;
             }
@@ -5064,6 +5089,8 @@ impl eframe::App for App {
             }
         }
         self.prepare_next(&ctx);
+        let grid_in =
+            ctx.animate_bool_with_time(egui::Id::unique("grid_in"), self.embedded.is_none(), 0.25);
         egui::Frame::new().fill(bg()).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
             match &self.screen {
@@ -5074,7 +5101,11 @@ impl eframe::App for App {
                 Screen::Setup => self.ui_setup(ui),
                 Screen::Onboarding => self.ui_onboarding(ui),
                 Screen::Main if self.embedded.is_some() => self.ui_player(ui, frame),
-                Screen::Main => self.ui_main(ui),
+                Screen::Main => {
+                    // back from the player: the grid fades in
+                    ui.multiply_opacity(player::ease(grid_in));
+                    self.ui_main(ui);
+                }
             }
         });
         if self.show_settings {
