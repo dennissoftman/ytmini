@@ -26,10 +26,11 @@ re-scans those files each time — 13 s per call, measured, vs 0.26 s unpacked.
 Building the bundle needs `brew install mpv` on the build machine; running it
 doesn't need Homebrew at all.
 
-**Licensing:** Homebrew's FFmpeg is built with `--enable-gpl --enable-version3`
-and mpv is GPL-2.0+/LGPL-2.1+. Fine for personal use; if you distribute the
-`.app`, the GPL applies (ship or offer the mpv/FFmpeg sources, and license
-ytmini compatibly).
+**Licensing:** ytmini's code is MIT ([LICENSE](LICENSE)). The built
+`ytmini.app` also contains GPL-3.0 FFmpeg and GPL/LGPL mpv, so the bundle as a
+whole is distributed under GPLv3 — see [NOTICE](NOTICE). `bundle.sh` puts every
+bundled package's license files and exact versions in
+`Contents/Resources/licenses/`.
 
 ## Embedded player and libmpv
 
@@ -68,3 +69,8 @@ cargo test -- --ignored --test-threads 1           # live: hits YouTube with you
 ./target/release/ytmini --smoke-test aqz-KE-bpKQ   # embedded player: play, seek, back, replay,
                                                    # live quality switch, quit while playing
 ```
+
+## License
+
+MIT for ytmini's own code — see [LICENSE](LICENSE). Bundled third-party
+components and what that means for `ytmini.app`: [NOTICE](NOTICE).

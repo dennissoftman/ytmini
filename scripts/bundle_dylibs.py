@@ -36,6 +36,37 @@ def rpaths(path):
     return [chunk.split("path ")[1].split(" (")[0] for chunk in out]
 
 
+LICENSE_NAMES = ("LICENSE", "LICENCE", "COPYING", "NOTICE", "AUTHORS")
+
+
+def collect_licenses(app, sources, prefix):
+    """Copy each bundled Homebrew package's license files into
+    Contents/Resources/licenses/<formula>/ and write THIRD_PARTY.txt."""
+    out = os.path.join(app, "Contents", "Resources", "licenses")
+    shutil.rmtree(out, ignore_errors=True)
+    os.makedirs(out)
+    cellar = os.path.join(prefix, "Cellar") + os.sep
+    packages = {}
+    for src in sources:
+        if not src.startswith(cellar):
+            continue
+        formula, version = src[len(cellar):].split(os.sep)[:2]
+        packages[formula] = version
+    lines = ["Third-party software bundled in ytmini.app (from Homebrew)", ""]
+    for formula, version in sorted(packages.items()):
+        keg = os.path.join(cellar, formula, version)
+        files = [f for f in os.listdir(keg) if f.upper().startswith(LICENSE_NAMES)]
+        dest = os.path.join(out, formula)
+        os.makedirs(dest, exist_ok=True)
+        for f in files:
+            shutil.copyfile(os.path.join(keg, f), os.path.join(dest, f))
+        note = ", ".join(files) if files else "no license file in keg — see https://formulae.brew.sh/formula/" + formula
+        lines.append(f"{formula} {version}  ({note})")
+    with open(os.path.join(out, "THIRD_PARTY.txt"), "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    print(f"licenses for {len(packages)} packages -> Contents/Resources/licenses/")
+
+
 def main():
     app = sys.argv[1]
     prefix = sys.argv[sys.argv.index("--prefix") + 1] if "--prefix" in sys.argv else "/opt/homebrew"
@@ -119,6 +150,8 @@ def main():
                 bad.append(f"{os.path.basename(path)} rpath {rp}")
     if bad:
         sys.exit("still linked to the build machine:\n  " + "\n  ".join(bad))
+
+    collect_licenses(app, list(names.values()) + [mpv_bin], prefix)
 
     size = sum(os.path.getsize(p) for p, _ in targets)
     print(f"bundled {len(targets) - 1} dylibs + mpv ({size / 1048576:.0f} MB)")
