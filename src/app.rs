@@ -119,6 +119,10 @@ enum Msg {
     SignInCheck(Result<bool, String>),
     /// A message for the status bar (text, is_error).
     Status(String, bool),
+    /// SponsorBlock segments for a video id.
+    Segments(String, Vec<crate::sponsorblock::Segment>),
+    /// Silent session refresh finished: (browser label, browser id, profile) or error.
+    SessionRefreshed(Result<(String, String, std::path::PathBuf), String>),
     /// Watch later add (true) / remove finished for a video id.
     WatchLater(bool, String, Result<String, String>),
 }
@@ -185,6 +189,8 @@ enum CardAction {
 #[derive(Clone, Copy)]
 enum Quick {
     WatchLater(bool),
+    /// Hide this video's channel from feeds and search.
+    MuteChannel,
     CopyLink,
     OpenInBrowser,
     Watched(bool),
@@ -249,6 +255,20 @@ pub struct App {
     /// Clicked video waiting for `ui` (where the GL context and Frame are available).
     pending_play: Option<Video>,
     smoke: Option<Smoke>,
+
+    // links handed over from outside (clipboard, Services menu)
+    /// Waiting for `ui` (needs the Frame to leave the player, and a signed-in main screen).
+    pending_link: Option<crate::links::Link>,
+    /// Start time from a `t=` link, for the video it came with.
+    link_start: Option<(String, f64)>,
+    /// YouTube link on the clipboard, offered as a button in the top bar.
+    clip_link: Option<crate::links::Link>,
+    /// Clipboard text already looked at (so a dismissed link isn't offered again).
+    clip_seen: String,
+    was_focused: bool,
+    /// Settings → Feed "hide titles containing" text, as typed.
+    muted_words_buf: String,
+    session_refresh: SessionRefresh,
 
     // background (tray)
     tray: Option<Tray>,
@@ -332,6 +352,13 @@ impl App {
             embedded: None,
             pending_play: None,
             smoke: None,
+            pending_link: None,
+            link_start: None,
+            clip_link: None,
+            clip_seen: String::new(),
+            was_focused: false,
+            muted_words_buf: String::new(),
+            session_refresh: SessionRefresh::Idle,
             tray,
             tray_rx,
             hidden: false,
@@ -343,6 +370,8 @@ impl App {
             last_ext_poll: std::time::Instant::now(),
         };
         app.enforce_cache(ctx);
+        app.muted_words_buf = app.settings.muted_words.join(", ");
+        crate::links::install(ctx);
         // `ytmini --play <url|id>` opens straight into the player.
         let mut args = std::env::args().skip(1);
         while let Some(a) = args.next() {
@@ -555,8 +584,19 @@ impl App {
                     });
                     ctx.request_repaint();
                 };
-                let mut feed = if start == 0 {
-                    Feed::native(&cookies, &source).unwrap_or_else(|e| {
+                let native = if start == 0 {
+                    Some(Feed::native(&cookies, &source))
+                } else {
+                    None
+                };
+                if let Some(Err(e)) = &native {
+                    let e = format!("{e:#}");
+                    if e.contains(crate::innertube::SESSION_EXPIRED) {
+                        return fail(e); // yt-dlp would just list signed-out results
+                    }
+                }
+                let mut feed = if let Some(native) = native {
+                    native.unwrap_or_else(|e| {
                         if debug {
                             eprintln!("native {} failed, using yt-dlp: {e:#}", source.label());
                         }
@@ -754,6 +794,13 @@ impl App {
                     ]
                     .iter()
                     .any(|k| e.contains(k));
+                    if e.contains(crate::innertube::SESSION_EXPIRED) {
+                        tab.error = Some(
+                            "Your YouTube session expired. Refreshing it from your browser…".into(),
+                        );
+                        self.auto_refresh_session(ctx);
+                        continue;
+                    }
                     tab.error = Some(e);
                     let managed = self.tools.as_ref().is_some_and(|t| t.ytdlp_managed);
                     if looks_stale
@@ -838,6 +885,30 @@ impl App {
                 }
                 Msg::SignInCheck(r) => self.on_signin_check(ctx, r),
                 Msg::Status(text, is_err) => self.status = Some((text, is_err)),
+                Msg::SessionRefreshed(r) => {
+                    self.session_refresh = SessionRefresh::Done(std::time::Instant::now());
+                    match r {
+                        Ok((label, id, profile)) => {
+                            self.settings.signin_source =
+                                Some(crate::settings::SignInSource { id, profile });
+                            self.status = Some((format!("Session refreshed from {label}."), false));
+                            self.tabs.clear();
+                            self.load(ctx, self.active.clone(), true);
+                            self.prefetch_tabs(ctx);
+                        }
+                        Err(e) => {
+                            self.status = Some((
+                                format!("Your YouTube session expired and couldn't be refreshed ({e}). Settings → Account → Sign in again."),
+                                true,
+                            ));
+                        }
+                    }
+                }
+                Msg::Segments(id, segs) => {
+                    if let Some(p) = self.embedded.as_mut().filter(|p| p.id == id) {
+                        p.segments = segs;
+                    }
+                }
                 Msg::WatchLater(add, id, r) => {
                     match r {
                         Ok(msg) => self.status = Some((msg, false)),
@@ -913,7 +984,10 @@ impl App {
         }
         self.power = yt::power_state();
         let profile = yt::profile(self.settings.quality, self.power, self.screen_cap);
-        let resume = self.positions.resume_at(&video.id);
+        let resume = match self.link_start.take() {
+            Some((id, t)) if id == video.id => Some(t),
+            _ => self.positions.resume_at(&video.id),
+        };
         match Embedded::start(
             &tools,
             &self.cookies,
@@ -926,6 +1000,21 @@ impl App {
         ) {
             Ok(p) => {
                 self.status = None;
+                if self.settings.sponsorblock {
+                    let (tx, id, cats, ctx2) = (
+                        self.tx.clone(),
+                        video.id.clone(),
+                        self.settings.sb_categories.clone(),
+                        ctx.clone(),
+                    );
+                    std::thread::spawn(move || {
+                        // A failure just means no skipping; not worth a status message.
+                        if let Ok(segs) = crate::sponsorblock::fetch(&id, &cats) {
+                            let _ = tx.send(Msg::Segments(id, segs));
+                            ctx2.request_repaint();
+                        }
+                    });
+                }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
                     "{} — ytmini",
                     video.title()
@@ -965,7 +1054,10 @@ impl App {
         let Some(tools) = &self.tools else { return };
         self.power = yt::power_state();
         let profile = yt::profile(self.settings.quality, self.power, self.screen_cap);
-        let resume = self.positions.resume_at(&video.id);
+        let resume = match self.link_start.take() {
+            Some((id, t)) if id == video.id => Some(t),
+            _ => self.positions.resume_at(&video.id),
+        };
         match yt::play(tools, &self.cookies, video, &profile, resume) {
             Ok(child) => {
                 self.status = None;
@@ -1327,7 +1419,10 @@ impl App {
                     }
                     if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                         let q = self.search_query.trim();
-                        if !q.is_empty() {
+                        if let Some(link) = crate::links::parse(q) {
+                            self.pending_link = Some(link);
+                            self.search_query.clear();
+                        } else if !q.is_empty() {
                             search = Some(q.to_string());
                         }
                     }
@@ -1336,6 +1431,22 @@ impl App {
                             .frame(false);
                         if ui.add(b).on_hover_text("Refresh (⌘R)").clicked() {
                             refresh = true;
+                        }
+                        if let Some(link) = self.clip_link.clone() {
+                            let x =
+                                egui::Button::new(RichText::new("✕").size(11.0).color(text_dim()))
+                                    .frame(false);
+                            if ui.add(x).on_hover_text("Dismiss").clicked() {
+                                self.clip_link = None;
+                            }
+                            if ui
+                                .add(accent_btn(&format!("▶  {}", link.verb())))
+                                .on_hover_text("A YouTube link is on your clipboard")
+                                .clicked()
+                            {
+                                self.pending_link = Some(link);
+                                self.clip_link = None;
+                            }
                         }
                     });
                 });
@@ -1419,6 +1530,7 @@ impl App {
             let playing_id = self.player.as_ref().map(|p| p.id.clone());
             let thumbs = &mut self.thumbs;
             let positions = &self.positions;
+            let settings = &self.settings;
             let Some(tab) = self.tabs.get_mut(&source) else {
                 return;
             };
@@ -1484,7 +1596,15 @@ impl App {
                 ThumbQuality::Auto if card_w * ui.ctx().pixels_per_point() > 380.0 => Variant::High,
                 ThumbQuality::Auto => Variant::Standard,
             };
-            let video_rows = tab.videos.len().div_ceil(cols);
+            let shown: Vec<&Video> = tab
+                .videos
+                .iter()
+                .filter(|v| {
+                    let watched = positions.get(&v.id).is_some_and(|e| e.watched());
+                    !settings.hides(&source, v, watched)
+                })
+                .collect();
+            let video_rows = shown.len().div_ceil(cols);
             let show_footer = !tab.exhausted || tab.error.is_some();
             let rows = video_rows + usize::from(show_footer);
 
@@ -1510,7 +1630,7 @@ impl App {
                         ui.add_space(GAP);
                         ui.spacing_mut().item_spacing.x = GAP;
                         if row < video_rows {
-                            for v in tab.videos.iter().skip(row * cols).take(cols) {
+                            for &v in shown.iter().skip(row * cols).take(cols) {
                                 let playing = playing_id.as_deref() == Some(v.id.as_str());
                                 let progress = (!v.is_playlist)
                                     .then(|| positions.get(&v.id))
@@ -1616,6 +1736,13 @@ impl App {
     }
 }
 
+enum SessionRefresh {
+    Idle,
+    Running,
+    /// When the last attempt finished; we don't retry within 10 minutes.
+    Done(std::time::Instant),
+}
+
 #[derive(PartialEq)]
 enum GoogleAction {
     None,
@@ -1633,12 +1760,24 @@ impl App {
         };
         match q {
             Quick::CopyLink => {
+                self.clip_seen = url.clone(); // our own copy: don't offer it back
                 ctx.copy_text(url);
                 self.status = Some(("Link copied.".into(), false));
             }
             Quick::OpenInBrowser => {
                 if let Err(e) = open_url(&url) {
                     self.status = Some((format!("Couldn't open the browser: {e}"), true));
+                }
+            }
+            Quick::MuteChannel => {
+                if let Some(ch) = v.channel.clone() {
+                    self.status = Some((
+                        format!("Hiding {ch} in your feeds and search (Settings → Feed to undo)."),
+                        false,
+                    ));
+                    if !self.settings.muted_channels.contains(&ch) {
+                        self.settings.muted_channels.push(ch);
+                    }
                 }
             }
             Quick::Watched(true) => self.positions.mark_watched(&v.id, v.duration),
@@ -1910,6 +2049,43 @@ impl App {
         ctx.request_repaint_after(Duration::from_millis(500));
     }
 
+    /// Google rotates part of the login in the browser; after a few days our
+    /// copy stops signing in. Re-import from the browser we signed in with
+    /// (or the first signed-in one) without bothering the user. Chromium
+    /// browsers may show a Keychain prompt; "Always Allow" makes it silent.
+    fn auto_refresh_session(&mut self, ctx: &egui::Context) {
+        match self.session_refresh {
+            SessionRefresh::Running => return,
+            SessionRefresh::Done(t) if t.elapsed() < Duration::from_secs(600) => return,
+            _ => {}
+        }
+        self.session_refresh = SessionRefresh::Running;
+        let saved = self.settings.signin_source.clone();
+        let (tx, ctx, cookies) = (self.tx.clone(), ctx.clone(), self.cookies.clone());
+        std::thread::spawn(move || {
+            let pick = saved
+                .and_then(|s| signin::find(&s.id, &s.profile))
+                .or_else(|| {
+                    let all = signin::sessions();
+                    // prefer browsers that don't need a Keychain prompt
+                    let ok = |s: &signin::Session| s.has_login().unwrap_or(false);
+                    all.iter()
+                        .find(|s| (s.firefox || s.safari) && ok(s))
+                        .or_else(|| all.iter().find(|s| ok(s)))
+                        .cloned()
+                });
+            let r = match pick {
+                None => Err("no signed-in browser found".to_string()),
+                Some(s) => s
+                    .export_cookies(&cookies)
+                    .map(|()| (s.label(), s.id.to_string(), s.profile.clone()))
+                    .map_err(|e| format!("{e:#}")),
+            };
+            let _ = tx.send(Msg::SessionRefreshed(r));
+            ctx.request_repaint();
+        });
+    }
+
     /// Step 2: the profile is signed in → import a snapshot of its cookies.
     fn finish_signin(&mut self, ctx: &egui::Context) {
         let Some(s) = self.signin.take() else { return };
@@ -2026,6 +2202,7 @@ impl App {
             .collapsible(false)
             .resizable(false)
             .default_width(420.0)
+            .vscroll(true) // grows past small windows now
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 let s = &mut self.settings;
@@ -2054,6 +2231,75 @@ impl App {
                     ))
                     .small()
                     .color(text_dim()),
+                );
+
+                ui.add_space(10.0);
+                section(ui, "SponsorBlock");
+                ui.checkbox(&mut s.sponsorblock, "Skip sponsor segments and other filler");
+                if s.sponsorblock {
+                    ui.indent("sb", |ui| {
+                        for (id, label, [r, g, b]) in crate::sponsorblock::CATEGORIES {
+                            let mut on = s.sb_categories.iter().any(|c| c == id);
+                            ui.horizontal(|ui| {
+                                let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                                ui.painter().circle_filled(dot.center(), 4.0, Color32::from_rgb(r, g, b));
+                                if ui.checkbox(&mut on, label).changed() {
+                                    s.sb_categories.retain(|c| c != id);
+                                    if on {
+                                        s.sb_categories.push(id.to_string());
+                                    }
+                                }
+                            });
+                        }
+                    });
+                }
+                ui.label(
+                    RichText::new("Segments come from the SponsorBlock community (sponsor.ajay.app). Only a short hash prefix of the video id is sent, never the id itself.")
+                        .small()
+                        .color(text_dim()),
+                );
+
+                ui.add_space(10.0);
+                section(ui, "Feed");
+                ui.checkbox(&mut s.show_shorts, "Show Shorts");
+                ui.checkbox(&mut s.hide_live, "Hide live streams and premieres");
+                ui.checkbox(&mut s.hide_watched, "Hide videos I've watched (Home and Subscriptions)");
+                ui.horizontal(|ui| {
+                    ui.label("Hide titles containing");
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.muted_words_buf)
+                                .hint_text("reaction, podcast clip")
+                                .desired_width(200.0),
+                        )
+                        .changed()
+                    {
+                        s.muted_words = self
+                            .muted_words_buf
+                            .split(',')
+                            .map(|w| w.trim().to_string())
+                            .filter(|w| !w.is_empty())
+                            .collect();
+                    }
+                });
+                if !s.muted_channels.is_empty() {
+                    ui.label("Hidden channels");
+                    let mut unmute = None;
+                    ui.horizontal_wrapped(|ui| {
+                        for (i, ch) in s.muted_channels.iter().enumerate() {
+                            if ui.button(format!("{ch}  ✕")).on_hover_text("Show again").clicked() {
+                                unmute = Some(i);
+                            }
+                        }
+                    });
+                    if let Some(i) = unmute {
+                        s.muted_channels.remove(i);
+                    }
+                }
+                ui.label(
+                    RichText::new("Filters apply to Home, Subscriptions and search, never to channel or playlist pages. Hide a channel from a video's ⋯ menu.")
+                        .small()
+                        .color(text_dim()),
                 );
 
                 ui.add_space(10.0);
@@ -2183,6 +2429,69 @@ impl App {
 }
 
 impl App {
+    /// Links from the Services menu, and a fresh look at the clipboard
+    /// whenever the window comes to the front.
+    fn poll_links(&mut self, ctx: &egui::Context) {
+        for text in crate::links::take() {
+            match crate::links::find(&text) {
+                Some(link) => {
+                    self.pending_link = Some(link);
+                    if self.hidden {
+                        self.show_from_tray(ctx);
+                    } else {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                }
+                None => {
+                    self.status = Some((
+                        "That isn't a YouTube video, playlist or channel link".into(),
+                        true,
+                    ))
+                }
+            }
+        }
+        let focused = ctx.input(|i| i.focused);
+        if focused && !self.was_focused {
+            if let Some(text) = crate::links::clipboard_text().filter(|t| t.len() < 4096) {
+                if text != self.clip_seen {
+                    self.clip_link = crate::links::find(&text);
+                    self.clip_seen = text;
+                }
+            }
+        }
+        self.was_focused = focused;
+    }
+
+    fn open_link(&mut self, ctx: &egui::Context, frame: &eframe::Frame, link: crate::links::Link) {
+        use crate::links::Link;
+        self.clip_link = None;
+        match link {
+            Link::Video { id, start } => {
+                if let Some(t) = start {
+                    self.link_start = Some((id.clone(), t));
+                }
+                self.play(&Video {
+                    id,
+                    ..Default::default()
+                });
+            }
+            Link::Playlist(id) => {
+                self.close_embedded(ctx, frame);
+                self.open_page(
+                    ctx,
+                    Source::Playlist {
+                        id,
+                        title: "Playlist".into(),
+                    },
+                );
+            }
+            Link::Channel { url, name } => {
+                self.close_embedded(ctx, frame);
+                self.open_page(ctx, Source::Channel { url, name });
+            }
+        }
+    }
+
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
         self.hidden = true;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -2372,6 +2681,7 @@ impl eframe::App for App {
         self.handle_tray(ctx);
         self.track_positions(ctx);
         self.poll_signin(ctx);
+        self.poll_links(ctx);
         if let Some(e) = &mut self.embedded {
             e.poll_events();
             if std::mem::take(&mut e.title_changed) {
@@ -2409,6 +2719,14 @@ impl eframe::App for App {
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.hide_to_tray(&ctx);
+        }
+        if self.pending_link.is_some()
+            && self.tools.is_some()
+            && matches!(self.screen, Screen::Main)
+        {
+            if let Some(link) = self.pending_link.take() {
+                self.open_link(&ctx, frame, link);
+            }
         }
         if self.pending_play.is_some() {
             self.start_embedded(&ctx, frame);
@@ -2750,6 +3068,9 @@ fn video_card(
         }
         if v.channel_url.is_some() && ui.button("Go to channel").clicked() {
             *action = CardAction::Channel;
+        }
+        if v.channel.is_some() && !v.is_playlist && ui.button("Hide this channel").clicked() {
+            *action = CardAction::Quick(Quick::MuteChannel);
         }
         if ui.button("Copy link").clicked() {
             *action = CardAction::Quick(Quick::CopyLink);

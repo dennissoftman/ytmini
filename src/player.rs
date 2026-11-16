@@ -177,7 +177,61 @@ pub struct Embedded {
     scrub: Option<f64>,
     last_scrub_seek: Instant,
     last_activity: Instant,
+    /// Mouse press on the video, for click / double-click / hold-for-speed.
+    press: Option<Press>,
+    /// SponsorBlock segments to skip (filled in once fetched).
+    pub segments: Vec<crate::sponsorblock::Segment>,
+    /// Indices into `segments` already skipped (each is skipped once, so
+    /// seeking back into one plays it).
+    skipped: Vec<usize>,
+    /// "Skipped sponsor · Undo" toast: segment index and when.
+    skip_toast: Option<(usize, Instant)>,
+    /// A single click waiting out the double-click window before it pauses.
+    pending_click: Option<(Instant, Pos2)>,
+    /// Double-click-and-keep-tapping seek on the left/right side.
+    streak: Option<Streak>,
 }
+
+struct Press {
+    at: Instant,
+    pos: Pos2,
+    /// Started on the left or right third: holding speeds up.
+    side: bool,
+    /// Speed before the hold, while it's active.
+    held_from: Option<f64>,
+    /// Speed last sent to mpv during the hold.
+    hold_speed: f64,
+}
+
+struct Streak {
+    /// -1 back, +1 forward
+    dir: f64,
+    taps: u32,
+    total: f64,
+    last: Instant,
+}
+
+/// Seek per tap in a streak: 5 s for the first three, then 10 s for three, then 30 s.
+fn streak_step(tap: u32) -> f64 {
+    match tap {
+        0..=3 => 5.0,
+        4..=6 => 10.0,
+        _ => 30.0,
+    }
+}
+
+/// Holding the side of the video this long plays at `HOLD_SPEED` until release
+/// (dragging sideways while holding scales it between `HOLD_MIN` and `HOLD_MAX`).
+const HOLD_AFTER: Duration = Duration::from_millis(350);
+const HOLD_SPEED: f64 = 1.5;
+/// While holding, dragging left eases down to this, right up to `HOLD_MAX`.
+const HOLD_MIN: f64 = 0.25;
+const HOLD_MAX: f64 = 2.0;
+/// A click pauses only once it's clearly not the start of a double-click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(300);
+/// Hysteresis: once a seek streak runs, the next tap may come this much later
+/// (and anywhere on that half) and still count.
+const STREAK_GAP: Duration = Duration::from_millis(700);
 
 const OBSERVED: &[(&str, std::ffi::c_int)] = &[
     ("time-pos", mpv::FORMAT_DOUBLE),
@@ -294,6 +348,12 @@ impl Embedded {
             scrub: None,
             last_scrub_seek: Instant::now(),
             last_activity: Instant::now(),
+            press: None,
+            segments: Vec::new(),
+            skipped: Vec::new(),
+            skip_toast: None,
+            pending_click: None,
+            streak: None,
         })
     }
 
@@ -371,6 +431,31 @@ impl Embedded {
                 _ => {}
             }
         }
+        self.auto_skip();
+    }
+
+    fn auto_skip(&mut self) {
+        if !self.started || self.scrub.is_some() {
+            return;
+        }
+        let pos = self.pos;
+        let hit = self
+            .segments
+            .iter()
+            .enumerate()
+            .find(|(i, s)| !self.skipped.contains(i) && pos >= s.start && pos < s.end - 0.5);
+        if let Some((i, s)) = hit {
+            let end = s.end;
+            self.skipped.push(i);
+            self.skip_toast = Some((i, Instant::now()));
+            if self.duration > 0.0 && end >= self.duration - 1.0 {
+                // segment runs to the end (outro): finish the video
+                self.seek_absolute(self.duration, false);
+            } else {
+                self.seek_absolute(end, true);
+            }
+            self.pos = end;
+        }
     }
 
     /// Render the current frame into `surface` at `w`×`h` pixels if mpv has a
@@ -396,6 +481,196 @@ impl Embedded {
             }
             gl.bind_framebuffer(glow::FRAMEBUFFER, prev_fbo);
             gl.viewport(vp[0], vp[1], vp[2], vp[3]);
+        }
+    }
+
+    /// Click: pause/resume (after the double-click window).
+    /// Double-click the left/right third: seek ∓5 s; keep tapping for more
+    /// (5 s ×3, then 10 s ×3, then 30 s). Double-click the middle: fullscreen.
+    /// Hold the left/right third: 1.5×; drag sideways for 0.25×–2×.
+    /// The control-bar strip never pauses: a near-miss on the seek bar or a
+    /// button, or the click that reveals hidden controls, used to.
+    fn gestures(
+        &mut self,
+        ctx: &egui::Context,
+        resp: &egui::Response,
+        area: Rect,
+        painter: &egui::Painter,
+        act: &mut Actions,
+    ) {
+        let third = area.width() / 3.0;
+        let side_of = |p: Pos2| {
+            if p.x < area.left() + third {
+                -1.0
+            } else if p.x > area.right() - third {
+                1.0
+            } else {
+                0.0
+            }
+        };
+        let zone = Rect::from_min_max(
+            area.min,
+            Pos2::new(area.right(), area.bottom() - CONTROLS_H - 8.0),
+        );
+        let (pressed, down, pos) = ctx.input(|i| {
+            (
+                i.pointer.primary_pressed(),
+                i.pointer.primary_down(),
+                i.pointer.interact_pos(),
+            )
+        });
+        if pressed && self.error.is_none() && resp.hovered() && !egui::Popup::is_any_open(ctx) {
+            if let Some(p) = pos.filter(|p| zone.contains(*p)) {
+                self.press = Some(Press {
+                    at: Instant::now(),
+                    pos: p,
+                    side: side_of(p) != 0.0,
+                    held_from: None,
+                    hold_speed: HOLD_SPEED,
+                });
+            }
+        }
+        if let Some(pr) = &mut self.press {
+            let moved = pos.is_some_and(|p| p.distance(pr.pos) > 12.0);
+            if down {
+                if pr.side
+                    && pr.held_from.is_none()
+                    && !moved
+                    && pr.at.elapsed() >= HOLD_AFTER
+                    && !self.paused
+                {
+                    pr.held_from = Some(self.speed);
+                    pr.hold_speed = HOLD_SPEED;
+                    let _ = self.mpv().set_f64("speed", HOLD_SPEED);
+                } else if pr.held_from.is_some() {
+                    // Drag sideways from the press point: left → slower, right → faster.
+                    let span = (area.width() * 0.25).clamp(120.0, 320.0) as f64;
+                    let dx = pos.map_or(0.0, |p| (p.x - pr.pos.x) as f64);
+                    let t = (dx / span).clamp(-1.0, 1.0);
+                    let target = if t < 0.0 {
+                        HOLD_SPEED + (HOLD_MIN - HOLD_SPEED) * -t
+                    } else {
+                        HOLD_SPEED + (HOLD_MAX - HOLD_SPEED) * t
+                    };
+                    let target = (target * 20.0).round() / 20.0; // 0.05 steps
+                    if (target - pr.hold_speed).abs() > 1e-6 {
+                        pr.hold_speed = target;
+                        let speed = target;
+                        let _ = self.mpv.as_ref().map(|m| m.set_f64("speed", speed));
+                    }
+                }
+                ctx.request_repaint_after(Duration::from_millis(30));
+            } else {
+                let pr = self.press.take().expect("checked above");
+                if let Some(s) = pr.held_from {
+                    self.set_speed(s);
+                } else if !moved && pr.at.elapsed() < HOLD_AFTER {
+                    self.on_click(pr.pos, area, side_of(pr.pos), act);
+                }
+            }
+        }
+        if self
+            .streak
+            .as_ref()
+            .is_some_and(|s| s.last.elapsed() >= STREAK_GAP + Duration::from_millis(500))
+        {
+            self.streak = None;
+        }
+        if let Some((t, _)) = self.pending_click {
+            if t.elapsed() >= DOUBLE_CLICK {
+                self.pending_click = None;
+                self.toggle_pause();
+                self.poke();
+            } else {
+                ctx.request_repaint_after(DOUBLE_CLICK - t.elapsed());
+            }
+        }
+        // "« 15 s" bubble on the side being tapped
+        if let Some(st) = &self.streak {
+            let x = if st.dir < 0.0 {
+                area.left() + third / 2.0
+            } else {
+                area.right() - third / 2.0
+            };
+            let r = Rect::from_center_size(Pos2::new(x, area.center().y), Vec2::new(110.0, 44.0));
+            painter.rect_filled(r, 22, Color32::from_black_alpha(150));
+            let label = if st.dir < 0.0 {
+                format!("◂◂  {} s", st.total as u64)
+            } else {
+                format!("{} s  ▸▸", st.total as u64)
+            };
+            painter.text(
+                r.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                egui::FontId::proportional(17.0),
+                Color32::WHITE,
+            );
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        // "1.5×" pill while holding
+        if let Some(speed) = self
+            .press
+            .as_ref()
+            .filter(|p| p.held_from.is_some())
+            .map(|p| p.hold_speed)
+        {
+            let r = Rect::from_center_size(
+                Pos2::new(area.center().x, area.top() + 34.0),
+                Vec2::new(84.0, 32.0),
+            );
+            painter.rect_filled(r, 16, Color32::from_black_alpha(170));
+            painter.text(
+                r.center(),
+                egui::Align2::CENTER_CENTER,
+                format!(
+                    "{}×  {}",
+                    trim_num(speed),
+                    if speed < 1.0 { "◂◂" } else { "▸▸" }
+                ),
+                egui::FontId::proportional(15.0),
+                Color32::WHITE,
+            );
+        }
+    }
+
+    fn on_click(&mut self, pos: Pos2, area: Rect, side: f64, act: &mut Actions) {
+        // Continuing a streak: any tap on that half within the (longer) gap.
+        if let Some(st) = &mut self.streak {
+            if st.last.elapsed() < STREAK_GAP {
+                let half = if pos.x < area.center().x { -1.0 } else { 1.0 };
+                if half == st.dir {
+                    st.taps += 1;
+                    st.last = Instant::now();
+                    let step = streak_step(st.taps);
+                    st.total += step;
+                    let d = st.dir * step;
+                    self.seek_relative(d);
+                } else {
+                    st.last = st.last.checked_sub(STREAK_GAP).unwrap_or(st.last);
+                    // tap on the other half just ends it
+                }
+                self.pending_click = None;
+                return;
+            }
+        }
+        match self.pending_click.take() {
+            // second click close to the first: a double-click
+            Some((_, first)) if first.distance(pos) < 60.0 => {
+                if side == 0.0 {
+                    act.toggle_fullscreen = true;
+                } else {
+                    let step = streak_step(1);
+                    self.streak = Some(Streak {
+                        dir: side,
+                        taps: 1,
+                        total: step,
+                        last: Instant::now(),
+                    });
+                    self.seek_relative(side * step);
+                }
+            }
+            _ => self.pending_click = Some((Instant::now(), pos)),
         }
     }
 
@@ -585,12 +860,7 @@ impl Embedded {
             );
         }
 
-        // Click: pause/resume; double-click: fullscreen.
-        if resp.double_clicked() {
-            act.toggle_fullscreen = true;
-        } else if resp.clicked() && self.error.is_none() {
-            self.toggle_pause();
-        }
+        self.gestures(&ctx, &resp, area, &painter, &mut act);
 
         // Overlays: loading, error, end
         let center = area.center();
@@ -676,6 +946,46 @@ impl Embedded {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
 
+        // "Skipped sponsor · Undo", bottom-left above the controls
+        if let Some((i, since)) = self
+            .skip_toast
+            .filter(|(_, since)| since.elapsed() < Duration::from_secs(5))
+        {
+            let _ = since;
+            let r = Rect::from_min_size(
+                Pos2::new(area.left() + 16.0, area.bottom() - CONTROLS_H - 52.0),
+                Vec2::new(320.0, 34.0),
+            );
+            let what = self
+                .segments
+                .get(i)
+                .map_or("segment", |s| crate::sponsorblock::label(&s.category))
+                .to_lowercase();
+            ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
+                egui::Frame::new()
+                    .fill(Color32::from_black_alpha(190))
+                    .corner_radius(8)
+                    .inner_margin(egui::Margin::symmetric(10, 5))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("Skipped {what}"))
+                                    .color(Color32::WHITE),
+                            );
+                            if ui.link("Undo").clicked() {
+                                if let Some(s) = self.segments.get(i) {
+                                    self.seek_absolute(s.start, true);
+                                }
+                                self.skip_toast = None;
+                            }
+                        });
+                    });
+            });
+            ctx.request_repaint_after(Duration::from_millis(500));
+        } else {
+            self.skip_toast = None;
+        }
+
         // Controls
         if show_controls && self.error.is_none() {
             let bar = Rect::from_min_max(
@@ -704,8 +1014,8 @@ impl Embedded {
 
         // --- seek bar ---
         let seek = Rect::from_min_max(
-            Pos2::new(bar.left() + pad, bar.top() + 6.0),
-            Pos2::new(bar.right() - pad, bar.top() + 22.0),
+            Pos2::new(bar.left() + pad, bar.top() + 2.0),
+            Pos2::new(bar.right() - pad, bar.top() + 26.0),
         );
         let sresp = ui.interact(seek, ui.scope_id().with("seek"), Sense::click_and_drag());
         let dur = self.duration.max(0.001);
@@ -749,6 +1059,18 @@ impl Embedded {
             Pos2::new(track.left() + track.width() * frac(shown), track.bottom()),
         );
         painter.rect_filled(played, 3, v.accent);
+        for s in &self.segments {
+            let [r, g, b] = crate::sponsorblock::color(&s.category);
+            let seg = Rect::from_min_max(
+                Pos2::new(track.left() + track.width() * frac(s.start), track.top()),
+                Pos2::new(
+                    (track.left() + track.width() * frac(s.end))
+                        .max(track.left() + track.width() * frac(s.start) + 2.0),
+                    track.bottom(),
+                ),
+            );
+            painter.rect_filled(seg, 0, Color32::from_rgba_unmultiplied(r, g, b, 200));
+        }
         if hover {
             painter.circle_filled(Pos2::new(played.right(), track.center().y), 7.0, v.accent);
             if let Some(hp) = sresp.hover_pos() {

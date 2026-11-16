@@ -210,7 +210,84 @@ pub fn config_dir() -> Result<PathBuf> {
             .join("ytmini"),
     };
     fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;
+    // Holds the session cookies: private to this user.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&d, fs::Permissions::from_mode(0o700));
+    }
     Ok(d)
+}
+
+/// Write a file that only this user can read, created that way (no window
+/// with default permissions), replacing `dest` atomically via `tmp`.
+pub fn write_private(tmp: &Path, dest: &Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let _ = fs::remove_file(tmp);
+    let mut o = fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    let mut f = o
+        .open(tmp)
+        .with_context(|| format!("creating {}", tmp.display()))?;
+    f.write_all(data)?;
+    f.sync_all()?;
+    drop(f);
+    fs::rename(tmp, dest).with_context(|| format!("saving {}", dest.display()))?;
+    Ok(())
+}
+
+/// Hosts whose cookies ytmini keeps: YouTube and Google's sign-in. Nothing
+/// else (not Gmail, Drive, Pay… even though they share the Google account).
+pub fn wanted_cookie_host(host: &str) -> bool {
+    let h = host
+        .trim_start_matches("#HttpOnly_")
+        .trim_start_matches('.');
+    matches!(
+        h,
+        "youtube.com"
+            | "www.youtube.com"
+            | "m.youtube.com"
+            | "music.youtube.com"
+            | "google.com"
+            | "www.google.com"
+            | "accounts.google.com"
+    )
+}
+
+/// Startup hygiene: drop other sites' cookies from the jar (older versions
+/// imported whole browsers through yt-dlp), fix its permissions, and delete
+/// any browser-database snapshot left behind by an interrupted sign-in.
+pub fn tidy_cookie_storage() {
+    let Ok(dir) = config_dir() else { return };
+    for leftover in ["signin-check", "signin-export"] {
+        let _ = fs::remove_dir_all(dir.join(leftover));
+    }
+    for leftover in ["cookies.txt.new", "cookies.txt.rot"] {
+        let _ = fs::remove_file(dir.join(leftover));
+    }
+    let jar = dir.join("cookies.txt");
+    let Ok(text) = fs::read_to_string(&jar) else {
+        return;
+    };
+    let _ = restrict_perms(&jar);
+    let keep = |l: &&str| {
+        let l = l.trim();
+        if l.is_empty() || (l.starts_with('#') && !l.starts_with("#HttpOnly_")) {
+            return true; // comments / header
+        }
+        wanted_cookie_host(l.split('\t').next().unwrap_or(""))
+    };
+    let kept: Vec<&str> = text.lines().filter(keep).collect();
+    if kept.len() != text.lines().count() {
+        let mut out = kept.join("\n");
+        out.push('\n');
+        let _ = write_private(&dir.join("cookies.txt.new"), &jar, out.as_bytes());
+    }
 }
 
 pub fn cookie_file() -> Result<PathBuf> {
@@ -487,6 +564,8 @@ impl RawEntry {
             // search results carry a ~150-char snippet; keep it short
             description: self.description.map(|d| d.chars().take(200).collect()),
             age: None,
+            is_short: false,
+            is_live: false,
         })
     }
 }
@@ -513,6 +592,12 @@ pub struct Video {
     /// "3 days ago" (only from the native API)
     #[serde(default)]
     pub age: Option<String>,
+    /// A Short (only known from the native API).
+    #[serde(default)]
+    pub is_short: bool,
+    /// Live now, or an upcoming stream/premiere (only known from the native API).
+    #[serde(default)]
+    pub is_live: bool,
 }
 
 impl Video {
@@ -1510,5 +1595,46 @@ mod watch_later_live {
         crate::innertube::set_watch_later(&cookies, id, false).unwrap();
         eprintln!("listed after add: {found}");
         assert!(found);
+    }
+}
+
+#[cfg(test)]
+mod tidy_tests {
+    #[test]
+    fn tidy_keeps_only_google_and_youtube() {
+        let dir = std::env::temp_dir().join(format!("ytmini-tidy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("signin-export")).unwrap();
+        // SAFETY: only this test reads YTMINI_CONFIG_DIR in this process's test run.
+        unsafe { std::env::set_var("YTMINI_CONFIG_DIR", &dir) };
+        let jar = "# Netscape HTTP Cookie File\n\n\
+            .youtube.com\tTRUE\t/\tTRUE\t0\tSID\tfake\n\
+            #HttpOnly_.google.com\tTRUE\t/\tTRUE\t0\tHSID\tfake\n\
+            accounts.google.com\tFALSE\t/\tTRUE\t0\tLSID\tfake\n\
+            .chatgpt.com\tTRUE\t/\tTRUE\t0\tsession\tfake\n\
+            .notgoogle.com\tTRUE\t/\tTRUE\t0\tx\tfake\n\
+            mail.google.com\tFALSE\t/\tTRUE\t0\tGMAIL\tfake\n\
+            #HttpOnly_.evil-youtube.com\tTRUE\t/\tTRUE\t0\ty\tfake\n";
+        std::fs::write(dir.join("cookies.txt"), jar).unwrap();
+        super::tidy_cookie_storage();
+        let out = std::fs::read_to_string(dir.join("cookies.txt")).unwrap();
+        unsafe { std::env::remove_var("YTMINI_CONFIG_DIR") };
+        assert!(out.contains("\tSID\t") && out.contains("\tHSID\t") && out.contains("\tLSID\t"));
+        assert!(
+            !out.contains("chatgpt")
+                && !out.contains("notgoogle")
+                && !out.contains("evil-youtube")
+                && !out.contains("GMAIL")
+        );
+        assert!(!dir.join("signin-export").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode =
+                |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&dir.join("cookies.txt")), 0o600);
+            assert_eq!(mode(&dir), 0o700);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

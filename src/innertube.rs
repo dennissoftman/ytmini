@@ -112,11 +112,37 @@ impl Client {
             .limit(32 << 20)
             .read_to_string()
             .context("reading YouTube's reply")?;
+        if status == 401 && self.signed_in() {
+            bail!("{SESSION_EXPIRED} (HTTP 401)");
+        }
         if status != 200 {
             bail!("YouTube API: HTTP {status}");
         }
-        serde_json::from_str(&text).context("YouTube API: bad JSON")
+        let v: Value = serde_json::from_str(&text).context("YouTube API: bad JSON")?;
+        if self.signed_in() && reports_signed_out(&v) {
+            bail!("{SESSION_EXPIRED}");
+        }
+        Ok(v)
     }
+}
+
+/// Marker in errors when our saved session no longer signs in (Google
+/// rotated it away); the app re-imports from the browser.
+pub const SESSION_EXPIRED: &str = "YouTube session expired";
+
+/// The reply's own tracking params say `logged_in=0`.
+fn reports_signed_out(v: &Value) -> bool {
+    v.pointer("/responseContext/serviceTrackingParams")
+        .and_then(Value::as_array)
+        .is_some_and(|svcs| {
+            svcs.iter()
+                .filter_map(|s| s.get("params")?.as_array())
+                .flatten()
+                .any(|p| {
+                    p.get("key").and_then(Value::as_str) == Some("logged_in")
+                        && p.get("value").and_then(Value::as_str) == Some("0")
+                })
+        })
 }
 
 impl Client {
@@ -175,9 +201,7 @@ impl Client {
         let tmp = self.jar.with_extension("txt.rot");
         let mut text = lines.join("\n");
         text.push('\n');
-        if std::fs::write(&tmp, text).is_ok() && crate::yt::restrict_perms(&tmp).is_ok() {
-            let _ = std::fs::rename(&tmp, &self.jar);
-        }
+        let _ = crate::yt::write_private(&tmp, &self.jar, text.as_bytes());
     }
 }
 
@@ -331,8 +355,16 @@ pub fn mark_watched(cookies: &Path, video_id: &str) -> Result<()> {
 }
 
 impl Client {
-    /// A plain GET with the session cookies.
+    /// A plain GET with the session cookies. Only to YouTube over HTTPS:
+    /// the URL comes from YouTube's reply, and cookies never go elsewhere.
     fn get(&self, url: &str) -> Result<()> {
+        let host = url
+            .strip_prefix("https://")
+            .and_then(|r| r.split(['/', '?', ':']).next())
+            .unwrap_or("");
+        if !(host == "youtube.com" || host.ends_with(".youtube.com")) {
+            bail!("refusing to send the session to {host:?}");
+        }
         let cookie = {
             let p = self.pairs.lock().unwrap_or_else(|e| e.into_inner());
             p.iter()
@@ -407,7 +439,6 @@ pub struct Pager {
     endpoint: &'static str,
     first: Option<Value>,
     token: Option<String>,
-    shorts: bool,
     started: bool,
     /// On a channel page, items don't repeat the channel name.
     channel: Option<(String, String)>,
@@ -451,7 +482,6 @@ impl Pager {
             endpoint,
             first: Some(first),
             token: None,
-            shorts: matches!(source, Source::History),
             started: false,
             channel: match source {
                 Source::Channel { url, name } | Source::ChannelPlaylists { url, name } => {
@@ -476,7 +506,7 @@ impl Pager {
         self.started = true;
         let mut out = Vec::new();
         let mut token = None;
-        collect(&r, self.shorts, &mut out, &mut token);
+        collect(&r, &mut out, &mut token);
         let token = token.map(|(_, t)| t);
         if let Some((name, url)) = &self.channel {
             for v in out
@@ -497,7 +527,7 @@ impl Pager {
 
 /// Walk the reply in document order, picking up items we know and the last
 /// continuation token. Matched items aren't descended into.
-fn collect(v: &Value, shorts: bool, out: &mut Vec<Video>, token: &mut Option<(bool, String)>) {
+fn collect(v: &Value, out: &mut Vec<Video>, token: &mut Option<(bool, String)>) {
     match v {
         Value::Object(m) => {
             for (k, x) in m {
@@ -507,13 +537,8 @@ fn collect(v: &Value, shorts: bool, out: &mut Vec<Video>, token: &mut Option<(bo
                     | "gridVideoRenderer"
                     | "playlistVideoRenderer"
                     | "compactVideoRenderer" => renderer(x),
-                    "shortsLockupViewModel" => {
-                        if shorts {
-                            short(x)
-                        } else {
-                            continue; // shelves of shorts: skip
-                        }
-                    }
+                    // kept and marked; the app hides them unless "Show Shorts" is on
+                    "shortsLockupViewModel" => short(x),
                     "continuationItemRenderer" => {
                         // The list's own "more" token comes right after its items;
                         // tokens before any items belong to other sections/tabs.
@@ -530,7 +555,7 @@ fn collect(v: &Value, shorts: bool, out: &mut Vec<Video>, token: &mut Option<(bo
                     }
                     "adSlotRenderer" | "channelRenderer" => continue,
                     _ => {
-                        collect(x, shorts, out, token);
+                        collect(x, out, token);
                         continue;
                     }
                 };
@@ -541,7 +566,7 @@ fn collect(v: &Value, shorts: bool, out: &mut Vec<Video>, token: &mut Option<(bo
                 }
             }
         }
-        Value::Array(a) => a.iter().for_each(|x| collect(x, shorts, out, token)),
+        Value::Array(a) => a.iter().for_each(|x| collect(x, out, token)),
         _ => {}
     }
 }
@@ -561,6 +586,11 @@ fn text(v: Option<&Value>) -> Option<String> {
             .filter_map(|r| r.get("text").and_then(Value::as_str))
             .collect(),
     )
+}
+
+fn is_live_badge(t: &str) -> bool {
+    let t = t.trim().to_ascii_uppercase();
+    t == "LIVE" || t == "UPCOMING" || t.starts_with("PREMIER")
 }
 
 /// "1:02:03" → 3723
@@ -687,10 +717,12 @@ fn lockup(x: &Value) -> Option<Video> {
             "thumbnailBadgeViewModel",
             &mut badges,
         );
-        v.duration = badges
+        let texts: Vec<&str> = badges
             .iter()
             .filter_map(|b| b.get("text")?.as_str())
-            .find_map(parse_duration);
+            .collect();
+        v.duration = texts.iter().find_map(|t| parse_duration(t));
+        v.is_live = v.duration.is_none() && texts.iter().any(|t| is_live_badge(t));
     }
     Some(v)
 }
@@ -734,6 +766,12 @@ fn renderer(x: &Value) -> Option<Video> {
             v.age = Some(i.trim().to_string());
         }
     }
+    v.is_live = v.duration.is_none()
+        && (x.get("upcomingEventData").is_some()
+            || x.get("thumbnailOverlays").is_some_and(|o| {
+                let s = o.to_string();
+                s.contains("\"LIVE\"") || s.contains("\"UPCOMING\"")
+            }));
     v.description = x
         .pointer("/detailedMetadataSnippets/0/snippetText")
         .or_else(|| x.get("descriptionSnippet"))
@@ -752,6 +790,7 @@ fn short(x: &Value) -> Option<Video> {
         id,
         title,
         views,
+        is_short: true,
         ..Default::default()
     })
 }
@@ -835,10 +874,13 @@ mod live {
                     v.is_playlist
                 )
             });
+            let shorts = a.iter().filter(|v| v.is_short).count();
+            let live: Vec<&str> = a.iter().filter(|v| v.is_live).map(|v| v.title()).collect();
             eprintln!(
-                "{:14} p1 {:3} in {t1:.2}s, p2 {b:3} (+{:.2}s)  {}",
+                "{:14} p1 {:3} ({shorts} shorts, {} live {live:?}) in {t1:.2}s, p2 {b:3} (+{:.2}s)  {}",
                 src.label(),
                 a.len(),
+                live.len(),
                 t.elapsed().as_secs_f32() - t1,
                 s.unwrap_or_default()
             );

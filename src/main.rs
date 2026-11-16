@@ -7,11 +7,13 @@ mod app;
 mod cache;
 mod deps;
 mod innertube;
+mod links;
 mod mpv;
 mod player;
 mod positions;
 mod settings;
 mod signin;
+mod sponsorblock;
 mod theme;
 mod thumbs;
 mod tray;
@@ -21,6 +23,7 @@ fn main() -> eframe::Result {
     // A Finder-launched .app gets a bare PATH; libmpv's ytdl hook and yt-dlp's
     // JS runtime (deno) are found through PATH, so extend it before any threads start.
     yt::extend_process_path();
+    yt::tidy_cookie_storage();
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

@@ -44,6 +44,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSApplicationCategoryType</key>  <string>public.app-category.video</string>
   <key>NSHighResolutionCapable</key>    <true/>
   <key>NSPrincipalClass</key>           <string>NSApplication</string>
+  <!-- Right-click a YouTube link (or selected text) → Services → Open in ytmini. src/links.rs -->
+  <key>NSServices</key>
+  <array>
+    <dict>
+      <key>NSMenuItem</key>    <dict><key>default</key><string>Open in ytmini</string></dict>
+      <key>NSMessage</key>     <string>openYouTubeLink</string>
+      <key>NSPortName</key>    <string>ytmini</string>
+      <key>NSSendTypes</key>   <array><string>public.url</string><string>public.utf8-plain-text</string></array>
+      <key>NSRequiredContext</key> <dict/>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST
@@ -65,4 +76,6 @@ if [[ "${1:-}" == "--install" ]]; then
   rm -rf "$HOME/Applications/ytmini.app"
   cp -R "$APP" "$HOME/Applications/"
   echo "installed to ~/Applications/ytmini.app"
+  # register the Services menu entry right away (otherwise it appears after the next login)
+  /System/Library/CoreServices/pbs -update 2>/dev/null || true
 fi

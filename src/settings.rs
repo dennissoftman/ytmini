@@ -62,6 +62,49 @@ pub struct Settings {
     pub density: Density,
     /// Sidebar shows icons only.
     pub sidebar_collapsed: bool,
+    /// Skip SponsorBlock segments.
+    pub sponsorblock: bool,
+    /// SponsorBlock categories to skip (ids from `sponsorblock::CATEGORIES`).
+    pub sb_categories: Vec<String>,
+    /// Feed filters (home, subscriptions, search; never channel/playlist pages).
+    pub show_shorts: bool,
+    pub hide_live: bool,
+    /// Home and subscriptions only.
+    pub hide_watched: bool,
+    /// Channel names whose videos are hidden.
+    pub muted_channels: Vec<String>,
+    /// Hide videos whose title contains any of these (case-insensitive).
+    pub muted_words: Vec<String>,
+}
+
+impl Settings {
+    /// Whether the feed filters hide `v` on `source`.
+    pub fn hides(&self, source: &yt::Source, v: &yt::Video, watched: bool) -> bool {
+        use yt::Source::*;
+        let feed = matches!(source, Feed | Subscriptions);
+        if !(feed || matches!(source, Search(_))) || v.is_playlist {
+            return false;
+        }
+        if (v.is_short && !self.show_shorts)
+            || (v.is_live && self.hide_live)
+            || (feed && watched && self.hide_watched)
+        {
+            return true;
+        }
+        if let Some(ch) = v.channel.as_deref() {
+            if self
+                .muted_channels
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(ch))
+            {
+                return true;
+            }
+        }
+        let title = v.title.as_deref().unwrap_or("").to_lowercase();
+        self.muted_words
+            .iter()
+            .any(|w| !w.trim().is_empty() && title.contains(&w.trim().to_lowercase()))
+    }
 }
 
 pub const DEFAULT_CACHE_MB: u64 = 256;
@@ -81,6 +124,13 @@ impl Default for Settings {
             signin_source: None,
             density: Density::Comfortable,
             sidebar_collapsed: false,
+            sponsorblock: true,
+            sb_categories: crate::sponsorblock::default_categories(),
+            show_shorts: false,
+            hide_live: false,
+            hide_watched: false,
+            muted_channels: Vec::new(),
+            muted_words: Vec::new(),
         }
     }
 }

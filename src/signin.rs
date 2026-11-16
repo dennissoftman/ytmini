@@ -212,6 +212,7 @@ impl Session {
                 .any(|c| LOGIN_COOKIES.contains(&c.name.as_str())));
         }
         let dir = crate::yt::config_dir()?.join("signin-check");
+        let _cleanup = RemoveOnDrop(dir.clone());
         let db = self.snapshot_to(&dir)?;
         let (table, host) = if self.firefox {
             ("moz_cookies", "host")
@@ -232,7 +233,6 @@ impl Session {
             conn.query_row(&sql, [], |r| r.get(0))
                 .context("reading cookie names")?
         };
-        let _ = std::fs::remove_dir_all(&dir);
         Ok(n > 0)
     }
 
@@ -287,10 +287,9 @@ impl Session {
             return write_jar(&rows, dest, &self.label());
         }
         let dir = crate::yt::config_dir()?.join("signin-export");
+        let _cleanup = RemoveOnDrop(dir.clone());
         let db = self.snapshot_to(&dir)?;
-        let result = self.export_from(&db, dest);
-        let _ = std::fs::remove_dir_all(&dir);
-        result
+        self.export_from(&db, dest)
     }
 
     fn export_from(&self, db: &Path, dest: &Path) -> Result<()> {
@@ -374,7 +373,11 @@ fn write_jar(rows: &[Cookie], dest: &Path, label: &str) -> Result<()> {
     {
         let mut out =
             String::from("# Netscape HTTP Cookie File\n# Exported by ytmini. Do not share.\n\n");
-        for c in rows {
+        // Only Google's and YouTube's cookies leave the browser.
+        for c in rows
+            .iter()
+            .filter(|c| crate::yt::wanted_cookie_host(&c.host))
+        {
             let sub = if c.host.starts_with('.') {
                 "TRUE"
             } else {
@@ -391,15 +394,26 @@ fn write_jar(rows: &[Cookie], dest: &Path, label: &str) -> Result<()> {
                 c.value
             ));
         }
+        // Check the login on a private temp file before replacing the jar.
         let tmp = dest.with_extension("txt.new");
-        std::fs::write(&tmp, out)?;
-        crate::yt::restrict_perms(&tmp)?;
-        if !crate::yt::logged_in(&tmp) {
-            let _ = std::fs::remove_file(&tmp);
+        let check = dest.with_extension("txt.chk");
+        crate::yt::write_private(&tmp, &check, out.as_bytes())?;
+        if !crate::yt::logged_in(&check) {
+            let _ = std::fs::remove_file(&check);
             anyhow::bail!("no YouTube login found in {label}");
         }
-        std::fs::rename(&tmp, dest).context("saving cookies")?;
+        std::fs::rename(&check, dest).context("saving cookies")?;
         Ok(())
+    }
+}
+
+/// Deletes a browser-database snapshot however the function using it exits
+/// (error, early return, panic): it holds every site's cookies.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
