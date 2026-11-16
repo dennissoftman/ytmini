@@ -14,6 +14,9 @@ pub enum Cmd {
     Seek(f64),
     /// Relative, seconds.
     Skip(f64),
+    /// Next / previous video in the queue.
+    Next,
+    Prev,
 }
 
 /// What we last told the system, to skip redundant updates.
@@ -117,9 +120,9 @@ mod mac {
                 )]));
                 simple(Retained::into_super(cmd), Cmd::Skip(d));
             }
-            // next/previous track keys (F9/F7) also skip, there's no queue yet
-            simple(cc.nextTrackCommand(), Cmd::Skip(SKIP));
-            simple(cc.previousTrackCommand(), Cmd::Skip(-SKIP));
+            // next/previous track keys (F9/F7, AirPods double/triple tap): the queue
+            simple(cc.nextTrackCommand(), Cmd::Next);
+            simple(cc.previousTrackCommand(), Cmd::Prev);
             let seek = cc.changePlaybackPositionCommand();
             seek.setEnabled(true);
             let h = RcBlock::new(|e: NonNull<MPRemoteCommandEvent>| {

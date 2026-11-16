@@ -64,9 +64,9 @@ impl Storyboard {
     }
 }
 
-pub fn fetch(cookies: &std::path::Path, id: &str) -> Result<Storyboard> {
-    let (spec, level) = crate::innertube::storyboard_spec(cookies, id)?;
-    Storyboard::parse(&spec, level)
+pub fn from_extras(e: &crate::innertube::Extras) -> Option<Storyboard> {
+    let (spec, level) = e.storyboard.as_ref()?;
+    Storyboard::parse(spec, *level).ok()
 }
 
 /// Download and decode one sheet (no cookies).
@@ -104,7 +104,30 @@ mod tests {
     #[ignore]
     fn storyboard_live() {
         let cookies = crate::yt::cookie_file().unwrap();
-        let sb = super::fetch(&cookies, "z19HM7ANZlo").unwrap();
+        let e = crate::innertube::player_extras(&cookies, "z19HM7ANZlo").unwrap();
+        let sb = super::from_extras(&e).unwrap();
+        // chapters come from the same reply; YTMINI_CHAPTERS=<id> to try another video
+        // (signed out: YTMINI_CHAPTER_COOKIES=<empty file>)
+        if let Ok(ids) = std::env::var("YTMINI_CHAPTERS") {
+            let jar = std::env::var("YTMINI_CHAPTER_COOKIES").map_or(cookies.clone(), Into::into);
+            for id in ids.split(',') {
+                let e = crate::innertube::player_extras(&jar, id).unwrap();
+                let c = crate::chapters::parse(&e.description, e.duration);
+                let first: Vec<_> = c
+                    .iter()
+                    .take(3)
+                    .map(|c| (c.start, c.title.as_str()))
+                    .collect();
+                eprintln!("{id}: {} chapters {first:?}", c.len());
+                let y = crate::innertube::chapters(id).unwrap();
+                let first: Vec<_> = y
+                    .iter()
+                    .take(3)
+                    .map(|c| (c.start, c.title.as_str()))
+                    .collect();
+                eprintln!("   youtube: {} chapters {first:?}", y.len());
+            }
+        }
         let img = super::load_sheet(&sb.sheet_url(1)).unwrap();
         eprintln!(
             "frame {}x{}, grid {}x{}, sheet {:?}",

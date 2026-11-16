@@ -59,6 +59,22 @@ impl Client {
         })
     }
 
+    /// No cookies at all: for public data we'd rather not tie to the account.
+    pub fn anonymous() -> Client {
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(15)))
+            .http_status_as_error(false)
+            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
+            .build()
+            .into();
+        Client {
+            pairs: std::sync::Mutex::new(Vec::new()),
+            sapisid: None,
+            agent,
+            jar: std::path::PathBuf::new(),
+        }
+    }
+
     pub fn signed_in(&self) -> bool {
         self.sapisid.is_some()
     }
@@ -416,6 +432,57 @@ mod history_live {
 }
 
 #[cfg(test)]
+mod chips_live {
+    /// Dumps the home feed reply to YTMINI_DUMP_FEED (reads the feed only).
+    #[test]
+    #[ignore]
+    fn dump_feed() {
+        let cookies = crate::yt::config_dir().unwrap().join("cookies.txt");
+        let c = super::Client::new(&cookies).unwrap();
+        let v = c
+            .post("browse", serde_json::json!({"browseId": "FEwhat_to_watch"}))
+            .unwrap();
+        std::fs::write(std::env::var("YTMINI_DUMP_FEED").unwrap(), v.to_string()).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod topics_live {
+    /// Home categories load like the feed. `cargo test -- --ignored topics_load --nocapture`
+    #[test]
+    #[ignore]
+    fn topics_load() {
+        let cookies = crate::yt::config_dir().unwrap().join("cookies.txt");
+        let mut feed = super::Pager::new(&cookies, &crate::yt::Source::Feed).unwrap();
+        feed.next_page().unwrap();
+        let chips = super::HOME_CHIPS.lock().unwrap().clone();
+        eprintln!(
+            "{} categories: {:?}",
+            chips.len(),
+            chips.iter().map(|c| &c.0).collect::<Vec<_>>()
+        );
+        for (title, token) in chips.into_iter().take(3) {
+            let src = crate::yt::Source::Topic {
+                title: title.clone(),
+                token,
+            };
+            let mut p = super::Pager::new(&cookies, &src).unwrap();
+            let a = p.next_page().unwrap().unwrap_or_default();
+            let b = p
+                .next_page()
+                .map(|v| v.unwrap_or_default().len())
+                .unwrap_or(0);
+            eprintln!(
+                "{title}: {} videos, page 2: {b}; first: {:?}",
+                a.len(),
+                a.first().map(|v| v.title())
+            );
+            assert!(!a.is_empty());
+        }
+    }
+}
+
+#[cfg(test)]
 mod session_live {
     /// Is the saved session still signed in? Reads the home feed only.
     /// `cargo test -- --ignored session_status --nocapture`
@@ -472,21 +539,73 @@ mod mark_live {
 
 /// The video's storyboard spec (seek-bar preview sprites) and which level
 /// YouTube recommends for high-resolution previews. Blocking.
-pub fn storyboard_spec(cookies: &Path, video_id: &str) -> Result<(String, usize)> {
+/// What the player view needs beyond the stream, from one `player` call.
+pub struct Extras {
+    /// Seek-bar preview spec and level, when the video has them.
+    pub storyboard: Option<(String, usize)>,
+    pub description: String,
+    pub duration: Option<f64>,
+}
+
+pub fn player_extras(cookies: &Path, video_id: &str) -> Result<Extras> {
     let r = Client::new(cookies)?.post("player", json!({ "videoId": video_id }))?;
-    let sb = r
+    let storyboard = r
         .pointer("/storyboards/playerStoryboardSpecRenderer")
-        .context("no storyboard for this video")?;
-    let spec = sb
-        .get("spec")
+        .and_then(|sb| {
+            let spec = sb.get("spec").and_then(Value::as_str)?;
+            let level = sb
+                .get("highResolutionRecommendedLevel")
+                .or_else(|| sb.get("recommendedLevel"))
+                .and_then(Value::as_u64)
+                .unwrap_or(1) as usize;
+            Some((spec.to_string(), level))
+        });
+    let description = r
+        .pointer("/videoDetails/shortDescription")
         .and_then(Value::as_str)
-        .context("no storyboard spec")?;
-    let level = sb
-        .get("highResolutionRecommendedLevel")
-        .or_else(|| sb.get("recommendedLevel"))
-        .and_then(Value::as_u64)
-        .unwrap_or(1) as usize;
-    Ok((spec.to_string(), level))
+        .unwrap_or_default()
+        .to_string();
+    let duration = r
+        .pointer("/videoDetails/lengthSeconds")
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse().ok());
+    Ok(Extras {
+        storyboard,
+        description,
+        duration,
+    })
+}
+
+/// The chapters YouTube shows on the seek bar (the uploader's, else its
+/// automatic ones). Asked signed out: chapters are public, and the watch-page
+/// request shouldn't count toward anything on the account.
+pub fn chapters(video_id: &str) -> Result<Vec<crate::chapters::Chapter>> {
+    let r = Client::anonymous().post("next", json!({ "videoId": video_id }))?;
+    let maps = r
+        .pointer("/playerOverlays/playerOverlayRenderer/decoratedPlayerBarRenderer/decoratedPlayerBarRenderer/playerBar/multiMarkersPlayerBarRenderer/markersMap")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let pick = |key: &str| {
+        maps.iter()
+            .find(|m| m.get("key").and_then(Value::as_str) == Some(key))
+            .and_then(|m| m.pointer("/value/chapters"))
+            .and_then(Value::as_array)
+            .filter(|c| !c.is_empty())
+    };
+    let Some(list) = pick("DESCRIPTION_CHAPTERS").or_else(|| pick("AUTO_CHAPTERS")) else {
+        return Ok(Vec::new());
+    };
+    Ok(list
+        .iter()
+        .filter_map(|c| {
+            let c = c.get("chapterRenderer")?;
+            Some(crate::chapters::Chapter {
+                start: c.get("timeRangeStartMillis")?.as_f64()? / 1000.0,
+                title: text(c.get("title"))?,
+            })
+        })
+        .collect())
 }
 
 /// Remove `video_id` from your YouTube watch history (what the website's
@@ -568,7 +687,33 @@ use crate::yt::{Source, Video};
 
 /// Pages through one list with continuation tokens. Each `next_page` is one
 /// request; nothing earlier is ever fetched again.
+/// The home feed's categories from its latest load: (title, token).
+pub static HOME_CHIPS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// "All", "Music", "Gaming"… from a home feed reply (skipping the selected
+/// "All", which has no token).
+fn home_chips(r: &Value) -> Vec<(String, String)> {
+    let Some(chips) = r
+        .pointer("/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/richGridRenderer/header/feedFilterChipBarRenderer/contents")
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    chips
+        .iter()
+        .filter_map(|c| {
+            let c = c.get("chipCloudChipRenderer")?;
+            let title = text(c.get("text"))?;
+            let token = c
+                .pointer("/navigationEndpoint/continuationCommand/token")
+                .and_then(Value::as_str)?;
+            Some((title, token.to_string()))
+        })
+        .collect()
+}
+
 pub struct Pager {
+    is_feed: bool,
     client: Client,
     endpoint: &'static str,
     first: Option<Value>,
@@ -590,6 +735,7 @@ impl Pager {
             Source::History => browse("FEhistory"),
             Source::Playlists => browse("FEplaylist_aggregation"),
             Source::Downloads => bail!("downloads are local"),
+            Source::Topic { token, .. } => ("browse", json!({ "continuation": token })),
             Source::Playlist { id, .. } => browse(&format!("VL{id}")),
             // "EgIQAQ==": videos only (no channels, shorts shelves, …)
             Source::Search(q) => ("search", json!({ "query": q, "params": "EgIQAQ%3D%3D" })),
@@ -613,6 +759,7 @@ impl Pager {
             }
         };
         Ok(Pager {
+            is_feed: matches!(source, Source::Feed),
             client,
             endpoint,
             first: Some(first),
@@ -639,6 +786,12 @@ impl Pager {
         self.first = None;
         self.token = None;
         self.started = true;
+        if first && self.is_feed {
+            let chips = home_chips(&r);
+            if !chips.is_empty() {
+                *HOME_CHIPS.lock().unwrap_or_else(|e| e.into_inner()) = chips;
+            }
+        }
         let mut out = Vec::new();
         let mut token = None;
         collect(&r, &mut out, &mut token);

@@ -164,6 +164,8 @@ pub struct Embedded {
     pub duration: f64,
     pub paused: bool,
     pub volume: f64,
+    /// `?` pressed: show the shortcuts overlay.
+    pub show_help: bool,
     /// Volume before the speaker icon muted it.
     unmute_to: Option<f64>,
     /// Wheel travel spent pushing past the 100% notch.
@@ -196,6 +198,8 @@ pub struct Embedded {
     skip_toast: Option<(usize, Instant)>,
     /// Seek-bar previews (filled in once fetched); sheets load on hover.
     pub storyboard: Option<crate::storyboard::Storyboard>,
+    /// From the description; empty when it has none.
+    pub chapters: Vec<crate::chapters::Chapter>,
     sb_sheets: std::collections::HashMap<u32, Option<egui::TextureHandle>>,
     sb_chan: (Sender<SheetMsg>, std::sync::mpsc::Receiver<SheetMsg>),
     /// A single click waiting out the double-click window before it pauses.
@@ -241,6 +245,27 @@ fn streak_step(tap: u32) -> f64 {
 /// Volume slider: 0–150 % (past 100 is mpv's software boost), with a
 /// detent at 100 % so it's easy to get back to normal.
 pub const VOLUME_MAX: f64 = 150.0;
+/// Speed menu and `<`/`>` steps.
+pub const SPEEDS: [f64; 8] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+
+/// The `?` overlay.
+pub const SHORTCUTS: [(&str, &str); 15] = [
+    ("Space / K", "Play / pause"),
+    ("J / L", "Back / forward 10 s"),
+    ("← / →", "Back / forward 5 s"),
+    ("↑ / ↓", "Volume"),
+    ("M", "Mute"),
+    ("F", "Fullscreen"),
+    ("⇧N / ⇧P", "Next / previous video"),
+    ("< / >", "Slower / faster"),
+    (", / .", "Frame back / forward (paused)"),
+    ("0 – 9", "Jump to 0 % – 90 %"),
+    ("Home / End", "Start / end"),
+    ("C", "Next chapter"),
+    ("⇧C", "Previous chapter"),
+    ("?", "These shortcuts"),
+    ("Esc", "Exit fullscreen / back"),
+];
 /// Dragging within this many pixels of the 100% notch lands on it.
 const VOLUME_SNAP_PX: f32 = 7.0;
 /// Wheel travel (points) needed to push through the 100% notch.
@@ -399,6 +424,7 @@ impl Embedded {
             duration: 0.0,
             paused: false,
             volume: settings.volume,
+            show_help: false,
             unmute_to: None,
             vol_hold: 0.0,
             speed: 1.0,
@@ -419,6 +445,7 @@ impl Embedded {
             skipped: Vec::new(),
             skip_toast: None,
             storyboard: None,
+            chapters: Vec::new(),
             sb_sheets: std::collections::HashMap::new(),
             sb_chan: std::sync::mpsc::channel(),
             pending_click: None,
@@ -842,6 +869,61 @@ impl Embedded {
         let _ = self.mpv().set_str("af", if on { LEVELING } else { "" });
     }
 
+    /// C / Shift+C: next chapter, or back to the previous one.
+    pub fn jump_chapter(&mut self, forward: bool) {
+        let t = self.pos;
+        let target = if forward {
+            self.chapters
+                .iter()
+                .find(|c| c.start > t + 0.5)
+                .map(|c| c.start)
+        } else {
+            // like a CD player: >3 s into a chapter goes to its start
+            let cur = crate::chapters::at(&self.chapters, t);
+            match cur {
+                Some(i) if t - self.chapters[i].start > 3.0 => Some(self.chapters[i].start),
+                Some(i) if i > 0 => Some(self.chapters[i - 1].start),
+                _ => None,
+            }
+        };
+        if let Some(x) = target {
+            self.seek_absolute(x, true);
+        }
+    }
+
+    /// Speaker icon / M key.
+    pub fn toggle_mute(&mut self) {
+        if self.volume > 0.0 {
+            self.unmute_to = Some(self.volume);
+            self.set_volume(0.0);
+        } else {
+            let v = self.unmute_to.take().unwrap_or(100.0);
+            self.set_volume(v);
+        }
+    }
+
+    /// `,` / `.` while paused: one frame back / forward.
+    pub fn frame_step(&mut self, forward: bool) {
+        let _ = self.mpv().command(&[if forward {
+            "frame-step"
+        } else {
+            "frame-back-step"
+        }]);
+    }
+
+    /// `<` / `>`: the next slower / faster standard speed.
+    pub fn step_speed(&mut self, faster: bool) {
+        let cur = self.speed;
+        let next = if faster {
+            SPEEDS.iter().copied().find(|&x| x > cur + 1e-6)
+        } else {
+            SPEEDS.iter().rev().copied().find(|&x| x < cur - 1e-6)
+        };
+        if let Some(x) = next {
+            self.set_speed(x);
+        }
+    }
+
     pub fn set_speed(&mut self, s: f64) {
         let _ = self.mpv().set_f64("speed", s);
     }
@@ -922,6 +1004,10 @@ pub struct Actions {
     pub quality: Option<yt::Quality>,
     pub open_in_window: bool,
     pub volume_changed: bool,
+    /// Queue navigation (buttons, end-of-video card).
+    pub next: bool,
+    pub prev: bool,
+    pub cancel_autoplay: bool,
 }
 
 pub struct ViewCtx<'a> {
@@ -931,6 +1017,11 @@ pub struct ViewCtx<'a> {
     pub quality: yt::Quality,
     pub screen_cap: u32,
     pub accent: Color32,
+    /// Titles of the previous / next video in the queue, if any.
+    pub prev: Option<String>,
+    pub next: Option<String>,
+    /// Autoplay countdown (seconds left) shown on the end card.
+    pub autoplay_in: Option<f32>,
 }
 
 const CONTROLS_H: f32 = 64.0;
@@ -1039,16 +1130,100 @@ impl Embedded {
             );
             ctx.request_repaint_after(Duration::from_millis(33));
         } else if self.eof {
-            let r = Rect::from_center_size(center, Vec2::new(120.0, 40.0));
-            if ui
-                .put(
-                    r,
-                    egui::Button::new(egui::RichText::new("↻  Replay").size(16.0)),
-                )
-                .clicked()
-            {
-                self.replay();
+            match (&v.next, v.autoplay_in) {
+                (Some(next), Some(left)) => {
+                    let r =
+                        Rect::from_center_size(center, Vec2::new(area.width().min(420.0), 130.0));
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
+                        egui::Frame::new()
+                            .fill(Color32::from_black_alpha(215))
+                            .corner_radius(12)
+                            .inner_margin(16)
+                            .show(ui, |ui| {
+                                ui.set_width(r.width() - 32.0);
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Up next in {}",
+                                        left.ceil() as u32
+                                    ))
+                                    .size(13.0)
+                                    .color(Color32::LIGHT_GRAY),
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(next)
+                                            .size(16.0)
+                                            .strong()
+                                            .color(Color32::WHITE),
+                                    )
+                                    .truncate(),
+                                );
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .button(egui::RichText::new("▶  Play now").size(14.0))
+                                        .clicked()
+                                    {
+                                        act.next = true;
+                                    }
+                                    if ui
+                                        .button(egui::RichText::new("Cancel").size(14.0))
+                                        .clicked()
+                                    {
+                                        act.cancel_autoplay = true;
+                                    }
+                                });
+                            });
+                    });
+                    ctx.request_repaint_after(Duration::from_millis(200));
+                }
+                _ => {
+                    let w = if v.next.is_some() { 260.0 } else { 120.0 };
+                    let r = Rect::from_center_size(center, Vec2::new(w, 40.0));
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
+                        ui.horizontal_centered(|ui| {
+                            if ui
+                                .button(egui::RichText::new("↻  Replay").size(16.0))
+                                .clicked()
+                            {
+                                self.replay();
+                            }
+                            if v.next.is_some()
+                                && ui
+                                    .button(egui::RichText::new("Next  ⏭").size(16.0))
+                                    .clicked()
+                            {
+                                act.next = true;
+                            }
+                        });
+                    });
+                }
             }
+        }
+        if self.show_help {
+            let r = Rect::from_center_size(center, Vec2::new(360.0, 400.0));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
+                egui::Frame::new()
+                    .fill(Color32::from_black_alpha(225))
+                    .corner_radius(12)
+                    .inner_margin(16)
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new("Keyboard shortcuts")
+                                .size(16.0)
+                                .strong()
+                                .color(Color32::WHITE),
+                        );
+                        ui.add_space(6.0);
+                        egui::Grid::new("keys").spacing([18.0, 5.0]).show(ui, |ui| {
+                            for (k, what) in SHORTCUTS {
+                                ui.label(egui::RichText::new(k).monospace().color(Color32::WHITE));
+                                ui.label(egui::RichText::new(what).color(Color32::LIGHT_GRAY));
+                                ui.end_row();
+                            }
+                        });
+                    });
+            });
         }
         // "Resumed at …" pill, top-left, for the first seconds of a resumed video
         if let Some((t, _)) = self
@@ -1205,6 +1380,18 @@ impl Embedded {
             );
             painter.rect_filled(seg, 0, Color32::from_rgba_unmultiplied(r, g, b, 200));
         }
+        // chapter boundaries: small gaps in the track, like YouTube's
+        for c in self.chapters.iter().skip(1) {
+            let x = track.left() + track.width() * frac(c.start);
+            painter.rect_filled(
+                Rect::from_center_size(
+                    Pos2::new(x, track.center().y),
+                    Vec2::new(2.0, track_h + 1.0),
+                ),
+                0,
+                Color32::BLACK,
+            );
+        }
         if hover {
             painter.circle_filled(Pos2::new(played.right(), track.center().y), 7.0, v.accent);
             if let Some(hp) = sresp.hover_pos() {
@@ -1215,7 +1402,10 @@ impl Embedded {
                     seek.top() - 30.0,
                     t,
                 );
-                let label = fmt_time(t);
+                let label = match crate::chapters::at(&self.chapters, t) {
+                    Some(i) => format!("{}  ·  {}", fmt_time(t), self.chapters[i].title),
+                    None => fmt_time(t),
+                };
                 let g = painter.layout_no_wrap(label, FontId::proportional(12.0), Color32::WHITE);
                 let r = Rect::from_center_size(
                     Pos2::new(
@@ -1245,8 +1435,40 @@ impl Embedded {
             r.on_hover_cursor(egui::CursorIcon::PointingHand)
         };
 
-        // play/pause
-        let pp = Rect::from_min_size(row.left_top(), Vec2::splat(row.height()));
+        // prev / play-pause / next
+        let sq = Vec2::splat(row.height());
+        let prev_r = Rect::from_min_size(row.left_top(), sq);
+        let pp = Rect::from_min_size(row.left_top() + Vec2::new(row.height(), 0.0), sq);
+        let next_r = Rect::from_min_size(row.left_top() + Vec2::new(row.height() * 2.0, 0.0), sq);
+        for (r, title, fwd) in [(prev_r, &v.prev, false), (next_r, &v.next, true)] {
+            let col = if title.is_some() {
+                Color32::WHITE
+            } else {
+                Color32::from_white_alpha(70)
+            };
+            let resp = ui.interact(r, ui.scope_id().with(("q", fwd)), Sense::click());
+            if let Some(t) = title {
+                if resp.hovered() {
+                    ui.painter()
+                        .rect_filled(r, 6, Color32::from_white_alpha(25));
+                }
+                let resp = resp
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(format!(
+                        "{}: {t}  ({})",
+                        if fwd { "Next" } else { "Previous" },
+                        if fwd { "⇧N" } else { "⇧P" }
+                    ));
+                if resp.clicked() {
+                    if fwd {
+                        act.next = true;
+                    } else {
+                        act.prev = true;
+                    }
+                }
+            }
+            skip_icon(&painter, r.center(), fwd, col);
+        }
         if btn(ui, pp, "pp").clicked() {
             self.toggle_pause();
         }
@@ -1278,13 +1500,43 @@ impl Embedded {
         } else {
             format!("{}  · LIVE", fmt_time(shown))
         };
-        painter.text(
-            Pos2::new(pp.right() + 10.0, c.y),
+        let time_r = painter.text(
+            Pos2::new(next_r.right() + 8.0, c.y),
             Align2::LEFT_CENTER,
             time,
             FontId::proportional(14.0),
             Color32::WHITE,
         );
+        // current chapter; click → next chapter
+        if let Some(i) = crate::chapters::at(&self.chapters, shown) {
+            let t = &self.chapters[i].title;
+            let max = ((row.width() * 0.3) / 7.5).max(12.0) as usize;
+            let t: String = if t.chars().count() > max {
+                t.chars().take(max - 1).chain(['…']).collect()
+            } else {
+                t.clone()
+            };
+            let g = painter.layout_no_wrap(
+                format!("·  {t}  ›"),
+                FontId::proportional(13.5),
+                Color32::from_white_alpha(210),
+            );
+            let r = Rect::from_min_size(
+                Pos2::new(time_r.right() + 10.0, c.y - g.size().y / 2.0),
+                g.size(),
+            );
+            let resp = ui
+                .interact(r.expand(3.0), ui.scope_id().with("chapter"), Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("Next chapter (C)");
+            if resp.hovered() {
+                painter.rect_filled(r.expand(4.0), 6, Color32::from_white_alpha(25));
+            }
+            painter.galley(r.min, g, Color32::WHITE);
+            if resp.clicked() {
+                self.jump_chapter(true);
+            }
+        }
 
         // right side, laid out right-to-left
         let mut right = row.right();
@@ -1351,7 +1603,7 @@ impl Embedded {
                     .selected_text(egui::RichText::new(format!("{}×", trim_num(s))).size(13.0))
                     .width(60.0)
                     .show_ui(ui, |ui| {
-                        for x in [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0] {
+                        for x in SPEEDS {
                             ui.selectable_value(&mut s, x, format!("{}×", trim_num(x)));
                         }
                     });
@@ -1421,7 +1673,8 @@ impl Embedded {
         // wheel over the whole control; stops at 100% until pushed through
         let over = ui.rect_contains_pointer(area);
         if over {
-            let d = ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
+            // scroll up / swipe up = louder (egui reports up as negative y here)
+            let d = -ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
             if d != 0.0 {
                 ui.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
                 self.poke(); // keep the controls up while adjusting
@@ -1512,6 +1765,25 @@ impl Embedded {
 
         ((vol - self.volume).abs() > f64::EPSILON).then_some(vol)
     }
+}
+
+/// ⏮ / ⏭: a triangle and a bar.
+fn skip_icon(p: &egui::Painter, c: Pos2, fwd: bool, col: Color32) {
+    let d = if fwd { 1.0 } else { -1.0 };
+    p.add(egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(c.x - 5.0 * d, c.y - 6.5),
+            Pos2::new(c.x + 4.0 * d, c.y),
+            Pos2::new(c.x - 5.0 * d, c.y + 6.5),
+        ],
+        col,
+        Stroke::NONE,
+    ));
+    p.rect_filled(
+        Rect::from_center_size(Pos2::new(c.x + 5.5 * d, c.y), Vec2::new(2.5, 13.0)),
+        1,
+        col,
+    );
 }
 
 /// Speaker with 0–2 waves (or a cross when muted).

@@ -462,6 +462,12 @@ pub enum Source {
     },
     /// Videos saved for offline viewing (local, see downloads.rs).
     Downloads,
+    /// One of the home feed's categories ("Music", "Gaming"…): YouTube's
+    /// own chip, loaded through its continuation token.
+    Topic {
+        title: String,
+        token: String,
+    },
 }
 
 impl Source {
@@ -476,7 +482,13 @@ impl Source {
             Source::Channel { name, .. } | Source::ChannelPlaylists { name, .. } => name.clone(),
             Source::Playlist { title, .. } => title.clone(),
             Source::Downloads => "Downloads".into(),
+            Source::Topic { title, .. } => title.clone(),
         }
+    }
+
+    /// Home, or one of its categories.
+    pub fn is_home(&self) -> bool {
+        matches!(self, Source::Feed | Source::Topic { .. })
     }
 
     /// Pages reached by navigating (channel/playlist), as opposed to top tabs.
@@ -502,6 +514,7 @@ impl Source {
             }
             Source::Playlist { id, .. } => format!("https://www.youtube.com/playlist?list={id}"),
             Source::Downloads => String::new(), // local; never fetched
+            Source::Topic { .. } => ":ytrec".into(), // native only; yt-dlp has no categories
         }
     }
 }

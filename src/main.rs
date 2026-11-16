@@ -5,6 +5,7 @@
 
 mod app;
 mod cache;
+mod chapters;
 mod dearrow;
 mod deps;
 mod downloads;

@@ -96,6 +96,8 @@ struct DepsState {
 }
 
 enum Msg {
+    TopicShelf(String, String, Vec<Video>),
+    Chapters(String, Vec<crate::chapters::Chapter>),
     /// Videos streamed in for a tab. `first`: part of the first page of this
     /// generation; `batch_done`: the requested page is complete.
     Chunk {
@@ -171,7 +173,8 @@ fn list_name(s: &Source) -> Option<&'static str> {
         | Source::Channel { .. }
         | Source::ChannelPlaylists { .. }
         | Source::Playlist { .. }
-        | Source::Downloads => None,
+        | Source::Downloads
+        | Source::Topic { .. } => None,
     }
 }
 
@@ -200,7 +203,7 @@ enum CardAction {
 }
 
 /// Card menu (right-click or ⋯).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Quick {
     WatchLater(bool),
     /// Hide this video's channel from feeds and search.
@@ -211,6 +214,8 @@ enum Quick {
     CopyLink,
     OpenInBrowser,
     Watched(bool),
+    PlayNext,
+    AddToQueue,
 }
 
 struct Player {
@@ -271,6 +276,18 @@ pub struct App {
     embedded: Option<Embedded>,
     /// Clicked video waiting for `ui` (where the GL context and Frame are available).
     pending_play: Option<Video>,
+    /// The list a video was started from (a feed grid, the Shorts row…);
+    /// next/autoplay walk it. `queue_pos`: the playing video's index in it.
+    queue_ctx: Vec<Video>,
+    queue_pos: Option<usize>,
+    /// "Play next" / "Add to queue": played before the rest of `queue_ctx`.
+    up_next: std::collections::VecDeque<Video>,
+    /// Played this session, for Previous.
+    played: Vec<Video>,
+    /// When the current video ended (autoplay countdown), and whether the
+    /// countdown was cancelled for it.
+    eof_at: Option<std::time::Instant>,
+    autoplay_cancelled: bool,
     smoke: Option<Smoke>,
 
     // links handed over from outside (clipboard, Services menu)
@@ -286,6 +303,9 @@ pub struct App {
     /// Settings → Feed "hide titles containing" text, as typed.
     muted_words_buf: String,
     settings_tab: SettingsTab,
+    /// Home's category rows: title → (token they were loaded with, videos).
+    topic_shelves: HashMap<String, (String, Vec<Video>)>,
+    topic_loading: std::collections::HashSet<String>,
     session_refresh: SessionRefresh,
     /// Last background "still signed in?" probe.
     session_checked: std::time::Instant,
@@ -387,6 +407,12 @@ impl App {
             surface: None,
             embedded: None,
             pending_play: None,
+            queue_ctx: Vec::new(),
+            queue_pos: None,
+            up_next: std::collections::VecDeque::new(),
+            played: Vec::new(),
+            eof_at: None,
+            autoplay_cancelled: false,
             smoke: None,
             pending_link: None,
             link_start: None,
@@ -395,6 +421,8 @@ impl App {
             was_focused: false,
             muted_words_buf: String::new(),
             settings_tab: SettingsTab::default(),
+            topic_shelves: HashMap::new(),
+            topic_loading: std::collections::HashSet::new(),
             session_refresh: SessionRefresh::Idle,
             session_checked: std::time::Instant::now(),
             np_last: None,
@@ -986,6 +1014,15 @@ impl App {
                 Msg::DeArrow(id, b) => {
                     self.dearrow.insert(id, Some(b));
                 }
+                Msg::TopicShelf(title, token, vids) => {
+                    self.topic_loading.remove(&title);
+                    self.topic_shelves.insert(title, (token, vids));
+                }
+                Msg::Chapters(id, c) => {
+                    if let Some(p) = self.embedded.as_mut().filter(|p| p.id == id) {
+                        p.chapters = c;
+                    }
+                }
                 Msg::Storyboard(id, sb) => {
                     if let Some(p) = self.embedded.as_mut().filter(|p| p.id == id) {
                         p.storyboard = Some(sb);
@@ -1022,7 +1059,134 @@ impl App {
 
     // ---------- player ----------
 
+    /// First page of one home category, for its row (one fetch at a time
+    /// per category; a failure leaves it empty rather than retrying forever).
+    fn load_topic_shelf(&mut self, ctx: &egui::Context, title: String, token: String) {
+        if !self.topic_loading.insert(title.clone()) {
+            return;
+        }
+        let (tx, ctx, cookies) = (self.tx.clone(), ctx.clone(), self.cookies.clone());
+        std::thread::spawn(move || {
+            let src = Source::Topic {
+                title: title.clone(),
+                token: token.clone(),
+            };
+            let vids = crate::innertube::Pager::new(&cookies, &src)
+                .and_then(|mut p| p.next_page())
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let _ = tx.send(Msg::TopicShelf(title, token, vids));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Start `v` with `list` (where it was clicked) as the queue.
+    fn play_from(&mut self, list: Vec<Video>, v: &Video) {
+        self.queue_pos = list.iter().position(|x| x.id == v.id);
+        self.queue_ctx = if self.queue_pos.is_some() {
+            list
+        } else {
+            Vec::new()
+        };
+        self.played.clear();
+        self.play(v);
+    }
+
+    fn playing_id(&self) -> Option<&str> {
+        self.embedded
+            .as_ref()
+            .map(|p| p.id.as_str())
+            .or(self.player.as_ref().map(|p| p.id.as_str()))
+    }
+
+    /// What Next would play.
+    fn peek_next(&self) -> Option<&Video> {
+        self.up_next.front().or_else(|| {
+            let i = self.queue_pos? + 1;
+            self.queue_ctx.get(i)
+        })
+    }
+
+    fn go_next(&mut self) {
+        let next = if let Some(v) = self.up_next.pop_front() {
+            v
+        } else if let Some(v) = self
+            .queue_pos
+            .and_then(|i| self.queue_ctx.get(i + 1))
+            .cloned()
+        {
+            self.queue_pos = self.queue_pos.map(|i| i + 1);
+            v
+        } else {
+            return;
+        };
+        self.remember_current();
+        self.switch_to(&next);
+    }
+
+    fn go_prev(&mut self) {
+        let Some(prev) = self.played.pop() else {
+            // nothing before: restart this one
+            if let Some(p) = &mut self.embedded {
+                p.seek_absolute(0.0, true);
+            }
+            return;
+        };
+        // put the current one back so Next returns to it
+        if let Some(cur) = self.current_video() {
+            match self.queue_ctx.iter().position(|x| x.id == prev.id) {
+                Some(i) if self.queue_ctx.get(i + 1).is_some_and(|x| x.id == cur.id) => {
+                    self.queue_pos = Some(i)
+                }
+                _ => self.up_next.push_front(cur),
+            }
+        }
+        self.switch_to(&prev);
+    }
+
+    fn current_video(&self) -> Option<Video> {
+        let id = self.playing_id()?;
+        self.queue_ctx
+            .iter()
+            .chain(self.played.iter())
+            .find(|v| v.id == id)
+            .cloned()
+            .or_else(|| {
+                self.embedded.as_ref().map(|p| Video {
+                    id: p.id.clone(),
+                    title: Some(p.title.clone()),
+                    ..Default::default()
+                })
+            })
+    }
+
+    fn remember_current(&mut self) {
+        if let Some(cur) = self.current_video() {
+            self.played.retain(|v| v.id != cur.id);
+            self.played.push(cur);
+            if self.played.len() > 200 {
+                self.played.remove(0);
+            }
+        }
+    }
+
+    /// Replace the playing video, keeping fullscreen and the player view.
+    fn switch_to(&mut self, v: &Video) {
+        if let Some(p) = self.embedded.take() {
+            self.settings.volume = p.volume;
+            if p.started {
+                self.positions.update(&p.id, p.pos, p.duration);
+            }
+            self.positions.save();
+            drop(p); // GL is current during update
+        }
+        self.play(v);
+    }
+
     fn play(&mut self, video: &Video) {
+        self.eof_at = None;
+        self.autoplay_cancelled = false;
         self.stop_player();
         self.np_artist = video.channel().to_string();
         self.np_art = ["hi", "sd"]
@@ -1150,8 +1314,19 @@ impl App {
                         ctx.clone(),
                     );
                     std::thread::spawn(move || {
-                        if let Ok(sb) = crate::storyboard::fetch(&cookies, &id) {
-                            let _ = tx.send(Msg::Storyboard(id, sb));
+                        if let Ok(e) = crate::innertube::player_extras(&cookies, &id) {
+                            let chapters = crate::innertube::chapters(&id)
+                                .ok()
+                                .filter(|c| !c.is_empty())
+                                .unwrap_or_else(|| {
+                                    crate::chapters::parse(&e.description, e.duration)
+                                });
+                            if !chapters.is_empty() {
+                                let _ = tx.send(Msg::Chapters(id.clone(), chapters));
+                            }
+                            if let Some(sb) = crate::storyboard::from_extras(&e) {
+                                let _ = tx.send(Msg::Storyboard(id, sb));
+                            }
                             ctx2.request_repaint();
                         }
                     });
@@ -1506,7 +1681,9 @@ impl App {
                 }
                 ui.add_space(12.0);
                 let home_of = |t: &Source| {
-                    t == &self.active || (self.active.is_page() && self.nav_back.first() == Some(t))
+                    t == &self.active
+                        || (*t == Source::Feed && self.active.is_home())
+                        || (self.active.is_page() && self.nav_back.first() == Some(t))
                 };
                 for t in BASE_TABS {
                     if t == Source::WatchLater && !collapsed {
@@ -1681,6 +1858,9 @@ impl App {
         let mut reimport_from_empty = false;
         let mut hovered_video: Option<Video> = None;
         let mut want_branding: Vec<String> = Vec::new();
+        let mut clicked_list: Vec<Video> = Vec::new();
+        let mut want_topics: Vec<(String, String)> = Vec::new();
+        let mut open_topic: Option<Source> = None;
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let source = self.active.clone();
             let playing_id = self.player.as_ref().map(|p| p.id.clone());
@@ -1688,6 +1868,7 @@ impl App {
             let positions = &self.positions;
             let settings = &self.settings;
             let (downloads, dl_active) = (&self.downloads, &self.dl_active);
+            let topic_shelves = &self.topic_shelves;
             let dearrow = settings.dearrow.then_some(&self.dearrow);
             let Some(tab) = self.tabs.get_mut(&source) else {
                 return;
@@ -1758,8 +1939,39 @@ impl App {
             // and search (channel/playlist pages keep them in the grid).
             let shelf_src = matches!(
                 source,
-                Source::Feed | Source::Subscriptions | Source::Search(_)
+                Source::Feed | Source::Subscriptions | Source::Topic { .. } | Source::Search(_)
             );
+            // Home: each of YouTube's categories as its own row
+            let topics: Vec<(String, String)> = if source == Source::Feed {
+                crate::innertube::HOME_CHIPS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+            } else {
+                Vec::new()
+            };
+            // (title, token, videos once loaded with that token)
+            let topic_rows: Vec<(String, String, Option<Vec<&Video>>)> = topics
+                .into_iter()
+                .filter_map(|(title, token)| {
+                    let vids = match topic_shelves.get(&title) {
+                        Some((t, vids)) if *t == token => Some(
+                            vids.iter()
+                                .filter(|v| {
+                                    let watched = positions.get(&v.id).is_some_and(|e| e.watched());
+                                    !v.is_short && !settings.hides(&source, v, watched)
+                                })
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => None,
+                    };
+                    // loaded but nothing left after filters: no row
+                    if vids.as_ref().is_some_and(|v| v.is_empty()) {
+                        return None;
+                    }
+                    Some((title, token, vids))
+                })
+                .collect();
             let mut shown: Vec<&Video> = Vec::new();
             let mut shorts: Vec<&Video> = Vec::new();
             for v in &tab.videos {
@@ -1782,12 +1994,18 @@ impl App {
             enum Row {
                 Videos(usize),
                 Shelf,
+                Topic(usize),
                 Footer,
             }
+            // two rows of the feed, Shorts, the categories, then the rest
             let mut rows: Vec<Row> = (0..video_rows).map(Row::Videos).collect();
+            let at = video_rows.min(2);
+            let mut extra: Vec<Row> = Vec::new();
             if !shorts.is_empty() {
-                rows.insert(video_rows.min(2), Row::Shelf);
+                extra.push(Row::Shelf);
             }
+            extra.extend((0..topic_rows.len()).map(Row::Topic));
+            rows.splice(at..at, extra);
             if show_footer {
                 rows.push(Row::Footer);
             }
@@ -1797,6 +2015,7 @@ impl App {
             const SHELF_HEAD: f32 = 34.0;
             let height = |r: &Row| match r {
                 Row::Shelf => SHELF_HEAD + short_h,
+                Row::Topic(_) => SHELF_HEAD + card_h,
                 _ => card_h,
             };
             let total: f32 = rows.iter().map(|r| height(r) + GAP).sum();
@@ -1925,6 +2144,80 @@ impl App {
                                                 });
                                         });
                                     }
+                                    Row::Topic(i) => {
+                                        let (title, token, vids) = &topic_rows[*i];
+                                        ui.vertical(|ui| {
+                                            ui.spacing_mut().item_spacing.y = 0.0;
+                                            ui.allocate_ui_with_layout(
+                                                Vec2::new(avail_w, SHELF_HEAD),
+                                                Layout::left_to_right(Align::Center),
+                                                |ui| {
+                                                    let r = ui
+                                                        .add(
+                                                            egui::Label::new(
+                                                                RichText::new(format!(
+                                                                    "{title}  ›"
+                                                                ))
+                                                                .size(17.0)
+                                                                .strong()
+                                                                .color(text()),
+                                                            )
+                                                            .sense(Sense::click()),
+                                                        )
+                                                        .on_hover_cursor(
+                                                            egui::CursorIcon::PointingHand,
+                                                        )
+                                                        .on_hover_text("See all");
+                                                    if r.clicked() {
+                                                        open_topic = Some(Source::Topic {
+                                                            title: title.clone(),
+                                                            token: token.clone(),
+                                                        });
+                                                    }
+                                                },
+                                            );
+                                            match vids {
+                                                Some(vids) => {
+                                                    egui::ScrollArea::horizontal()
+                                                        .id_salt(("topic", title))
+                                                        .auto_shrink([false, true])
+                                                        .show(ui, |ui| {
+                                                            ui.horizontal(|ui| {
+                                                                ui.spacing_mut().item_spacing.x =
+                                                                    GAP;
+                                                                for &v in vids {
+                                                                    let c = info(
+                                                                        v,
+                                                                        Vec2::new(card_w, card_h),
+                                                                        thumb_h,
+                                                                        false,
+                                                                    );
+                                                                    draw(ui, v, c, variant);
+                                                                }
+                                                            });
+                                                        });
+                                                }
+                                                None => {
+                                                    want_topics
+                                                        .push((title.clone(), token.clone()));
+                                                    ui.horizontal(|ui| {
+                                                        ui.spacing_mut().item_spacing.x = GAP;
+                                                        for _ in 0..cols {
+                                                            let (r, _) = ui.allocate_exact_size(
+                                                                Vec2::new(card_w, card_h),
+                                                                Sense::hover(),
+                                                            );
+                                                            ui.painter().rect_filled(
+                                                                r,
+                                                                RADIUS,
+                                                                card(),
+                                                            );
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                        });
+                                    }
                                     Row::Footer => {
                                         // spinner while the next page loads; retry on error
                                         ui.allocate_ui_with_layout(
@@ -1962,6 +2255,25 @@ impl App {
                     more = true;
                 }
             });
+            // the list it was clicked in becomes the queue
+            if let Some(c) = &clicked {
+                let in_shelf = topic_rows
+                    .iter()
+                    .find_map(|(_, _, v)| v.as_ref().filter(|v| v.iter().any(|x| x.id == c.id)));
+                let list = if c.is_short && shorts.iter().any(|v| v.id == c.id) {
+                    &shorts
+                } else if let Some(shelf) = in_shelf.filter(|_| !shown.iter().any(|x| x.id == c.id))
+                {
+                    shelf
+                } else {
+                    &shown
+                };
+                clicked_list = list
+                    .iter()
+                    .filter(|v| !v.is_playlist)
+                    .map(|v| (*v).clone())
+                    .collect();
+            }
         });
 
         // ----- apply actions -----
@@ -1975,7 +2287,7 @@ impl App {
                     },
                 );
             } else {
-                self.play(&v);
+                self.play_from(clicked_list, &v);
             }
         }
         if let Some(v) = open_channel {
@@ -1991,6 +2303,15 @@ impl App {
         }
         if more {
             self.load_more(&ctx, self.active.clone());
+        }
+        for (title, token) in want_topics {
+            self.load_topic_shelf(&ctx, title, token);
+        }
+        if let Some(src) = open_topic {
+            self.tabs.remove(&src); // category tokens are short-lived; always fresh
+            self.nav_back.push(self.active.clone());
+            self.active = src.clone();
+            self.load(&ctx, src, false);
         }
         match (&self.hover, hovered_video) {
             (Some((old, _)), Some(new)) if old.id == new.id => {}
@@ -2067,6 +2388,9 @@ impl SettingsTab {
     }
 }
 
+/// Seconds the "Up next" card waits before playing the next video.
+const AUTOPLAY_WAIT: f32 = 5.0;
+
 /// How often to check, while the window is in front, that we're still signed in.
 const SESSION_PROBE: Duration = Duration::from_secs(30 * 60);
 
@@ -2104,6 +2428,22 @@ impl App {
                 }
             }
             Quick::Download => self.start_download(ctx, v),
+            Quick::PlayNext | Quick::AddToQueue => {
+                self.up_next.retain(|x| x.id != v.id);
+                if q == Quick::PlayNext {
+                    self.up_next.push_front(v.clone());
+                } else {
+                    self.up_next.push_back(v.clone());
+                }
+                self.status = Some((
+                    if self.playing_id().is_some() {
+                        format!("{} in your queue", self.up_next.len())
+                    } else {
+                        "Queued. It plays after the next video you start.".into()
+                    },
+                    false,
+                ));
+            }
             Quick::RemoveFromHistory => {
                 if let Some(tab) = self.tabs.get_mut(&Source::History) {
                     tab.videos.retain(|x| x.id != v.id);
@@ -2173,10 +2513,14 @@ impl App {
     /// Back / title / Videos-Playlists switch for channel and playlist pages.
     /// Feed filters as chips above Home, Subscriptions and search results.
     fn ui_filter_bar(&mut self, ui: &mut egui::Ui) {
-        let feed = matches!(self.active, Source::Feed | Source::Subscriptions);
+        let feed = matches!(
+            self.active,
+            Source::Feed | Source::Subscriptions | Source::Topic { .. }
+        );
         if !(feed || matches!(self.active, Source::Search(_))) {
             return;
         }
+        let mut go: Option<Source> = None;
         egui::Panel::top("filters")
             .frame(egui::Frame::new().fill(bg()).inner_margin(Margin {
                 left: 16,
@@ -2188,6 +2532,14 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
+                    // inside a category opened from Home: the way back, and its name
+                    if let Source::Topic { title, .. } = &self.active {
+                        if topic_chip(ui, "←  Home", false).clicked() {
+                            go = Some(Source::Feed);
+                        }
+                        ui.label(RichText::new(title).size(17.0).strong().color(text()));
+                        ui.add_space(10.0);
+                    }
                     let s = &mut self.settings;
                     if chip(ui, "Shorts", s.show_shorts)
                         .on_hover_text("Shorts in their own row")
@@ -2270,6 +2622,21 @@ impl App {
                         });
                 });
             });
+        // Esc / mouse back button leave a category too
+        if matches!(self.active, Source::Topic { .. })
+            && !ui.ctx().egui_wants_keyboard_input()
+            && ui.ctx().input(|i| {
+                i.key_pressed(Key::Escape) || i.pointer.button_clicked(egui::PointerButton::Extra1)
+            })
+        {
+            go = Some(Source::Feed);
+        }
+        if let Some(src) = go {
+            let ctx = ui.ctx().clone();
+            self.nav_back.clear();
+            self.active = src.clone();
+            self.load(&ctx, src, false);
+        }
     }
 
     fn ui_page_header(&mut self, ui: &mut egui::Ui) {
@@ -2591,49 +2958,135 @@ impl App {
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         let mut back = false;
         let mut toggle_fs = false;
+        let (mut go_next, mut go_prev) = (false, false);
 
-        // Keyboard (only when no text field / popup has focus)
+        // Keyboard (only when no text field / popup has focus), YouTube's keys
         if !ctx.egui_wants_keyboard_input() {
-            let (space, left, right, up, down, f, esc) = ctx.input_mut(|i| {
-                let k = |i: &mut egui::InputState, key| i.consume_key(egui::Modifiers::NONE, key);
-                (
-                    k(i, Key::Space),
-                    k(i, Key::ArrowLeft),
-                    k(i, Key::ArrowRight),
-                    k(i, Key::ArrowUp),
-                    k(i, Key::ArrowDown),
-                    k(i, Key::F),
-                    k(i, Key::Escape),
-                )
+            use egui::Modifiers as M;
+            let mut keys: Vec<(M, Key)> = Vec::new();
+            ctx.input_mut(|i| {
+                for (m, k) in [
+                    (M::NONE, Key::Space),
+                    (M::NONE, Key::K),
+                    (M::NONE, Key::J),
+                    (M::NONE, Key::L),
+                    (M::NONE, Key::ArrowLeft),
+                    (M::NONE, Key::ArrowRight),
+                    (M::NONE, Key::ArrowUp),
+                    (M::NONE, Key::ArrowDown),
+                    (M::NONE, Key::M),
+                    (M::NONE, Key::F),
+                    (M::NONE, Key::Escape),
+                    (M::SHIFT, Key::N),
+                    (M::SHIFT, Key::P),
+                    (M::SHIFT, Key::Comma),
+                    (M::SHIFT, Key::Period),
+                    (M::NONE, Key::Comma),
+                    (M::NONE, Key::Period),
+                    (M::NONE, Key::Home),
+                    (M::NONE, Key::End),
+                    (M::SHIFT, Key::C),
+                    (M::NONE, Key::C),
+                    (M::SHIFT, Key::Questionmark),
+                    (M::NONE, Key::Questionmark),
+                    (M::SHIFT, Key::Slash),
+                    (M::NONE, Key::Num0),
+                    (M::NONE, Key::Num1),
+                    (M::NONE, Key::Num2),
+                    (M::NONE, Key::Num3),
+                    (M::NONE, Key::Num4),
+                    (M::NONE, Key::Num5),
+                    (M::NONE, Key::Num6),
+                    (M::NONE, Key::Num7),
+                    (M::NONE, Key::Num8),
+                    (M::NONE, Key::Num9),
+                ] {
+                    if i.consume_key(m, k) {
+                        keys.push((m, k));
+                    }
+                }
             });
-            if let Some(p) = &mut self.embedded {
-                if space {
-                    p.toggle_pause();
-                    p.poke();
+            for (m, k) in keys {
+                let shift = m == M::SHIFT;
+                match k {
+                    Key::F => toggle_fs = true,
+                    Key::Escape if fullscreen => toggle_fs = true,
+                    Key::Escape => back = true,
+                    Key::N if shift => go_next = true,
+                    Key::P if shift => go_prev = true,
+                    _ => {}
                 }
-                if left {
-                    p.seek_relative(-5.0);
-                }
-                if right {
-                    p.seek_relative(5.0);
-                }
-                if up || down {
-                    p.set_volume(p.volume + if up { 5.0 } else { -5.0 });
-                    p.poke();
-                }
-            }
-            toggle_fs |= f;
-            if esc {
-                if fullscreen {
-                    toggle_fs = true;
-                } else {
-                    back = true;
+                let Some(p) = &mut self.embedded else {
+                    continue;
+                };
+                p.poke();
+                match k {
+                    Key::Space | Key::K => p.toggle_pause(),
+                    Key::J => p.seek_relative(-10.0),
+                    Key::L => p.seek_relative(10.0),
+                    Key::ArrowLeft => p.seek_relative(-5.0),
+                    Key::ArrowRight => p.seek_relative(5.0),
+                    Key::ArrowUp => p.set_volume(p.volume + 5.0),
+                    Key::ArrowDown => p.set_volume(p.volume - 5.0),
+                    Key::M => p.toggle_mute(),
+                    Key::Comma if shift => p.step_speed(false),
+                    Key::Period if shift => p.step_speed(true),
+                    Key::Comma => p.frame_step(false),
+                    Key::Period => p.frame_step(true),
+                    Key::Home => p.seek_absolute(0.0, true),
+                    Key::End if p.duration > 1.0 => p.seek_absolute(p.duration - 1.0, true),
+                    Key::C => p.jump_chapter(!shift),
+                    Key::Questionmark | Key::Slash => p.show_help = !p.show_help,
+                    _ => {
+                        let n = [
+                            Key::Num0,
+                            Key::Num1,
+                            Key::Num2,
+                            Key::Num3,
+                            Key::Num4,
+                            Key::Num5,
+                            Key::Num6,
+                            Key::Num7,
+                            Key::Num8,
+                            Key::Num9,
+                        ]
+                        .iter()
+                        .position(|&x| x == k);
+                        if let Some(n) = n {
+                            if p.duration > 0.0 {
+                                p.seek_absolute(p.duration * n as f64 / 10.0, true);
+                            }
+                        }
+                    }
                 }
             }
         }
 
         let mut quality = None;
         let mut open_in_window = None;
+        // queue: titles for the buttons, autoplay countdown at the end
+        let q_next = self.peek_next().map(|v| v.title().to_string());
+        let q_prev = self.played.last().map(|v| v.title().to_string());
+        let mut autoplay_in = None;
+        match &self.embedded {
+            Some(p) if p.eof && p.started => {
+                let since = *self.eof_at.get_or_insert_with(std::time::Instant::now);
+                if self.settings.autoplay && !self.autoplay_cancelled && q_next.is_some() {
+                    let wait = if self.current_video().is_some_and(|v| v.is_short) {
+                        1.5
+                    } else {
+                        AUTOPLAY_WAIT
+                    };
+                    let left = wait - since.elapsed().as_secs_f32();
+                    if left <= 0.0 {
+                        go_next = true;
+                    } else {
+                        autoplay_in = Some(left);
+                    }
+                }
+            }
+            _ => self.eof_at = None,
+        }
         if let (Some(p), Some(surface), Some(gl)) =
             (&mut self.embedded, &mut self.surface, frame.gl())
         {
@@ -2644,8 +3097,16 @@ impl App {
                 quality: self.settings.quality,
                 screen_cap: self.screen_cap,
                 accent: accent(),
+                prev: q_prev,
+                next: q_next,
+                autoplay_in,
             };
             let act = p.ui(ui, view);
+            go_next |= act.next;
+            go_prev |= act.prev;
+            if act.cancel_autoplay {
+                self.autoplay_cancelled = true;
+            }
             back |= act.back;
             toggle_fs |= act.toggle_fullscreen;
             quality = act.quality;
@@ -2664,6 +3125,11 @@ impl App {
         if let Some(q) = quality {
             self.settings.quality = q;
             self.apply_profile_live(&ctx);
+        }
+        if go_next && !back {
+            self.go_next();
+        } else if go_prev && !back {
+            self.go_prev();
         }
         if back || open_in_window.is_some() {
             self.close_embedded(&ctx, frame);
@@ -2731,6 +3197,7 @@ impl App {
                             ui.checkbox(&mut s.mark_watched, "Add videos I watch to my YouTube history");
                             ui.checkbox(&mut s.volume_leveling, "Level volume (quiet voices up, loud parts down)");
                             ui.checkbox(&mut s.prepare_on_hover, "Start videos faster (prepare the one you're pointing at)");
+                                ui.checkbox(&mut s.autoplay, "Autoplay the next video in the queue");
                             ui.label(
                                 RichText::new(format!(
                                     "Auto never exceeds what this screen can show ({}p). On battery and in Low Power Mode it plays 1080p30. Sharp VP9 is preferred everywhere: this Mac decodes it in hardware, so it costs no more battery than blurry H.264.",
@@ -3197,6 +3664,17 @@ impl App {
     fn sync_now_playing(&mut self) {
         use crate::nowplaying::{self as np, Cmd};
         for c in np::take() {
+            match c {
+                Cmd::Next => {
+                    self.go_next();
+                    continue;
+                }
+                Cmd::Prev => {
+                    self.go_prev();
+                    continue;
+                }
+                _ => {}
+            }
             let Some(p) = &mut self.embedded else {
                 continue;
             };
@@ -3245,10 +3723,13 @@ impl App {
                 if let Some(t) = start {
                     self.link_start = Some((id.clone(), t));
                 }
-                self.play(&Video {
-                    id,
-                    ..Default::default()
-                });
+                self.play_from(
+                    Vec::new(),
+                    &Video {
+                        id,
+                        ..Default::default()
+                    },
+                );
             }
             Link::Playlist(id) => {
                 self.close_embedded(ctx, frame);
@@ -3875,6 +4356,13 @@ fn video_card(
     let menu = |ui: &mut egui::Ui, action: &mut CardAction| {
         ui.set_min_width(190.0);
         if !v.is_playlist {
+            if ui.button("Play next").clicked() {
+                *action = CardAction::Quick(Quick::PlayNext);
+            }
+            if ui.button("Add to queue").clicked() {
+                *action = CardAction::Quick(Quick::AddToQueue);
+            }
+            ui.separator();
             if in_watch_later {
                 if ui.button("Remove from Watch later").clicked() {
                     *action = CardAction::Quick(Quick::WatchLater(false));
@@ -4041,6 +4529,22 @@ fn open_url(url: &str) -> std::io::Result<()> {
     let mut child = c.arg(url).spawn()?;
     std::thread::spawn(move || child.wait());
     Ok(())
+}
+
+/// A category pill (YouTube's style: solid when selected).
+fn topic_chip(ui: &mut egui::Ui, label: &str, on: bool) -> egui::Response {
+    ui.add(
+        egui::Button::new(
+            RichText::new(label)
+                .size(13.0)
+                .color(if on { bg() } else { text() }),
+        )
+        .fill(if on { text() } else { card_hover() })
+        .stroke(Stroke::NONE)
+        .corner_radius(8)
+        .min_size(Vec2::new(0.0, 26.0)),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// A toggle pill: filled when on.

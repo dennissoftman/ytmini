@@ -64,6 +64,8 @@ pub struct Settings {
     pub sidebar_collapsed: bool,
     /// Resolve a video's stream while you hover its card, so it starts faster.
     pub prepare_on_hover: bool,
+    /// Play the next video in the queue when one ends.
+    pub autoplay: bool,
     /// Even out loudness between and within videos (mpv dynaudnorm).
     pub volume_leveling: bool,
     /// Skip SponsorBlock segments.
@@ -90,7 +92,7 @@ impl Settings {
     /// Whether the feed filters hide `v` on `source`.
     pub fn hides(&self, source: &yt::Source, v: &yt::Video, watched: bool) -> bool {
         use yt::Source::*;
-        let feed = matches!(source, Feed | Subscriptions);
+        let feed = matches!(source, Feed | Subscriptions | Topic { .. });
         if !(feed || matches!(source, Search(_))) || v.is_playlist {
             return false;
         }
@@ -134,6 +136,7 @@ impl Default for Settings {
             density: Density::Comfortable,
             sidebar_collapsed: false,
             prepare_on_hover: true,
+            autoplay: true,
             volume_leveling: true,
             sponsorblock: true,
             sb_categories: crate::sponsorblock::default_categories(),
