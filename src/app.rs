@@ -780,7 +780,7 @@ impl App {
     fn ui_missing(&mut self, ui: &mut egui::Ui, missing: &yt::Missing) {
         let mut retry = false;
         centered_column(ui, 520.0, |ui| {
-            ui.label(RichText::new("ytmini").size(34.0).strong().color(accent()));
+            logo(ui, 64.0);
             ui.add_space(8.0);
             ui.label(RichText::new("No video player found").size(20.0).color(text()));
             ui.add_space(12.0);
@@ -801,7 +801,7 @@ impl App {
     fn ui_setup(&mut self, ui: &mut egui::Ui) {
         let mut retry = false;
         centered_column(ui, 520.0, |ui| {
-            ui.label(RichText::new("ytmini").size(34.0).strong().color(accent()));
+            logo(ui, 64.0);
             ui.add_space(8.0);
             ui.label(RichText::new("Getting ready").size(20.0).color(text()));
             ui.add_space(6.0);
@@ -844,7 +844,7 @@ impl App {
 
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             centered_column(ui, 560.0, |ui| {
-                ui.label(RichText::new("ytmini").size(34.0).strong().color(accent()));
+                logo(ui, 64.0);
                 ui.add_space(4.0);
                 ui.label(RichText::new("Sign in to YouTube").size(20.0).color(text()));
                 ui.add_space(14.0);
@@ -983,12 +983,16 @@ impl App {
                     nav_item(ui, icon, label, selected, collapsed).clicked()
                 };
                 ui.add_space(2.0);
-                if !collapsed {
-                    ui.label(RichText::new("ytmini").size(17.0).strong().color(text()));
-                    ui.add_space(12.0);
+                if collapsed {
+                    ui.vertical_centered(|ui| logo(ui, 34.0));
                 } else {
-                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(4.0);
+                        logo(ui, 34.0);
+                        ui.label(RichText::new("mini YouTube").size(12.5).color(text_dim()));
+                    });
                 }
+                ui.add_space(12.0);
                 let home_of = |t: &Source| t == &self.active || (self.active.is_page() && self.nav_back.first() == Some(t));
                 for t in BASE_TABS {
                     if t == Source::WatchLater && !collapsed {
@@ -2390,6 +2394,37 @@ fn nav_item(ui: &mut egui::Ui, icon: Icon, label: &str, selected: bool, collapse
     }
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     if collapsed { resp.on_hover_text(label) } else { resp }
+}
+
+/// The "mYT" badge: same look as the app icon (coral rounded square, white lettering).
+fn logo(ui: &mut egui::Ui, h: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(h), Sense::hover());
+    let p = ui.painter();
+    let top = Color32::from_rgb(0xFF, 0x7A, 0x5C);
+    let bottom = Color32::from_rgb(0xE8, 0x3A, 0x4E);
+    // vertical gradient in a rounded square: rounded fill + gradient mesh inset by the radius
+    let r = h * 0.225;
+    p.rect_filled(rect, r, lerp_color(top, bottom, 0.5));
+    let mut mesh = egui::Mesh::default();
+    let inner = rect.shrink2(Vec2::new(0.0, r));
+    let i = mesh.vertices.len() as u32;
+    mesh.colored_vertex(inner.left_top(), top);
+    mesh.colored_vertex(inner.right_top(), top);
+    mesh.colored_vertex(inner.left_bottom(), bottom);
+    mesh.colored_vertex(inner.right_bottom(), bottom);
+    mesh.add_triangle(i, i + 1, i + 2);
+    mesh.add_triangle(i + 1, i + 3, i + 2);
+    p.rect_filled(egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, inner.min.y)), CornerRadius { nw: r as u8, ne: r as u8, sw: 0, se: 0 }, top);
+    p.rect_filled(egui::Rect::from_min_max(egui::pos2(rect.min.x, inner.max.y), rect.max), CornerRadius { nw: 0, ne: 0, sw: r as u8, se: r as u8 }, bottom);
+    p.add(mesh);
+    let mut job = LayoutJob::default();
+    let fmt = |c: Color32| TextFormat { font_id: FontId::proportional(h * 0.36), color: c, ..Default::default() };
+    job.append("m", 0.0, fmt(Color32::from_white_alpha(225)));
+    job.append("YT", 0.0, fmt(Color32::WHITE));
+    let g = p.layout_job(job);
+    let pos = rect.center() - g.size() / 2.0;
+    p.galley(pos, g.clone(), Color32::WHITE);
+    p.galley(pos + Vec2::new(h * 0.012, 0.0), g, Color32::WHITE); // faux-bold
 }
 
 fn accent_btn(label: &str) -> egui::Button<'_> {
