@@ -304,6 +304,17 @@ fn parse_http_date(s: &str) -> Option<i64> {
 /// Tell YouTube `video_id` was watched, so it appears in the account's watch
 /// history: the two stats pings youtube.com's player sends (same parameters
 /// yt-dlp's --mark-watched uses). Blocking.
+/// Cheap "are we still signed in?" probe (the account menu; nothing is
+/// recorded). Errors with [`SESSION_EXPIRED`] when Google dropped us.
+pub fn check_session(cookies: &Path) -> Result<()> {
+    let c = Client::new(cookies)?;
+    if !c.signed_in() {
+        return Ok(());
+    }
+    c.post("account/account_menu", json!({}))?;
+    Ok(())
+}
+
 pub fn mark_watched(cookies: &Path, video_id: &str) -> Result<()> {
     let c = Client::new(cookies)?;
     if !c.signed_in() {
@@ -400,6 +411,42 @@ mod history_live {
                 "{id}: {:?}",
                 super::remove_from_history(&cookies, id).map_err(|e| format!("{e:#}"))
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod session_live {
+    /// Is the saved session still signed in? Reads the home feed only.
+    /// `cargo test -- --ignored session_status --nocapture`
+    #[test]
+    #[ignore]
+    fn session_status() {
+        let cookies = crate::yt::config_dir().unwrap().join("cookies.txt");
+        eprintln!(
+            "probe: {:?}",
+            super::check_session(&cookies).map_err(|e| format!("{e:#}"))
+        );
+        // the probe can only notice expiry if the reply carries logged_in
+        let v = super::Client::new(&cookies)
+            .unwrap()
+            .post("account/account_menu", serde_json::json!({}))
+            .unwrap();
+        let has = v.to_string().contains("\"logged_in\"");
+        eprintln!("account_menu reports logged_in: {has}");
+        assert!(has);
+        let mut p = super::Pager::new(&cookies, &crate::yt::Source::Feed).unwrap();
+        match p.next_page() {
+            Ok(v) => {
+                let v = v.unwrap_or_default();
+                let shorts: Vec<&str> = v
+                    .iter()
+                    .filter(|x| x.is_short)
+                    .map(|x| x.id.as_str())
+                    .collect();
+                eprintln!("signed in: {} videos, shorts {shorts:?}", v.len());
+            }
+            Err(e) => eprintln!("error: {e:#}"),
         }
     }
 }

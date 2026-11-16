@@ -667,6 +667,8 @@ impl Video {
                     format!("{}:{:02}", s / 60, s % 60)
                 }
             }
+            // Shorts listings carry no length; that isn't "live"
+            _ if self.is_short && !self.is_live => String::new(),
             _ => "LIVE".into(),
         }
     }

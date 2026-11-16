@@ -164,6 +164,10 @@ pub struct Embedded {
     pub duration: f64,
     pub paused: bool,
     pub volume: f64,
+    /// Volume before the speaker icon muted it.
+    unmute_to: Option<f64>,
+    /// Wheel travel spent pushing past the 100% notch.
+    vol_hold: f32,
     pub speed: f64,
     pub buffering: bool,
     pub started: bool,
@@ -237,7 +241,10 @@ fn streak_step(tap: u32) -> f64 {
 /// Volume slider: 0–150 % (past 100 is mpv's software boost), with a
 /// detent at 100 % so it's easy to get back to normal.
 pub const VOLUME_MAX: f64 = 150.0;
-const VOLUME_SNAP: f64 = 5.0;
+/// Dragging within this many pixels of the 100% notch lands on it.
+const VOLUME_SNAP_PX: f32 = 7.0;
+/// Wheel travel (points) needed to push through the 100% notch.
+const VOLUME_WHEEL_HOLD: f32 = 24.0;
 
 const HOLD_AFTER: Duration = Duration::from_millis(350);
 const HOLD_SPEED: f64 = 1.5;
@@ -392,6 +399,8 @@ impl Embedded {
             duration: 0.0,
             paused: false,
             volume: settings.volume,
+            unmute_to: None,
+            vol_hold: 0.0,
             speed: 1.0,
             buffering: true,
             started: false,
@@ -1353,39 +1362,201 @@ impl Embedded {
         );
 
         // volume
-        let vr = take(130.0);
-        ui.scope_builder(
-            egui::UiBuilder::new()
-                .max_rect(vr)
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-            |ui| {
-                ui.label(egui::RichText::new("Vol").size(13.0).color(Color32::WHITE));
-                let mut vol = self.volume;
-                ui.spacing_mut().slider_width = 90.0;
-                let r = ui
-                    .add(egui::Slider::new(&mut vol, 0.0..=VOLUME_MAX).show_value(false))
-                    .on_hover_text(format!("{:.0}%  ·  double-click: 100%", self.volume));
-                // tick at 100%: the "normal" level, past it is boost
-                let rail = r.rect.shrink2(Vec2::new(r.rect.height() / 2.0, 0.0));
-                let x = rail.left() + rail.width() * (100.0 / VOLUME_MAX) as f32;
-                ui.painter().line_segment(
-                    [
-                        Pos2::new(x, r.rect.top() + 1.0),
-                        Pos2::new(x, r.rect.bottom() - 1.0),
-                    ],
-                    Stroke::new(1.5, Color32::from_white_alpha(160)),
-                );
-                if r.double_clicked() {
+        let vr = take(150.0);
+        if let Some(vol) = self.volume_control(ui, vr, v.accent) {
+            self.set_volume(vol);
+            act.volume_changed = true;
+        }
+    }
+
+    /// Speaker icon (click: mute) + slider with a sticky notch at 100%;
+    /// the wheel anywhere over it nudges the volume. Returns a new volume.
+    fn volume_control(&mut self, ui: &mut egui::Ui, area: Rect, accent: Color32) -> Option<f64> {
+        let painter = ui.painter_at(area.expand(8.0));
+        let cy = area.center().y;
+        let icon = Rect::from_center_size(Pos2::new(area.left() + 13.0, cy), Vec2::splat(26.0));
+        let rail = Rect::from_min_max(
+            Pos2::new(icon.right() + 8.0, cy - 10.0),
+            Pos2::new(area.right() - 40.0, cy + 10.0),
+        );
+        let x_of = |v: f64| rail.left() + rail.width() * (v / VOLUME_MAX).clamp(0.0, 1.0) as f32;
+        let notch_x = x_of(100.0);
+        let mut vol = self.volume;
+
+        // icon
+        let ir = ui
+            .interact(icon, ui.scope_id().with("vol-icon"), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(if vol > 0.0 { "Mute" } else { "Unmute" });
+        if ir.hovered() {
+            painter.rect_filled(icon, 6, Color32::from_white_alpha(25));
+        }
+        if ir.clicked() {
+            if vol > 0.0 {
+                self.unmute_to = Some(vol);
+                vol = 0.0;
+            } else {
+                vol = self.unmute_to.take().unwrap_or(100.0);
+            }
+        }
+        speaker_icon(&painter, icon.center(), self.volume);
+
+        // slider
+        let sr = ui
+            .interact(rail, ui.scope_id().with("vol"), Sense::click_and_drag())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if let Some(p) = sr.interact_pointer_pos() {
+            if sr.dragged() || sr.clicked() || sr.is_pointer_button_down_on() {
+                vol = if (p.x - notch_x).abs() <= VOLUME_SNAP_PX {
+                    100.0
+                } else {
+                    (((p.x - rail.left()) / rail.width()).clamp(0.0, 1.0) as f64) * VOLUME_MAX
+                };
+            }
+        }
+        if sr.double_clicked() {
+            vol = 100.0;
+        }
+
+        // wheel over the whole control; stops at 100% until pushed through
+        let over = ui.rect_contains_pointer(area);
+        if over {
+            let d = ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
+            if d != 0.0 {
+                ui.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
+                self.poke(); // keep the controls up while adjusting
+                let step = d as f64 * 0.5; // ~5% per wheel notch
+                let next = (vol + step).clamp(0.0, VOLUME_MAX);
+                let crosses = (vol < 100.0 && next > 100.0) || (vol > 100.0 && next < 100.0);
+                if crosses {
                     vol = 100.0;
-                } else if (vol - 100.0).abs() < VOLUME_SNAP {
-                    vol = 100.0; // magnetic detent
+                    self.vol_hold = 0.0;
+                } else if vol == 100.0 && next != 100.0 {
+                    self.vol_hold += d.abs();
+                    if self.vol_hold >= VOLUME_WHEEL_HOLD {
+                        vol = next;
+                        self.vol_hold = 0.0;
+                    }
+                } else {
+                    vol = next;
                 }
-                if (vol - self.volume).abs() > f64::EPSILON {
-                    self.set_volume(vol);
-                    act.volume_changed = true;
-                }
+            }
+        } else {
+            self.vol_hold = 0.0;
+        }
+
+        // draw
+        let active = sr.hovered() || sr.dragged() || over;
+        let h = if active { 5.0 } else { 4.0 };
+        let track = Rect::from_min_max(
+            Pos2::new(rail.left(), cy - h / 2.0),
+            Pos2::new(rail.right(), cy + h / 2.0),
+        );
+        painter.rect_filled(track, 3, Color32::from_white_alpha(55));
+        let shown = vol;
+        let fill_x = x_of(shown);
+        painter.rect_filled(
+            Rect::from_min_max(track.min, Pos2::new(fill_x.min(notch_x), track.bottom())),
+            3,
+            Color32::WHITE,
+        );
+        if shown > 100.0 {
+            // boost past 100% in the accent colour
+            painter.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(notch_x, track.top()),
+                    Pos2::new(fill_x, track.bottom()),
+                ),
+                3,
+                accent,
+            );
+        }
+        let at_notch = shown == 100.0;
+        painter.rect_filled(
+            Rect::from_center_size(
+                Pos2::new(notch_x, cy),
+                Vec2::new(2.0, if at_notch { 14.0 } else { 10.0 }),
+            ),
+            1,
+            if at_notch {
+                Color32::WHITE
+            } else {
+                Color32::from_white_alpha(140)
             },
         );
+        let knob = Pos2::new(fill_x, cy);
+        let r = if sr.dragged() {
+            7.5
+        } else if active {
+            6.5
+        } else {
+            5.5
+        };
+        painter.circle_filled(
+            knob + Vec2::new(0.0, 1.0),
+            r + 1.0,
+            Color32::from_black_alpha(90),
+        );
+        painter.circle_filled(knob, r, Color32::WHITE);
+        painter.text(
+            Pos2::new(rail.right() + 8.0, cy),
+            Align2::LEFT_CENTER,
+            format!("{shown:.0}%"),
+            FontId::proportional(12.0),
+            if active {
+                Color32::WHITE
+            } else {
+                Color32::from_white_alpha(170)
+            },
+        );
+
+        ((vol - self.volume).abs() > f64::EPSILON).then_some(vol)
+    }
+}
+
+/// Speaker with 0–2 waves (or a cross when muted).
+fn speaker_icon(p: &egui::Painter, c: Pos2, vol: f64) {
+    let w = Color32::WHITE;
+    p.add(egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(c.x - 8.0, c.y - 3.5),
+            Pos2::new(c.x - 4.5, c.y - 3.5),
+            Pos2::new(c.x + 0.5, c.y - 8.0),
+            Pos2::new(c.x + 0.5, c.y + 8.0),
+            Pos2::new(c.x - 4.5, c.y + 3.5),
+            Pos2::new(c.x - 8.0, c.y + 3.5),
+        ],
+        w,
+        Stroke::NONE,
+    ));
+    let s = Stroke::new(1.6, w);
+    if vol <= 0.0 {
+        p.line_segment(
+            [
+                Pos2::new(c.x + 3.5, c.y - 3.5),
+                Pos2::new(c.x + 9.5, c.y + 3.5),
+            ],
+            s,
+        );
+        p.line_segment(
+            [
+                Pos2::new(c.x + 3.5, c.y + 3.5),
+                Pos2::new(c.x + 9.5, c.y - 3.5),
+            ],
+            s,
+        );
+        return;
+    }
+    let waves = if vol < 50.0 { 1 } else { 2 };
+    for k in 0..waves {
+        let r = 5.0 + 4.0 * k as f32;
+        let pts: Vec<Pos2> = (0..=8)
+            .map(|i| {
+                let a = -0.9 + 1.8 * i as f32 / 8.0;
+                Pos2::new(c.x + 0.5 + r * a.cos(), c.y + r * a.sin())
+            })
+            .collect();
+        p.add(egui::Shape::line(pts, s));
     }
 }
 

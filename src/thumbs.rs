@@ -34,6 +34,9 @@ pub enum Variant {
     High,
     /// DeArrow's community thumbnail: the frame at this many milliseconds.
     DeArrow(u32),
+    /// Shorts: the 9:16 cover, stored 270 wide (landscape fallback is
+    /// cropped when drawn).
+    Portrait,
 }
 
 impl Variant {
@@ -42,6 +45,7 @@ impl Variant {
             Variant::Standard => "sd".into(),
             Variant::High => "hi".into(),
             Variant::DeArrow(ms) => format!("da{ms}"),
+            Variant::Portrait => "pt".into(),
         }
     }
     /// Try in order; WebP is ~half the size of the JPEG for the same image.
@@ -54,6 +58,11 @@ impl Variant {
             Variant::Standard => sd.to_vec(),
             Variant::DeArrow(ms) => {
                 let mut v = vec![crate::dearrow::thumb_url(id, ms as f64 / 1000.0)];
+                v.extend(sd);
+                v
+            }
+            Variant::Portrait => {
+                let mut v = vec![format!("https://i.ytimg.com/vi/{id}/oar2.jpg")];
                 v.extend(sd);
                 v
             }
@@ -70,6 +79,7 @@ impl Variant {
     fn max_width(self) -> u32 {
         match self {
             Variant::Standard => 320,
+            Variant::Portrait => 270,
             Variant::High | Variant::DeArrow(_) => 640,
         }
     }

@@ -285,7 +285,10 @@ pub struct App {
     was_focused: bool,
     /// Settings → Feed "hide titles containing" text, as typed.
     muted_words_buf: String,
+    settings_tab: SettingsTab,
     session_refresh: SessionRefresh,
+    /// Last background "still signed in?" probe.
+    session_checked: std::time::Instant,
     /// Now Playing: last published state and when, the channel name and
     /// thumbnail of what's playing.
     np_last: Option<(crate::nowplaying::Info, std::time::Instant)>,
@@ -391,7 +394,9 @@ impl App {
             clip_seen: String::new(),
             was_focused: false,
             muted_words_buf: String::new(),
+            settings_tab: SettingsTab::default(),
             session_refresh: SessionRefresh::Idle,
+            session_checked: std::time::Instant::now(),
             np_last: None,
             np_artist: String::new(),
             np_art: None,
@@ -419,6 +424,12 @@ impl App {
         // `ytmini --play <url|id>` opens straight into the player.
         let mut args = std::env::args().skip(1);
         while let Some(a) = args.next() {
+            // `--settings <n>`: open Settings on tab n (for screenshots)
+            if a == "--settings" {
+                let n: usize = args.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                app.settings_tab = SettingsTab::ALL[n.min(SettingsTab::ALL.len() - 1)];
+                app.show_settings = true;
+            }
             if a == "--smoke-test" {
                 if let Some(v) = args.next().as_deref().and_then(Video::from_url_or_id) {
                     app.settings.player = PlayerMode::Embedded;
@@ -1658,6 +1669,7 @@ impl App {
 
         // ----- grid -----
         self.ui_page_header(ui);
+        self.ui_filter_bar(ui);
         let mut clicked: Option<Video> = None;
         let mut open_channel: Option<Video> = None;
         let mut quick: Option<(Quick, Video)> = None;
@@ -1742,113 +1754,212 @@ impl App {
                 ThumbQuality::Auto if card_w * ui.ctx().pixels_per_point() > 380.0 => Variant::High,
                 ThumbQuality::Auto => Variant::Standard,
             };
-            let shown: Vec<&Video> = tab
-                .videos
-                .iter()
-                .filter(|v| {
-                    let watched = positions.get(&v.id).is_some_and(|e| e.watched());
-                    !settings.hides(&source, v, watched)
-                })
-                .collect();
+            // Shorts go to their own shelf on the home feed, subscriptions
+            // and search (channel/playlist pages keep them in the grid).
+            let shelf_src = matches!(
+                source,
+                Source::Feed | Source::Subscriptions | Source::Search(_)
+            );
+            let mut shown: Vec<&Video> = Vec::new();
+            let mut shorts: Vec<&Video> = Vec::new();
+            for v in &tab.videos {
+                let watched = positions.get(&v.id).is_some_and(|e| e.watched());
+                if settings.hides(&source, v, watched) {
+                    continue;
+                }
+                if shelf_src && v.is_short {
+                    if settings.show_shorts {
+                        shorts.push(v);
+                    }
+                } else {
+                    shown.push(v);
+                }
+            }
             let video_rows = shown.len().div_ceil(cols);
             let show_footer = !tab.exhausted || tab.error.is_some();
-            let rows = video_rows + usize::from(show_footer);
+
+            // rows: video rows, with the Shorts shelf after the second one
+            enum Row {
+                Videos(usize),
+                Shelf,
+                Footer,
+            }
+            let mut rows: Vec<Row> = (0..video_rows).map(Row::Videos).collect();
+            if !shorts.is_empty() {
+                rows.insert(video_rows.min(2), Row::Shelf);
+            }
+            if show_footer {
+                rows.push(Row::Footer);
+            }
+            let short_w = (card_w * 0.62).clamp(140.0, 210.0);
+            let short_thumb_h = short_w * 16.0 / 9.0;
+            let short_h = short_thumb_h + (card_h - thumb_h);
+            const SHELF_HEAD: f32 = 34.0;
+            let height = |r: &Row| match r {
+                Row::Shelf => SHELF_HEAD + short_h,
+                _ => card_h,
+            };
+            let total: f32 = rows.iter().map(|r| height(r) + GAP).sum();
+
+            let mut draw = |ui: &mut egui::Ui, v: &Video, card: CardInfo, variant: Variant| {
+                let slot = egui::Rect::from_min_size(ui.cursor().min, card.size);
+                if !v.is_playlist
+                    && ui
+                        .input(|i| i.pointer.hover_pos())
+                        .is_some_and(|p| slot.contains(p) && ui.clip_rect().contains(p))
+                {
+                    hovered_video = Some(v.clone());
+                }
+                // DeArrow: community title/thumbnail when there is one
+                let mut shown_v = std::borrow::Cow::Borrowed(v);
+                let mut card_variant = variant;
+                if let Some(map) = dearrow.filter(|_| !card.portrait) {
+                    match map.get(&v.id) {
+                        Some(Some(b)) => {
+                            if let Some(t) = &b.title {
+                                shown_v.to_mut().title = Some(t.clone());
+                            }
+                            if let Some(t) = b.thumb_time {
+                                card_variant = Variant::DeArrow((t * 1000.0) as u32);
+                            }
+                        }
+                        Some(None) => {}
+                        None if !v.is_playlist => want_branding.push(v.id.clone()),
+                        None => {}
+                    }
+                }
+                match video_card(ui, thumbs, card_variant, &shown_v, card) {
+                    CardAction::Open => clicked = Some(v.clone()),
+                    CardAction::Channel => open_channel = Some(v.clone()),
+                    CardAction::Quick(q) => quick = Some((q, v.clone())),
+                    CardAction::None => {}
+                }
+            };
+            let info = |v: &Video, size: Vec2, thumb_h: f32, portrait: bool| CardInfo {
+                size,
+                thumb_h,
+                playing: playing_id.as_deref() == Some(v.id.as_str()),
+                progress: (!v.is_playlist)
+                    .then(|| positions.get(&v.id))
+                    .flatten()
+                    .copied(),
+                m,
+                in_watch_later: source == Source::WatchLater,
+                in_history: source == Source::History,
+                download: dl_active
+                    .get(&v.id)
+                    .copied()
+                    .or_else(|| downloads.get(&v.id).map(|_| 1.0)),
+                portrait,
+            };
 
             let mut scroll = egui::ScrollArea::vertical().auto_shrink(false);
             if std::mem::take(&mut tab.scroll_to_top) {
                 scroll = scroll.vertical_scroll_offset(0.0);
             }
             ui.add_space(GAP * 0.5);
-            ui.spacing_mut().item_spacing.y = GAP;
-            scroll.show_rows(ui, card_h, rows, |ui, range| {
+            scroll.show_viewport(ui, |ui, viewport| {
+                let origin = ui.max_rect().min;
+                ui.set_min_height(total);
+                let mut y = 0.0;
+                let mut last_visible = 0;
+                for (i, row) in rows.iter().enumerate() {
+                    let h = height(row);
+                    let visible = y + h >= viewport.min.y && y <= viewport.max.y;
+                    if visible {
+                        last_visible = i;
+                        let rect = egui::Rect::from_min_size(
+                            origin + Vec2::new(GAP, y),
+                            Vec2::new(avail_w, h),
+                        );
+                        ui.scope_builder(
+                            egui::UiBuilder::new()
+                                .max_rect(rect)
+                                .layout(Layout::left_to_right(Align::Min)),
+                            |ui| {
+                                ui.spacing_mut().item_spacing.x = GAP;
+                                match row {
+                                    Row::Videos(r) => {
+                                        for &v in shown.iter().skip(r * cols).take(cols) {
+                                            let c =
+                                                info(v, Vec2::new(card_w, card_h), thumb_h, false);
+                                            draw(ui, v, c, variant);
+                                        }
+                                    }
+                                    Row::Shelf => {
+                                        ui.vertical(|ui| {
+                                            ui.spacing_mut().item_spacing.y = 0.0;
+                                            ui.allocate_ui_with_layout(
+                                                Vec2::new(avail_w, SHELF_HEAD),
+                                                Layout::left_to_right(Align::Center),
+                                                |ui| {
+                                                    ui.label(
+                                                        RichText::new("Shorts")
+                                                            .size(17.0)
+                                                            .strong()
+                                                            .color(text()),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(format!("{}", shorts.len()))
+                                                            .color(text_dim()),
+                                                    );
+                                                },
+                                            );
+                                            egui::ScrollArea::horizontal()
+                                                .id_salt("shorts")
+                                                .auto_shrink([false, true])
+                                                .show(ui, |ui| {
+                                                    ui.horizontal(|ui| {
+                                                        ui.spacing_mut().item_spacing.x =
+                                                            GAP * 0.75;
+                                                        for &v in &shorts {
+                                                            let c = info(
+                                                                v,
+                                                                Vec2::new(short_w, short_h),
+                                                                short_thumb_h,
+                                                                true,
+                                                            );
+                                                            draw(ui, v, c, Variant::Portrait);
+                                                        }
+                                                    });
+                                                });
+                                        });
+                                    }
+                                    Row::Footer => {
+                                        // spinner while the next page loads; retry on error
+                                        ui.allocate_ui_with_layout(
+                                            Vec2::new(avail_w, card_h),
+                                            Layout::top_down(Align::Center),
+                                            |ui| {
+                                                ui.add_space(12.0);
+                                                if let Some(e) =
+                                                    tab.error.as_ref().filter(|_| !tab.loading)
+                                                {
+                                                    error_box(ui, e);
+                                                    ui.add_space(8.0);
+                                                    if accent_button(ui, "Retry").clicked() {
+                                                        more = true;
+                                                    }
+                                                } else {
+                                                    ui.spinner();
+                                                }
+                                            },
+                                        );
+                                    }
+                                }
+                            },
+                        );
+                    }
+                    y += h + GAP;
+                }
                 // Infinite scroll: start fetching the next page when we're within
-                // a screenful of the end, so it's usually there before you arrive.
-                let lookahead = range.len().max(2);
-                if range.end + lookahead >= video_rows
+                // a couple of rows of the end, so it's usually there before you arrive.
+                if last_visible + 3 >= rows.len()
                     && !tab.loading
                     && !tab.exhausted
                     && tab.error.is_none()
                 {
                     more = true;
-                }
-                for row in range {
-                    ui.horizontal(|ui| {
-                        ui.add_space(GAP);
-                        ui.spacing_mut().item_spacing.x = GAP;
-                        if row < video_rows {
-                            for &v in shown.iter().skip(row * cols).take(cols) {
-                                let playing = playing_id.as_deref() == Some(v.id.as_str());
-                                let progress = (!v.is_playlist)
-                                    .then(|| positions.get(&v.id))
-                                    .flatten()
-                                    .copied();
-                                let card = CardInfo {
-                                    size: Vec2::new(card_w, card_h),
-                                    thumb_h,
-                                    playing,
-                                    progress,
-                                    m,
-                                    in_watch_later: source == Source::WatchLater,
-                                    in_history: source == Source::History,
-                                    download: dl_active
-                                        .get(&v.id)
-                                        .copied()
-                                        .or_else(|| downloads.get(&v.id).map(|_| 1.0)),
-                                };
-                                let slot = egui::Rect::from_min_size(ui.cursor().min, card.size);
-                                if !v.is_playlist
-                                    && ui
-                                        .input(|i| i.pointer.hover_pos())
-                                        .is_some_and(|p| slot.contains(p))
-                                {
-                                    hovered_video = Some(v.clone());
-                                }
-                                // DeArrow: community title/thumbnail when there is one
-                                let mut shown_v = std::borrow::Cow::Borrowed(v);
-                                let mut card_variant = variant;
-                                if let Some(map) = dearrow {
-                                    match map.get(&v.id) {
-                                        Some(Some(b)) => {
-                                            if let Some(t) = &b.title {
-                                                shown_v.to_mut().title = Some(t.clone());
-                                            }
-                                            if let Some(t) = b.thumb_time {
-                                                card_variant =
-                                                    Variant::DeArrow((t * 1000.0) as u32);
-                                            }
-                                        }
-                                        Some(None) => {}
-                                        None if !v.is_playlist => want_branding.push(v.id.clone()),
-                                        None => {}
-                                    }
-                                }
-                                match video_card(ui, thumbs, card_variant, &shown_v, card) {
-                                    CardAction::Open => clicked = Some(v.clone()),
-                                    CardAction::Channel => open_channel = Some(v.clone()),
-                                    CardAction::Quick(q) => quick = Some((q, v.clone())),
-                                    CardAction::None => {}
-                                }
-                            }
-                        } else {
-                            // footer row: spinner while the next page loads; retry on error
-                            ui.allocate_ui_with_layout(
-                                Vec2::new(avail_w, card_h),
-                                Layout::top_down(Align::Center),
-                                |ui| {
-                                    ui.add_space(12.0);
-                                    if let Some(e) = tab.error.as_ref().filter(|_| !tab.loading) {
-                                        error_box(ui, e);
-                                        ui.add_space(8.0);
-                                        if accent_button(ui, "Retry").clicked() {
-                                            more = true;
-                                        }
-                                    } else {
-                                        ui.spinner();
-                                    }
-                                },
-                            );
-                        }
-                    });
                 }
             });
         });
@@ -1923,6 +2034,42 @@ impl App {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsTab {
+    #[default]
+    Playback,
+    SponsorBlock,
+    Feed,
+    Appearance,
+    Storage,
+    Account,
+}
+
+impl SettingsTab {
+    /// Watching → what you see → how it looks → disk → account/app.
+    const ALL: [SettingsTab; 6] = [
+        SettingsTab::Playback,
+        SettingsTab::SponsorBlock,
+        SettingsTab::Feed,
+        SettingsTab::Appearance,
+        SettingsTab::Storage,
+        SettingsTab::Account,
+    ];
+    fn label(self) -> &'static str {
+        match self {
+            SettingsTab::Playback => "Playback",
+            SettingsTab::SponsorBlock => "SponsorBlock",
+            SettingsTab::Feed => "Feed",
+            SettingsTab::Appearance => "Appearance",
+            SettingsTab::Storage => "Storage",
+            SettingsTab::Account => "Account & updates",
+        }
+    }
+}
+
+/// How often to check, while the window is in front, that we're still signed in.
+const SESSION_PROBE: Duration = Duration::from_secs(30 * 60);
+
 enum SessionRefresh {
     Idle,
     Running,
@@ -1978,7 +2125,7 @@ impl App {
             Quick::MuteChannel => {
                 if let Some(ch) = v.channel.clone() {
                     self.status = Some((
-                        format!("Hiding {ch} in your feeds and search (Settings → Feed to undo)."),
+                        format!("Hiding {ch} in your feeds and search (“Muted” above the feed to undo)."),
                         false,
                     ));
                     if !self.settings.muted_channels.contains(&ch) {
@@ -2024,6 +2171,107 @@ impl App {
     }
 
     /// Back / title / Videos-Playlists switch for channel and playlist pages.
+    /// Feed filters as chips above Home, Subscriptions and search results.
+    fn ui_filter_bar(&mut self, ui: &mut egui::Ui) {
+        let feed = matches!(self.active, Source::Feed | Source::Subscriptions);
+        if !(feed || matches!(self.active, Source::Search(_))) {
+            return;
+        }
+        egui::Panel::top("filters")
+            .frame(egui::Frame::new().fill(bg()).inner_margin(Margin {
+                left: 16,
+                right: 16,
+                top: 8,
+                bottom: 2,
+            }))
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let s = &mut self.settings;
+                    if chip(ui, "Shorts", s.show_shorts)
+                        .on_hover_text("Shorts in their own row")
+                        .clicked()
+                    {
+                        s.show_shorts = !s.show_shorts;
+                    }
+                    if chip(ui, "Live", !s.hide_live)
+                        .on_hover_text("Live streams and premieres")
+                        .clicked()
+                    {
+                        s.hide_live = !s.hide_live;
+                    }
+                    if feed
+                        && chip(ui, "Watched", !s.hide_watched)
+                            .on_hover_text("Videos you've already watched")
+                            .clicked()
+                    {
+                        s.hide_watched = !s.hide_watched;
+                    }
+                    if chip(ui, "Less clickbait", s.dearrow)
+                        .on_hover_text("Community titles and thumbnails (DeArrow, experimental)")
+                        .clicked()
+                    {
+                        s.dearrow = !s.dearrow;
+                    }
+                    let n = s.muted_channels.len() + s.muted_words.len();
+                    let label = if n == 0 {
+                        "Muted ▾".to_string()
+                    } else {
+                        format!("Muted · {n} ▾")
+                    };
+                    let r = chip(ui, &label, n > 0);
+                    egui::Popup::menu(&r)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| {
+                            ui.set_width(300.0);
+                            ui.label(RichText::new("Hide titles containing").color(text_dim()));
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut self.muted_words_buf)
+                                        .hint_text("reaction, podcast clip")
+                                        .desired_width(f32::INFINITY),
+                                )
+                                .changed()
+                            {
+                                s.muted_words = self
+                                    .muted_words_buf
+                                    .split(',')
+                                    .map(|w| w.trim().to_string())
+                                    .filter(|w| !w.is_empty())
+                                    .collect();
+                            }
+                            ui.add_space(6.0);
+                            ui.label(RichText::new("Hidden channels").color(text_dim()));
+                            if s.muted_channels.is_empty() {
+                                ui.label(
+                                    RichText::new(
+                                        "None yet. Use “Hide this channel” in a video's ⋯ menu.",
+                                    )
+                                    .small()
+                                    .color(text_dim()),
+                                );
+                            }
+                            let mut unmute = None;
+                            ui.horizontal_wrapped(|ui| {
+                                for (i, ch) in s.muted_channels.iter().enumerate() {
+                                    if ui
+                                        .button(format!("{ch}  ✕"))
+                                        .on_hover_text("Show again")
+                                        .clicked()
+                                    {
+                                        unmute = Some(i);
+                                    }
+                                }
+                            });
+                            if let Some(i) = unmute {
+                                s.muted_channels.remove(i);
+                            }
+                        });
+                });
+            });
+    }
+
     fn ui_page_header(&mut self, ui: &mut egui::Ui) {
         if !self.active.is_page() {
             return;
@@ -2259,6 +2507,35 @@ impl App {
     /// copy stops signing in. Re-import from the browser we signed in with
     /// (or the first signed-in one) without bothering the user. Chromium
     /// browsers may show a Keychain prompt; "Always Allow" makes it silent.
+    /// Any signed-in call (history reporting, Watch later, the periodic
+    /// probe) that finds the session gone starts the refresh, not just feeds.
+    fn watch_session(&mut self, ctx: &egui::Context) {
+        if let Some((text, true)) = &self.status {
+            if text.contains(crate::innertube::SESSION_EXPIRED) {
+                self.status = Some((
+                    "Your YouTube session expired. Refreshing it from your browser…".into(),
+                    false,
+                ));
+                self.auto_refresh_session(ctx);
+            }
+        }
+        let focused = ctx.input(|i| i.focused);
+        if focused && self.session_checked.elapsed() > SESSION_PROBE && yt::logged_in(&self.cookies)
+        {
+            self.session_checked = std::time::Instant::now();
+            let (tx, ctx, cookies) = (self.tx.clone(), ctx.clone(), self.cookies.clone());
+            std::thread::spawn(move || {
+                if let Err(e) = crate::innertube::check_session(&cookies) {
+                    let e = format!("{e:#}");
+                    if e.contains(crate::innertube::SESSION_EXPIRED) {
+                        let _ = tx.send(Msg::Status(e, true));
+                        ctx.request_repaint();
+                    }
+                }
+            });
+        }
+    }
+
     fn auto_refresh_session(&mut self, ctx: &egui::Context) {
         match self.session_refresh {
             SessionRefresh::Running => return,
@@ -2404,241 +2681,273 @@ impl App {
         let mut check_updates = false;
         let mut clear_downloads = false;
         let before_quality = self.settings.quality;
+        let tab = &mut self.settings_tab;
         egui::Window::new("Settings")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(420.0)
-            .vscroll(true) // grows past small windows now
+            .fixed_size(Vec2::new(600.0, 440.0))
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 let s = &mut self.settings;
-                ui.add_space(4.0);
-                section(ui, "Playback");
-                egui::Grid::new("playback").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
-                    ui.label("Player");
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut s.player, PlayerMode::Embedded, "In this window");
-                        ui.selectable_value(&mut s.player, PlayerMode::Window, "Separate window");
-                    });
-                    ui.end_row();
-                    ui.label("Quality");
-                    egui::ComboBox::from_id_salt("q").selected_text(s.quality.label()).width(220.0).show_ui(ui, |ui| {
-                        for q in yt::Quality::choices(self.screen_cap) {
-                            ui.selectable_value(&mut s.quality, q, q.label());
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(140.0);
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        for t in SettingsTab::ALL {
+                            let on = *tab == t;
+                            let r = ui.add_sized(
+                                [140.0, 28.0],
+                                egui::Button::selectable(on, RichText::new(t.label()).size(14.0).color(if on { text() } else { text_dim() })),
+                            );
+                            if r.clicked() {
+                                *tab = t;
+                            }
                         }
                     });
-                    ui.end_row();
-                });
-                ui.checkbox(&mut s.mark_watched, "Add videos I watch to my YouTube history");
-                ui.checkbox(&mut s.volume_leveling, "Level volume (quiet voices up, loud parts down)");
-                ui.checkbox(&mut s.prepare_on_hover, "Start videos faster (prepare the one you're pointing at)");
-                ui.label(
-                    RichText::new(format!(
-                        "Auto never exceeds what this screen can show ({}p), and drops to 1080p30 on battery, 720p30 in Low Power Mode.",
-                        self.screen_cap
-                    ))
-                    .small()
-                    .color(text_dim()),
-                );
-
-                ui.add_space(10.0);
-                section(ui, "SponsorBlock");
-                ui.checkbox(&mut s.sponsorblock, "Skip sponsor segments and other filler");
-                if s.sponsorblock {
-                    ui.indent("sb", |ui| {
-                        for (id, label, [r, g, b]) in crate::sponsorblock::CATEGORIES {
-                            let mut on = s.sb_categories.iter().any(|c| c == id);
-                            ui.horizontal(|ui| {
-                                let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                                ui.painter().circle_filled(dot.center(), 4.0, Color32::from_rgb(r, g, b));
-                                if ui.checkbox(&mut on, label).changed() {
-                                    s.sb_categories.retain(|c| c != id);
-                                    if on {
-                                        s.sb_categories.push(id.to_string());
+                    ui.separator();
+                    egui::ScrollArea::vertical().id_salt(("settings", *tab as u8)).auto_shrink(false).show(ui, |ui| {
+                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                    ui.set_max_width(ui.available_width() - 8.0);
+                    ui.add_space(4.0);
+                    match *tab {
+                        SettingsTab::Playback => {
+                            section(ui, "Playback");
+                            egui::Grid::new("playback").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                                ui.label("Player");
+                                ui.horizontal(|ui| {
+                                    ui.selectable_value(&mut s.player, PlayerMode::Embedded, "In this window");
+                                    ui.selectable_value(&mut s.player, PlayerMode::Window, "Separate window");
+                                });
+                                ui.end_row();
+                                ui.label("Quality");
+                                egui::ComboBox::from_id_salt("q").selected_text(s.quality.label()).width(220.0).show_ui(ui, |ui| {
+                                    for q in yt::Quality::choices(self.screen_cap) {
+                                        ui.selectable_value(&mut s.quality, q, q.label());
                                     }
+                                });
+                                ui.end_row();
+                            });
+                            ui.checkbox(&mut s.mark_watched, "Add videos I watch to my YouTube history");
+                            ui.checkbox(&mut s.volume_leveling, "Level volume (quiet voices up, loud parts down)");
+                            ui.checkbox(&mut s.prepare_on_hover, "Start videos faster (prepare the one you're pointing at)");
+                            ui.label(
+                                RichText::new(format!(
+                                    "Auto never exceeds what this screen can show ({}p), and drops to 1080p30 on battery, 720p30 in Low Power Mode.",
+                                    self.screen_cap
+                                ))
+                                .small()
+                                .color(text_dim()),
+                            );
+
+                        }
+                        SettingsTab::SponsorBlock => {
+                            section(ui, "SponsorBlock");
+                            ui.checkbox(&mut s.sponsorblock, "Skip sponsor segments and other filler");
+                            if s.sponsorblock {
+                                ui.indent("sb", |ui| {
+                                    for (id, label, [r, g, b]) in crate::sponsorblock::CATEGORIES {
+                                        let mut on = s.sb_categories.iter().any(|c| c == id);
+                                        ui.horizontal(|ui| {
+                                            let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                                            ui.painter().circle_filled(dot.center(), 4.0, Color32::from_rgb(r, g, b));
+                                            if ui.checkbox(&mut on, label).changed() {
+                                                s.sb_categories.retain(|c| c != id);
+                                                if on {
+                                                    s.sb_categories.push(id.to_string());
+                                                }
+                                            }
+                                        });
+                                    }
+                                });
+                            }
+                            ui.label(
+                                RichText::new("Segments come from the SponsorBlock community (sponsor.ajay.app). Only a short hash prefix of the video id is sent, never the id itself.")
+                                    .small()
+                                    .color(text_dim()),
+                            );
+
+                        }
+                        SettingsTab::Feed => {
+                            section(ui, "Feed");
+                            ui.checkbox(&mut s.show_shorts, "Shorts (in their own row)");
+                            ui.checkbox(&mut s.dearrow, "Less clickbait: community titles and thumbnails (DeArrow, experimental)");
+                            ui.checkbox(&mut s.hide_live, "Hide live streams and premieres");
+                            ui.checkbox(&mut s.hide_watched, "Hide videos I've watched (Home and Subscriptions)");
+                            ui.horizontal(|ui| {
+                                ui.label("Hide titles containing");
+                                if ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut self.muted_words_buf)
+                                            .hint_text("reaction, podcast clip")
+                                            .desired_width(200.0),
+                                    )
+                                    .changed()
+                                {
+                                    s.muted_words = self
+                                        .muted_words_buf
+                                        .split(',')
+                                        .map(|w| w.trim().to_string())
+                                        .filter(|w| !w.is_empty())
+                                        .collect();
+                                }
+                            });
+                            if !s.muted_channels.is_empty() {
+                                ui.label("Hidden channels");
+                                let mut unmute = None;
+                                ui.horizontal_wrapped(|ui| {
+                                    for (i, ch) in s.muted_channels.iter().enumerate() {
+                                        if ui.button(format!("{ch}  ✕")).on_hover_text("Show again").clicked() {
+                                            unmute = Some(i);
+                                        }
+                                    }
+                                });
+                                if let Some(i) = unmute {
+                                    s.muted_channels.remove(i);
+                                }
+                            }
+                            ui.label(
+                                RichText::new("Filters apply to Home, Subscriptions and search, never to channel or playlist pages. Hide a channel from a video's ⋯ menu.")
+                                    .small()
+                                    .color(text_dim()),
+                            );
+
+                        }
+                        SettingsTab::Appearance => {
+                            section(ui, "Layout");
+                            ui.horizontal(|ui| {
+                                ui.label("Grid");
+                                ui.selectable_value(&mut s.density, Density::Comfortable, "Comfortable");
+                                ui.selectable_value(&mut s.density, Density::Compact, "Compact");
+                            });
+                            ui.checkbox(&mut s.sidebar_collapsed, "Sidebar: icons only");
+                            ui.add_space(10.0);
+                            section(ui, "Thumbnails");
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut s.thumbs, ThumbQuality::Auto, "Auto");
+                                ui.selectable_value(&mut s.thumbs, ThumbQuality::Standard, "Standard · 320p");
+                                ui.selectable_value(&mut s.thumbs, ThumbQuality::High, "High · 640p");
+                            });
+                            ui.label(RichText::new("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (Retina) screens.").small().color(text_dim()));
+
+                            ui.add_space(10.0);
+                            if self.tray.is_some() {
+                                section(ui, "Window");
+                                ui.checkbox(&mut s.close_to_tray, "Closing the window keeps ytmini in the menu bar");
+                                ui.label(RichText::new("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.").small().color(text_dim()));
+                                ui.add_space(10.0);
+                            }
+                        }
+                        SettingsTab::Storage => {
+                            section(ui, "Downloads");
+                            ui.horizontal(|ui| {
+                                ui.label("Quality");
+                                let label = |h: u32| if h == 0 { "Audio only".to_string() } else { format!("{h}p") };
+                                egui::ComboBox::from_id_salt("dlq").selected_text(label(s.download_height)).show_ui(ui, |ui| {
+                                    for h in [480, 720, 1080, 1440, 0] {
+                                        ui.selectable_value(&mut s.download_height, h, label(h));
+                                    }
+                                });
+                                ui.label("Keep at most");
+                                ui.add(egui::DragValue::new(&mut s.download_cap_gb).range(1..=500).suffix(" GB"));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} used · {} videos",
+                                        crate::downloads::fmt_bytes(self.downloads.total_bytes()),
+                                        self.downloads.entries.len()
+                                    ))
+                                    .color(text_dim()),
+                                );
+                                if ui.button("Show in Finder").clicked() {
+                                    if let Ok(d) = crate::downloads::dir() {
+                                        let _ = open_url(&d.display().to_string());
+                                    }
+                                }
+                                if !self.downloads.entries.is_empty() && ui.button("Delete all").clicked() {
+                                    self.downloads.clear();
+                                    clear_downloads = true;
+                                }
+                            });
+                            ui.label(
+                                RichText::new("Saved to Movies/ytmini. When full, the oldest videos you've already watched are deleted first. Hardware-friendly codecs only, so offline playback is easy on the battery.")
+                                    .small()
+                                    .color(text_dim()),
+                            );
+
+                            ui.add_space(10.0);
+                            section(ui, "Disk cache");
+                            egui::Grid::new("cache").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                                ui.label("Size limit");
+                                ui.add(
+                                    egui::Slider::new(&mut s.cache_mb, 32..=4096)
+                                        .logarithmic(true)
+                                        .suffix(" MB")
+                                        .text(""),
+                                );
+                                ui.end_row();
+                                ui.label("Keep for");
+                                ui.add(egui::Slider::new(&mut s.cache_days, 1..=365).logarithmic(true).suffix(" days"));
+                                ui.end_row();
+                                ui.label("In use");
+                                ui.horizontal(|ui| {
+                                    let used = self.cache_usage.map_or("…".into(), |b| format!("{:.1} MB", b as f64 / 1_048_576.0));
+                                    ui.label(used);
+                                    if ui.small_button("Clear").clicked() {
+                                        clear = true;
+                                    }
+                                });
+                                ui.end_row();
+                            });
+                            ui.label(
+                                RichText::new(format!(
+                                    "Recommended: {} MB, {} days — about 4,000 high-quality or 18,000 standard thumbnails, plus your last feed/subscriptions for instant startup.",
+                                    crate::settings::DEFAULT_CACHE_MB,
+                                    crate::settings::DEFAULT_CACHE_DAYS
+                                ))
+                                .small()
+                                .color(text_dim()),
+                            );
+
+                        }
+                        SettingsTab::Account => {
+                            section(ui, "YouTube account");
+                            ui.horizontal(|ui| {
+                                if let Some(src) = &s.signin_source {
+                                    let label = signin::find(&src.id, &src.profile).map(|s| s.label());
+                                    if let Some(label) = label {
+                                        if ui.button("Refresh session").on_hover_text(format!("Re-import from {label}")).clicked() {
+                                            refresh_session = true;
+                                        }
+                                    }
+                                }
+                                if ui.button("Sign in again…").clicked() {
+                                    reimport = true;
+                                }
+                            });
+                            ui.add_space(10.0);
+                            section(ui, "Components");
+                            egui::Grid::new("versions").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                                for (k, v) in &self.deps.versions {
+                                    ui.label(k);
+                                    ui.label(RichText::new(v).color(text_dim()));
+                                    ui.end_row();
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                let managed = self.tools.as_ref().is_some_and(|t| t.ytdlp_managed);
+                                if self.deps.busy {
+                                    ui.spinner();
+                                    ui.label(RichText::new(self.deps.activity.clone().unwrap_or_else(|| "Checking…".into())).small());
+                                } else if managed && ui.button("Check for yt-dlp update").clicked() {
+                                    check_updates = true;
                                 }
                             });
                         }
+                    }
                     });
-                }
-                ui.label(
-                    RichText::new("Segments come from the SponsorBlock community (sponsor.ajay.app). Only a short hash prefix of the video id is sent, never the id itself.")
-                        .small()
-                        .color(text_dim()),
-                );
-
-                ui.add_space(10.0);
-                section(ui, "Downloads");
-                ui.horizontal(|ui| {
-                    ui.label("Quality");
-                    let label = |h: u32| if h == 0 { "Audio only".to_string() } else { format!("{h}p") };
-                    egui::ComboBox::from_id_salt("dlq").selected_text(label(s.download_height)).show_ui(ui, |ui| {
-                        for h in [480, 720, 1080, 1440, 0] {
-                            ui.selectable_value(&mut s.download_height, h, label(h));
-                        }
                     });
-                    ui.label("Keep at most");
-                    ui.add(egui::DragValue::new(&mut s.download_cap_gb).range(1..=500).suffix(" GB"));
-                });
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!(
-                            "{} used · {} videos",
-                            crate::downloads::fmt_bytes(self.downloads.total_bytes()),
-                            self.downloads.entries.len()
-                        ))
-                        .color(text_dim()),
-                    );
-                    if ui.button("Show in Finder").clicked() {
-                        if let Ok(d) = crate::downloads::dir() {
-                            let _ = open_url(&d.display().to_string());
-                        }
-                    }
-                    if !self.downloads.entries.is_empty() && ui.button("Delete all").clicked() {
-                        self.downloads.clear();
-                        clear_downloads = true;
-                    }
-                });
-                ui.label(
-                    RichText::new("Saved to Movies/ytmini. When full, the oldest videos you've already watched are deleted first. Hardware-friendly codecs only, so offline playback is easy on the battery.")
-                        .small()
-                        .color(text_dim()),
-                );
-
-                ui.add_space(10.0);
-                section(ui, "Feed");
-                ui.checkbox(&mut s.show_shorts, "Show Shorts");
-                ui.checkbox(&mut s.dearrow, "Less clickbait: community titles and thumbnails (DeArrow, experimental)");
-                ui.checkbox(&mut s.hide_live, "Hide live streams and premieres");
-                ui.checkbox(&mut s.hide_watched, "Hide videos I've watched (Home and Subscriptions)");
-                ui.horizontal(|ui| {
-                    ui.label("Hide titles containing");
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.muted_words_buf)
-                                .hint_text("reaction, podcast clip")
-                                .desired_width(200.0),
-                        )
-                        .changed()
-                    {
-                        s.muted_words = self
-                            .muted_words_buf
-                            .split(',')
-                            .map(|w| w.trim().to_string())
-                            .filter(|w| !w.is_empty())
-                            .collect();
-                    }
-                });
-                if !s.muted_channels.is_empty() {
-                    ui.label("Hidden channels");
-                    let mut unmute = None;
-                    ui.horizontal_wrapped(|ui| {
-                        for (i, ch) in s.muted_channels.iter().enumerate() {
-                            if ui.button(format!("{ch}  ✕")).on_hover_text("Show again").clicked() {
-                                unmute = Some(i);
-                            }
-                        }
-                    });
-                    if let Some(i) = unmute {
-                        s.muted_channels.remove(i);
-                    }
-                }
-                ui.label(
-                    RichText::new("Filters apply to Home, Subscriptions and search, never to channel or playlist pages. Hide a channel from a video's ⋯ menu.")
-                        .small()
-                        .color(text_dim()),
-                );
-
-                ui.add_space(10.0);
-                section(ui, "Layout");
-                ui.horizontal(|ui| {
-                    ui.label("Grid");
-                    ui.selectable_value(&mut s.density, Density::Comfortable, "Comfortable");
-                    ui.selectable_value(&mut s.density, Density::Compact, "Compact");
-                });
-                ui.checkbox(&mut s.sidebar_collapsed, "Sidebar: icons only");
-                ui.add_space(10.0);
-                section(ui, "Thumbnails");
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut s.thumbs, ThumbQuality::Auto, "Auto");
-                    ui.selectable_value(&mut s.thumbs, ThumbQuality::Standard, "Standard · 320p");
-                    ui.selectable_value(&mut s.thumbs, ThumbQuality::High, "High · 640p");
-                });
-                ui.label(RichText::new("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (Retina) screens.").small().color(text_dim()));
-
-                ui.add_space(10.0);
-                section(ui, "Disk cache");
-                egui::Grid::new("cache").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
-                    ui.label("Size limit");
-                    ui.add(
-                        egui::Slider::new(&mut s.cache_mb, 32..=4096)
-                            .logarithmic(true)
-                            .suffix(" MB")
-                            .text(""),
-                    );
-                    ui.end_row();
-                    ui.label("Keep for");
-                    ui.add(egui::Slider::new(&mut s.cache_days, 1..=365).logarithmic(true).suffix(" days"));
-                    ui.end_row();
-                    ui.label("In use");
-                    ui.horizontal(|ui| {
-                        let used = self.cache_usage.map_or("…".into(), |b| format!("{:.1} MB", b as f64 / 1_048_576.0));
-                        ui.label(used);
-                        if ui.small_button("Clear").clicked() {
-                            clear = true;
-                        }
-                    });
-                    ui.end_row();
-                });
-                ui.label(
-                    RichText::new(format!(
-                        "Recommended: {} MB, {} days — about 4,000 high-quality or 18,000 standard thumbnails, plus your last feed/subscriptions for instant startup.",
-                        crate::settings::DEFAULT_CACHE_MB,
-                        crate::settings::DEFAULT_CACHE_DAYS
-                    ))
-                    .small()
-                    .color(text_dim()),
-                );
-
-                ui.add_space(10.0);
-                if self.tray.is_some() {
-                    section(ui, "Window");
-                    ui.checkbox(&mut s.close_to_tray, "Closing the window keeps ytmini in the menu bar");
-                    ui.label(RichText::new("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.").small().color(text_dim()));
-                    ui.add_space(10.0);
-                }
-                section(ui, "Components");
-                egui::Grid::new("versions").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-                    for (k, v) in &self.deps.versions {
-                        ui.label(k);
-                        ui.label(RichText::new(v).color(text_dim()));
-                        ui.end_row();
-                    }
-                });
-                ui.horizontal(|ui| {
-                    let managed = self.tools.as_ref().is_some_and(|t| t.ytdlp_managed);
-                    if self.deps.busy {
-                        ui.spinner();
-                        ui.label(RichText::new(self.deps.activity.clone().unwrap_or_else(|| "Checking…".into())).small());
-                    } else if managed && ui.button("Check for yt-dlp update").clicked() {
-                        check_updates = true;
-                    }
-                });
-                ui.add_space(10.0);
-                section(ui, "Account");
-                ui.horizontal(|ui| {
-                    if let Some(src) = &self.settings.signin_source {
-                        let label = signin::find(&src.id, &src.profile).map(|s| s.label());
-                        if let Some(label) = label {
-                            if ui.button("Refresh session").on_hover_text(format!("Re-import from {label}")).clicked() {
-                                refresh_session = true;
-                            }
-                        }
-                    }
-                    if ui.button("Sign in again…").clicked() {
-                        reimport = true;
-                    }
                 });
             });
         if !open || reimport || refresh_session {
@@ -3148,6 +3457,7 @@ impl eframe::App for App {
         self.track_positions(ctx);
         self.poll_signin(ctx);
         self.poll_links(ctx);
+        self.watch_session(ctx);
         self.sync_now_playing();
         if let Some(e) = &mut self.embedded {
             e.poll_events();
@@ -3329,6 +3639,8 @@ struct CardInfo {
     in_history: bool,
     /// None: not downloaded; Some(1.0): downloaded; less: in progress.
     download: Option<f32>,
+    /// A Short: 9:16 cover, no duration badge.
+    portrait: bool,
 }
 
 fn video_card(
@@ -3347,6 +3659,7 @@ fn video_card(
         in_watch_later,
         in_history,
         download,
+        portrait,
     } = info;
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if !ui.is_rect_visible(rect) {
@@ -3382,7 +3695,26 @@ fn video_card(
         } else {
             Color32::WHITE
         };
+        // cover: crop a landscape fallback to fill a portrait slot (and vice versa)
+        let [tw, th] = tex.size().map(|x| x as f32);
+        let (want, have) = (thumb.width() / thumb.height(), tw / th.max(1.0));
+        let uv = if (want - have).abs() < 0.02 {
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
+        } else if have > want {
+            let w = want / have;
+            egui::Rect::from_min_max(
+                egui::pos2(0.5 - w / 2.0, 0.0),
+                egui::pos2(0.5 + w / 2.0, 1.0),
+            )
+        } else {
+            let h = have / want;
+            egui::Rect::from_min_max(
+                egui::pos2(0.0, 0.5 - h / 2.0),
+                egui::pos2(1.0, 0.5 + h / 2.0),
+            )
+        };
         egui::Image::from_texture(egui::load::SizedTexture::from_handle(tex))
+            .uv(uv)
             .corner_radius(tr)
             .tint(base.gamma_multiply(shown))
             .paint_at(ui, thumb);
@@ -3411,21 +3743,24 @@ fn video_card(
         v.duration_label()
     };
     let live = dur == "LIVE";
+    let no_badge = dur.trim_start_matches("✓ ").is_empty();
     let g = painter.layout_no_wrap(dur, FontId::proportional(11.5), Color32::WHITE);
     let badge = egui::Rect::from_min_size(
         thumb.right_bottom() - g.size() - Vec2::new(12.0, 10.0),
         g.size() + Vec2::new(8.0, 4.0),
     );
-    painter.rect_filled(
-        badge,
-        4,
-        if live {
-            Color32::from_rgb(0xE5, 0x2D, 0x27)
-        } else {
-            Color32::from_black_alpha(190)
-        },
-    );
-    painter.galley(badge.min + Vec2::new(4.0, 2.0), g, Color32::WHITE);
+    if (!portrait || live) && !no_badge {
+        painter.rect_filled(
+            badge,
+            4,
+            if live {
+                Color32::from_rgb(0xE5, 0x2D, 0x27)
+            } else {
+                Color32::from_black_alpha(190)
+            },
+        );
+        painter.galley(badge.min + Vec2::new(4.0, 2.0), g, Color32::WHITE);
+    }
 
     // title (max 2 lines)
     let text_w = rect.width() - 2.0 * m.pad;
@@ -3706,6 +4041,32 @@ fn open_url(url: &str) -> std::io::Result<()> {
     let mut child = c.arg(url).spawn()?;
     std::thread::spawn(move || child.wait());
     Ok(())
+}
+
+/// A toggle pill: filled when on.
+fn chip(ui: &mut egui::Ui, label: &str, on: bool) -> egui::Response {
+    let text = RichText::new(label)
+        .size(13.0)
+        .color(if on { text() } else { text_dim() });
+    ui.add(
+        egui::Button::new(text)
+            .fill(if on {
+                card_hover()
+            } else {
+                Color32::TRANSPARENT
+            })
+            .stroke(Stroke::new(
+                1.0,
+                if on {
+                    Color32::TRANSPARENT
+                } else {
+                    card_hover()
+                },
+            ))
+            .corner_radius(14)
+            .min_size(Vec2::new(0.0, 26.0)),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
