@@ -287,4 +287,7 @@ pub const T: &[(&str, &str)] = &[
     ("Unsubscribe from {}", "取消订阅 {}"),
     ("YouTube returned no suggestions", "YouTube 没有返回推荐"),
     ("{} crash logs", "{} 个崩溃日志"),
+    ("Description", "说明"),
+    ("Show less", "收起"),
+    ("Show more", "展开"),
 ];

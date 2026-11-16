@@ -287,4 +287,7 @@ pub const T: &[(&str, &str)] = &[
     ("Unsubscribe from {}", "{} 구독 취소"),
     ("YouTube returned no suggestions", "YouTube가 추천을 반환하지 않았습니다"),
     ("{} crash logs", "충돌 로그 {}개"),
+    ("Description", "설명"),
+    ("Show less", "간략히"),
+    ("Show more", "더보기"),
 ];

@@ -287,4 +287,7 @@ pub const T: &[(&str, &str)] = &[
     ("Unsubscribe from {}", "{} の登録を解除"),
     ("YouTube returned no suggestions", "YouTube からおすすめが返されませんでした"),
     ("{} crash logs", "{} 件のクラッシュログ"),
+    ("Description", "説明"),
+    ("Show less", "一部を表示"),
+    ("Show more", "もっと見る"),
 ];

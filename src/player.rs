@@ -1102,8 +1102,6 @@ pub struct Actions {
     pub video_rect: Option<egui::Rect>,
     /// The controls (and so the overlay) are showing: the mouse moved lately.
     pub controls_visible: bool,
-    /// The header row and the width kept free at its right.
-    pub header: Option<(egui::Rect, f32)>,
 }
 
 pub struct ViewCtx<'a> {
@@ -1120,8 +1118,6 @@ pub struct ViewCtx<'a> {
     pub autoplay_in: Option<f32>,
     /// The Up next overlay's state for its toggle (`None`: no toggle).
     pub panel_open: Option<bool>,
-    /// Width to keep free at the right of the header (the app's buttons).
-    pub header_reserve: f32,
 }
 
 pub const CONTROLS_H: f32 = 64.0;
@@ -1134,8 +1130,7 @@ impl Embedded {
 
         // Header (hidden in fullscreen)
         if !v.fullscreen {
-            let reserve = v.header_reserve.min(ui.available_width() * 0.5);
-            let row = ui.horizontal(|ui| {
+            ui.horizontal(|ui| {
                 ui.add_space(12.0);
                 if ui
                     .add(
@@ -1148,7 +1143,7 @@ impl Embedded {
                 }
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(8.0 + reserve);
+                    ui.add_space(8.0);
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         ui.add(
                             egui::Label::new(egui::RichText::new(&self.title).size(16.0).strong())
@@ -1157,7 +1152,6 @@ impl Embedded {
                     });
                 });
             });
-            act.header = Some((row.response.rect, reserve));
             ui.add_space(6.0);
         }
 

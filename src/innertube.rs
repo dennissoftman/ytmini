@@ -788,6 +788,9 @@ pub struct WatchInfo {
     pub subscribers: Option<String>,
     /// Continuation token of the comments (None: comments are off).
     pub comments: Option<String>,
+    /// "448 699 364 просмотра", "23 апр. 2005 г." as YouTube writes them.
+    pub views: Option<String>,
+    pub date: Option<String>,
 }
 
 fn watch_info(r: &Value) -> WatchInfo {
@@ -797,6 +800,8 @@ fn watch_info(r: &Value) -> WatchInfo {
         .and_then(Value::as_array);
     for c in contents.into_iter().flatten() {
         if let Some(p) = c.get("videoPrimaryInfoRenderer") {
+            w.views = text(p.pointer("/viewCount/videoViewCountRenderer/viewCount"));
+            w.date = text(p.get("dateText"));
             let seg = p
                 .pointer("/videoActions/menuRenderer/topLevelButtons")
                 .and_then(Value::as_array)

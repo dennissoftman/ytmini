@@ -21,6 +21,7 @@ mod settings;
 mod signin;
 mod sponsorblock;
 mod storyboard;
+mod textlinks;
 mod theme;
 mod thumbs;
 mod tray;

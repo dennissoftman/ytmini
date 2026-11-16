@@ -108,6 +108,8 @@ enum Msg {
     Watch(String, crate::innertube::WatchInfo),
     /// A page of comments for a video (`append`: a later page).
     Comments(String, Result<crate::innertube::CommentsPage, String>, bool),
+    /// The video's description (from the player endpoint).
+    Description(String, String),
     /// Your rating didn't reach YouTube: back to this.
     Rated(String, crate::innertube::Like),
     /// Subscription state of a channel (a failed change rolled back).
@@ -378,6 +380,10 @@ pub struct App {
     queue_drag: Option<usize>,
     /// Rating / channel / comments token of the playing video.
     watch: Option<(String, crate::innertube::WatchInfo)>,
+    /// Description of the playing video: (id, text).
+    description: Option<(String, String)>,
+    /// "Show more" pressed on it.
+    desc_expanded: bool,
     /// Which list the overlay shows.
     panel_tab: PanelTab,
     comments: CommentsState,
@@ -521,6 +527,8 @@ impl App {
             overlay_rect: None,
             watch: None,
             panel_tab: PanelTab::UpNext,
+            description: None,
+            desc_expanded: false,
             comments: CommentsState::default(),
             save: None,
             session_refresh: SessionRefresh::Idle,
@@ -1155,6 +1163,12 @@ impl App {
                         self.watch = Some((id, info));
                     }
                 }
+                Msg::Description(id, d) => {
+                    if self.playing_id() == Some(id.as_str()) {
+                        self.description = Some((id, d));
+                        self.desc_expanded = false;
+                    }
+                }
                 Msg::Rated(id, like) => {
                     if let Some((_, w)) = self.watch.as_mut().filter(|(w, _)| *w == id) {
                         w.like = like;
@@ -1558,6 +1572,7 @@ impl App {
                     }
                     std::thread::spawn(move || {
                         if let Ok(e) = crate::innertube::player_extras(&cookies, &id) {
+                            let _ = tx.send(Msg::Description(id.clone(), e.description.clone()));
                             let chapters = crate::innertube::chapters(&id)
                                 .ok()
                                 .filter(|c| !c.is_empty())
@@ -3300,12 +3315,7 @@ impl App {
     /// Beside the video: your queue (reorder, remove, clear), the rest of an
     /// ordered list you started from, then YouTube's suggestions. Returns a
     /// video to play now.
-    fn ui_up_next(
-        &mut self,
-        ctx: &egui::Context,
-        video: egui::Rect,
-        fullscreen: bool,
-    ) -> Option<Video> {
+    fn ui_up_next(&mut self, ctx: &egui::Context, video: egui::Rect) -> Option<Video> {
         // Shown while the controls are (the mouse moved lately), while you
         // point at it, drag in it or have the Save window open; otherwise it
         // slides out to the right with the controls.
@@ -3355,18 +3365,10 @@ impl App {
                         ui.set_min_size(inner);
                         ui.set_max_size(inner);
                         crate::theme::on_dark(|| {
-                            if fullscreen {
-                                // no header in fullscreen: the actions live here
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    ui.set_height(30.0);
-                                    self.ui_video_actions(ui);
-                                });
-                                ui.add_space(6.0);
-                            }
                             ui.horizontal(|ui| {
                                 for (tab, label) in [
                                     (PanelTab::UpNext, t("Up next")),
-                                    (PanelTab::Comments, t("Comments")),
+                                    (PanelTab::Comments, t("Description")),
                                 ] {
                                     if pill(ui, label, self.panel_tab == tab).clicked() {
                                         self.panel_tab = tab;
@@ -3388,66 +3390,143 @@ impl App {
         play
     }
 
-    /// 👍 / 👎 / Subscribe / Save for the playing video. Lays out right to
-    /// left (the parent's layout), so the order below is reversed.
-    fn ui_video_actions(&mut self, ui: &mut egui::Ui) {
+    /// The description card: title, channel with Subscribe, like / dislike /
+    /// Save, views and date, then the description with clickable timestamps.
+    /// Returns a position to seek to.
+    fn ui_about_card(&mut self, ui: &mut egui::Ui, cur: &str) -> Option<f64> {
         use crate::innertube::Like;
-        let Some(id) = self.playing_id().map(str::to_string) else {
-            return;
-        };
-        let Some(info) = self
+        let ctx = ui.ctx().clone();
+        let info = self
             .watch
             .as_ref()
-            .filter(|(w, _)| *w == id)
-            .map(|(_, i)| i.clone())
-        else {
-            return;
-        };
-        let ctx = ui.ctx().clone();
-        ui.spacing_mut().item_spacing.x = 6.0;
-        if pill(ui, &format!("＋ {}", t("Save")), false)
-            .on_hover_text(t("Save to playlist…"))
-            .clicked()
-        {
-            if let Some(v) = self.current_video() {
-                self.open_save(&ctx, v);
-            }
-        }
-        if let (Some(cid), Some(sub)) = (info.channel_id.clone(), info.subscribed) {
-            let channel = info.channel.clone().unwrap_or_default();
-            let tip = match &info.subscribers {
-                Some(n) => format!("{channel} · {n}"),
-                None => channel.clone(),
-            };
-            let r = pill(ui, if sub { t("Subscribed") } else { t("Subscribe") }, !sub)
-                .on_hover_text(tip);
-            if sub {
-                egui::Popup::menu(&r).show(|ui| {
-                    if ui.button(tf("Unsubscribe from {}", &[&channel])).clicked() {
-                        self.subscribe(&ctx, &cid, false);
+            .filter(|(w, _)| w == cur)
+            .map(|(_, i)| i.clone());
+        let title = self
+            .current_video()
+            .map(|v| v.title().to_string())
+            .unwrap_or_default();
+        let mut seek = None;
+        egui::Frame::new()
+            .fill(Color32::from_white_alpha(14))
+            .corner_radius(12)
+            .inner_margin(Margin::same(12))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(
+                    egui::Label::new(RichText::new(&title).size(15.0).strong().color(text()))
+                        .wrap(),
+                );
+                let Some(info) = info else {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(RichText::new(t("Loading…")).color(text_dim()));
+                    });
+                    return;
+                };
+                ui.add_space(6.0);
+                // channel · subscribers            [Subscribe]
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(info.channel.clone().unwrap_or_default())
+                                .size(13.5)
+                                .strong()
+                                .color(text()),
+                        );
+                        if let Some(n) = &info.subscribers {
+                            ui.label(RichText::new(n).size(11.5).color(text_dim()));
+                        }
+                    });
+                    if let (Some(cid), Some(sub)) = (info.channel_id.clone(), info.subscribed) {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let channel = info.channel.clone().unwrap_or_default();
+                            let r =
+                                pill(ui, if sub { t("Subscribed") } else { t("Subscribe") }, !sub);
+                            if sub {
+                                egui::Popup::menu(&r).show(|ui| {
+                                    if ui.button(tf("Unsubscribe from {}", &[&channel])).clicked() {
+                                        self.subscribe(&ctx, &cid, false);
+                                    }
+                                });
+                            } else if r.clicked() {
+                                self.subscribe(&ctx, &cid, true);
+                            }
+                        });
                     }
                 });
-            } else if r.clicked() {
-                self.subscribe(&ctx, &cid, true);
-            }
-        }
-        if icon_pill(ui, Glyph::ThumbDown, None, info.like == Like::Dislike)
-            .on_hover_text(t("Dislike"))
-            .clicked()
-        {
-            self.rate(&ctx, Like::Dislike);
-        }
-        if icon_pill(
-            ui,
-            Glyph::ThumbUp,
-            info.like_count.as_deref(),
-            info.like == Like::Like,
-        )
-        .on_hover_text(t("Like"))
-        .clicked()
-        {
-            self.rate(&ctx, Like::Like);
-        }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    if icon_pill(
+                        ui,
+                        Glyph::ThumbUp,
+                        info.like_count.as_deref(),
+                        info.like == Like::Like,
+                    )
+                    .on_hover_text(t("Like"))
+                    .clicked()
+                    {
+                        self.rate(&ctx, Like::Like);
+                    }
+                    if icon_pill(ui, Glyph::ThumbDown, None, info.like == Like::Dislike)
+                        .on_hover_text(t("Dislike"))
+                        .clicked()
+                    {
+                        self.rate(&ctx, Like::Dislike);
+                    }
+                    if pill(ui, &format!("＋ {}", t("Save")), false)
+                        .on_hover_text(t("Save to playlist…"))
+                        .clicked()
+                    {
+                        if let Some(v) = self.current_video() {
+                            self.open_save(&ctx, v);
+                        }
+                    }
+                });
+                let meta: Vec<&str> = [info.views.as_deref(), info.date.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                if !meta.is_empty() {
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(meta.join(" · "))
+                            .size(12.0)
+                            .strong()
+                            .color(text_dim()),
+                    );
+                }
+                let desc = self
+                    .description
+                    .as_ref()
+                    .filter(|(d, _)| d == cur)
+                    .map(|(_, d)| d.clone());
+                if let Some(d) = desc.filter(|d| !d.trim().is_empty()) {
+                    ui.add_space(4.0);
+                    const FOLD: usize = 8;
+                    let lines: Vec<&str> = d.lines().collect();
+                    let long = lines.len() > FOLD + 2;
+                    let shown = if long && !self.desc_expanded {
+                        &lines[..FOLD]
+                    } else {
+                        &lines[..]
+                    };
+                    if let Some(t) = rich_text(ui, &shown.join("\n"), 13.0, text()) {
+                        seek = Some(t);
+                    }
+                    if long {
+                        let label = if self.desc_expanded {
+                            t("Show less")
+                        } else {
+                            t("Show more")
+                        };
+                        if ui.link(RichText::new(label).strong()).clicked() {
+                            self.desc_expanded = !self.desc_expanded;
+                        }
+                    }
+                }
+            });
+        seek
     }
 
     /// Like / dislike (again: clear). Shown at once; rolled back if YouTube refuses.
@@ -3622,7 +3701,8 @@ impl App {
         });
     }
 
-    /// Read-only comments, a page at a time as you scroll.
+    /// The description card, then the comments (read-only, a page at a
+    /// time as you scroll). Timestamps in either seek the video.
     fn comments_body(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let Some(cur) = self.playing_id().map(str::to_string) else {
@@ -3642,23 +3722,28 @@ impl App {
         if !self.comments.started && info.as_ref().is_some_and(|i| i.comments.is_some()) {
             self.load_comments(&ctx, false);
         }
-        let (mut more, mut retry) = (false, false);
-        let c = &self.comments;
+        let (mut more, mut retry, mut seek) = (false, false, None);
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
-                if let Some(n) = &c.count {
-                    ui.label(RichText::new(n).color(text_dim()));
-                    ui.add_space(4.0);
-                }
-                match &info {
-                    None => {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(RichText::new(t("Loading…")).color(text_dim()));
-                        });
-                        return;
+                seek = self.ui_about_card(ui, &cur);
+                ui.add_space(14.0);
+                let c = &self.comments;
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(t("Comments"))
+                            .size(15.0)
+                            .strong()
+                            .color(text()),
+                    );
+                    if let Some(n) = &c.count {
+                        // "10 644 364 комментария": the number is enough here
+                        let num: String = n.chars().take_while(|ch| !ch.is_alphabetic()).collect();
+                        ui.label(RichText::new(num.trim()).color(text_dim()));
                     }
+                });
+                match &info {
+                    None => return,
                     Some(i) if i.comments.is_none() => {
                         ui.label(RichText::new(t("Comments are turned off")).color(text_dim()));
                         return;
@@ -3666,7 +3751,9 @@ impl App {
                     _ => {}
                 }
                 for cm in &c.items {
-                    comment_row(ui, cm);
+                    if let Some(t) = comment_row(ui, cm) {
+                        seek = Some(t);
+                    }
                 }
                 if c.loading {
                     ui.horizontal(|ui| {
@@ -3691,6 +3778,10 @@ impl App {
                     }
                 }
             });
+        if let (Some(t), Some(p)) = (seek, self.embedded.as_mut()) {
+            p.seek_absolute(t, true);
+            p.poke();
+        }
         if more {
             self.load_comments(&ctx, true);
         } else if retry {
@@ -4015,7 +4106,6 @@ impl App {
         }
         let mut jump: Option<Video> = None;
         let mut video_rect = egui::Rect::NOTHING;
-        let mut header: Option<(egui::Rect, f32)> = None;
         if let (Some(p), Some(surface), Some(gl)) =
             (&mut self.embedded, &mut self.surface, frame.gl())
         {
@@ -4030,7 +4120,6 @@ impl App {
                 next: q_next,
                 autoplay_in,
                 panel_open: Some(self.up_next_open),
-                header_reserve: 330.0,
             };
             let act = p.ui(ui, view);
             go_next |= act.next;
@@ -4040,7 +4129,6 @@ impl App {
                 self.up_next_anchor.clear();
             }
             video_rect = act.video_rect.unwrap_or(egui::Rect::NOTHING);
-            header = act.header;
             self.controls_visible = act.controls_visible;
             if act.cancel_autoplay {
                 self.autoplay_cancelled = true;
@@ -4057,23 +4145,8 @@ impl App {
             }
         }
 
-        // 👍 / 👎 / Subscribe / Save at the right of the header
-        if let Some((hr, w)) = header.filter(|(_, w)| *w > 0.0) {
-            let r = egui::Rect::from_min_max(
-                egui::pos2(hr.right() - w - 8.0, hr.top()),
-                egui::pos2(hr.right() - 8.0, hr.bottom()),
-            );
-            ui.scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(r)
-                    .layout(Layout::right_to_left(Align::Center)),
-                |ui| {
-                    self.ui_video_actions(ui);
-                },
-            );
-        }
         if self.embedded.is_some() {
-            if let Some(v) = self.ui_up_next(&ctx, video_rect, fullscreen) {
+            if let Some(v) = self.ui_up_next(&ctx, video_rect) {
                 jump = Some(v);
             }
         }
@@ -5310,24 +5383,30 @@ fn icon_pill(ui: &mut egui::Ui, icon: Glyph, label: Option<&str>, strong: bool) 
 }
 
 /// A rounded, borderless button; `strong`: filled with the accent colour.
+/// Drawn by hand so it never changes size on hover (egui's buttons grow).
 fn pill(ui: &mut egui::Ui, label: &str, strong: bool) -> egui::Response {
     let (fill, color) = if strong {
         (accent(), on_accent())
     } else {
         (card_hover(), text())
     };
-    ui.add(
-        egui::Button::new(RichText::new(label).size(13.0).color(color))
-            .fill(fill)
-            .stroke(Stroke::NONE)
-            .corner_radius(14)
-            .min_size(Vec2::new(0.0, 28.0)),
-    )
-    .on_hover_cursor(egui::CursorIcon::PointingHand)
+    let g = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), FontId::proportional(13.0), color);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(g.size().x + 24.0, 28.0), Sense::click());
+    let hover = ui
+        .ctx()
+        .animate_bool_with_time(resp.id, resp.hovered(), 0.12);
+    let fill = fill.lerp_to_gamma(Color32::WHITE, 0.08 * hover);
+    ui.painter().rect_filled(rect, 14, fill);
+    ui.painter()
+        .galley(rect.center() - g.size() / 2.0, g, color);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// One comment: author, when, text, likes and replies.
-fn comment_row(ui: &mut egui::Ui, c: &crate::innertube::Comment) {
+/// One comment: author, when, text, likes and replies. Returns a clicked
+/// timestamp.
+fn comment_row(ui: &mut egui::Ui, c: &crate::innertube::Comment) -> Option<f64> {
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
@@ -5345,7 +5424,7 @@ fn comment_row(ui: &mut egui::Ui, c: &crate::innertube::Comment) {
             ui.label(RichText::new(t("Pinned")).size(11.5).color(text_dim()));
         }
     });
-    ui.add(egui::Label::new(RichText::new(&c.text).size(13.0).color(text())).wrap());
+    let seek = rich_text(ui, &c.text, 13.0, text());
     if !c.likes.is_empty() || !c.replies.is_empty() {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
@@ -5361,6 +5440,50 @@ fn comment_row(ui: &mut egui::Ui, c: &crate::innertube::Comment) {
         });
     }
     ui.add_space(4.0);
+    seek
+}
+
+/// Text with clickable timestamps (returned when clicked) and links (opened
+/// in the browser).
+fn rich_text(ui: &mut egui::Ui, s: &str, size: f32, color: Color32) -> Option<f64> {
+    use crate::textlinks::{segments, Seg};
+    let mut seek = None;
+    for line in s.lines() {
+        if line.trim().is_empty() {
+            ui.add_space(size * 0.6);
+            continue;
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for seg in segments(line) {
+                match seg {
+                    Seg::Text(t) => {
+                        ui.label(RichText::new(t).size(size).color(color));
+                    }
+                    Seg::Time(t, secs) => {
+                        if ui
+                            .link(RichText::new(t).size(size).color(accent()))
+                            .clicked()
+                        {
+                            seek = Some(secs);
+                        }
+                    }
+                    Seg::Url(u) => {
+                        let shown = u
+                            .trim_start_matches("https://")
+                            .trim_start_matches("http://");
+                        let r = ui
+                            .link(RichText::new(shown).size(size).color(accent()))
+                            .on_hover_text(u);
+                        if r.clicked() {
+                            let _ = open_url(u);
+                        }
+                    }
+                }
+            }
+        });
+    }
+    seek
 }
 
 /// A small round icon button floating over a row (queue / suggestions).

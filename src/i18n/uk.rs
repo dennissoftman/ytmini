@@ -287,4 +287,7 @@ pub const T: &[(&str, &str)] = &[
     ("Unsubscribe from {}", "Відписатися від {}"),
     ("YouTube returned no suggestions", "YouTube не повернув рекомендацій"),
     ("{} crash logs", "{} звіт про збій|{} звіти про збої|{} звітів про збої"),
+    ("Description", "Опис"),
+    ("Show less", "Згорнути"),
+    ("Show more", "Ще"),
 ];

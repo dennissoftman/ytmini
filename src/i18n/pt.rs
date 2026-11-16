@@ -287,4 +287,7 @@ pub const T: &[(&str, &str)] = &[
     ("Unsubscribe from {}", "Cancelar inscrição em {}"),
     ("YouTube returned no suggestions", "O YouTube não retornou sugestões"),
     ("{} crash logs", "{} relatório de falha|{} relatórios de falhas"),
+    ("Description", "Descrição"),
+    ("Show less", "Mostrar menos"),
+    ("Show more", "Mostrar mais"),
 ];
