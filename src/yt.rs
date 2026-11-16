@@ -1112,7 +1112,6 @@ pub fn play(
     cookies: &Path,
     video: &Video,
     profile: &Profile,
-    mark_watched: bool,
     resume: Option<f64>,
 ) -> Result<Child> {
     let mpv = tools
@@ -1139,8 +1138,6 @@ pub fn play(
         .arg("--keep-open=no")
         .arg(format!("--input-ipc-server={}", ipc_path().display()))
         .arg(format!("--title={} — ytmini", video.title()))
-        // yt-dlp reports the view to YouTube so it lands in the account's watch history.
-        .args(mark_watched.then_some("--ytdl-raw-options-append=mark-watched="))
         .args(
             tools
                 .ytdl_raw_options()
@@ -1487,7 +1484,6 @@ mod live {
             &c,
             &v,
             &profile(Quality::Auto, power_state(), 1080),
-            false,
             None,
         )
         .unwrap();
@@ -1514,7 +1510,6 @@ mod live {
             &c,
             &v,
             &profile(Quality::Max(1080), Power::default(), 2160),
-            false,
             None,
         )
         .unwrap();

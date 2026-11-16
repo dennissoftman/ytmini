@@ -117,6 +117,8 @@ enum Msg {
     ExternalProgress(String, f64, f64),
     /// Is the sign-in browser profile signed in to Google yet?
     SignInCheck(Result<bool, String>),
+    /// A message for the status bar (text, is_error).
+    Status(String, bool),
     /// Watch later add (true) / remove finished for a video id.
     WatchLater(bool, String, Result<String, String>),
 }
@@ -682,7 +684,13 @@ impl App {
         self.importing = Some(spec.clone());
         let (tx, ctx, cookies) = (self.tx.clone(), ctx.clone(), self.cookies.clone());
         std::thread::spawn(move || {
-            let r = yt::import_cookies(&tools, &spec, &cookies).map_err(|e| format!("{e:#}"));
+            // A plain browser name ("firefox", "chrome"): read its newest profile
+            // ourselves; custom specs, Safari and failures go through yt-dlp.
+            let session = signin::sessions().into_iter().find(|s| s.id == spec.trim());
+            let r = session
+                .map(|s| import_session(&tools, &s, &cookies))
+                .unwrap_or_else(|| yt::import_cookies(&tools, &spec, &cookies))
+                .map_err(|e| format!("{e:#}"));
             let _ = tx.send(Msg::Imported(r));
             ctx.request_repaint();
         });
@@ -851,6 +859,7 @@ impl App {
                     }
                 }
                 Msg::SignInCheck(r) => self.on_signin_check(ctx, r),
+                Msg::Status(text, is_err) => self.status = Some((text, is_err)),
                 Msg::WatchLater(add, id, r) => {
                     match r {
                         Ok(msg) => self.status = Some((msg, false)),
@@ -873,6 +882,18 @@ impl App {
 
     fn play(&mut self, video: &Video) {
         self.stop_player();
+        // Report the view so it shows in YouTube's watch history (as the website does).
+        if self.settings.mark_watched && self.smoke.is_none() {
+            let (tx, cookies, id) = (self.tx.clone(), self.cookies.clone(), video.id.clone());
+            std::thread::spawn(move || {
+                if let Err(e) = crate::innertube::mark_watched(&cookies, &id) {
+                    let _ = tx.send(Msg::Status(
+                        format!("Couldn't add to YouTube history: {e:#}"),
+                        true,
+                    ));
+                }
+            });
+        }
         if self.settings.player == PlayerMode::Embedded && self.gpa.is_some() {
             match mpv::available() {
                 Ok(()) => {
@@ -967,14 +988,7 @@ impl App {
         self.power = yt::power_state();
         let profile = yt::profile(self.settings.quality, self.power, self.screen_cap);
         let resume = self.positions.resume_at(&video.id);
-        match yt::play(
-            tools,
-            &self.cookies,
-            video,
-            &profile,
-            self.settings.mark_watched,
-            resume,
-        ) {
+        match yt::play(tools, &self.cookies, video, &profile, resume) {
             Ok(child) => {
                 self.status = None;
                 self.player = Some(Player {
@@ -1991,12 +2005,7 @@ impl App {
         self.import_source = Some((s.session.id.to_string(), s.session.profile.clone()));
         let (tx, ctx, cookies) = (self.tx.clone(), ctx.clone(), self.cookies.clone());
         std::thread::spawn(move || {
-            let r = s
-                .session
-                .snapshot_spec()
-                .and_then(|spec| yt::import_cookies(&tools, &spec, &cookies))
-                .map_err(|e| format!("{e:#}"));
-            signin::clear_snapshot();
+            let r = import_session(&tools, &s.session, &cookies).map_err(|e| format!("{e:#}"));
             let _ = tx.send(Msg::Imported(r));
             ctx.request_repaint();
         });
@@ -2525,12 +2534,29 @@ impl eframe::App for App {
     }
 }
 
+/// Copy a browser profile's YouTube session into `cookies`: natively (no
+/// yt-dlp; Chromium asks the Keychain once), else via yt-dlp on a snapshot.
+fn import_session(tools: &Tools, s: &Session, cookies: &std::path::Path) -> anyhow::Result<()> {
+    match s.export_cookies(cookies) {
+        Ok(()) => Ok(()),
+        // signed out is signed out; yt-dlp wouldn't find more
+        Err(e) if format!("{e:#}").contains("no YouTube login") => Err(e),
+        Err(_) => {
+            let r = s
+                .snapshot_spec()
+                .and_then(|spec| yt::import_cookies(tools, &spec, cookies));
+            signin::clear_snapshot();
+            r
+        }
+    }
+}
+
 // ---------- list sources ----------
 
 /// Where a tab's videos come from: YouTube's API, or yt-dlp as the fallback.
 enum Feed {
     Native {
-        pager: crate::innertube::Pager,
+        pager: Box<crate::innertube::Pager>,
         buf: std::collections::VecDeque<Video>,
         ended: bool,
     },
@@ -2547,7 +2573,7 @@ impl Feed {
         let mut pager = crate::innertube::Pager::new(cookies, source)?;
         let page = pager.next_page()?.unwrap_or_default();
         Ok(Feed::Native {
-            pager,
+            pager: Box::new(pager),
             buf: page.into(),
             ended: false,
         })

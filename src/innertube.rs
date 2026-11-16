@@ -16,10 +16,15 @@ const ORIGIN: &str = "https://www.youtube.com";
 const CLIENT_VERSION: &str = "2.20251101.00.00";
 
 pub struct Client {
-    cookie: String,
+    /// name → value for youtube.com, updated from Set-Cookie replies
+    pairs: std::sync::Mutex<Vec<(String, String)>>,
     sapisid: Option<String>,
     agent: ureq::Agent,
+    jar: std::path::PathBuf,
 }
+
+/// Serialises cookies.txt rewrites across tab threads.
+static JAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl Client {
     /// From a Netscape cookies.txt (yt-dlp's export).
@@ -40,11 +45,6 @@ impl Client {
             .iter()
             .find_map(|n| pairs.iter().find(|(k, _)| k == n))
             .map(|(_, v)| v.clone());
-        let cookie = pairs
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join("; ");
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(15)))
             .http_status_as_error(false)
@@ -52,9 +52,10 @@ impl Client {
             .build()
             .into();
         Ok(Client {
-            cookie,
+            pairs: std::sync::Mutex::new(pairs),
             sapisid,
             agent,
+            jar: cookies.to_path_buf(),
         })
     }
 
@@ -73,8 +74,15 @@ impl Client {
             .header("X-Youtube-Client-Name", "1")
             .header("X-Youtube-Client-Version", CLIENT_VERSION)
             .header("Content-Type", "application/json");
-        if !self.cookie.is_empty() {
-            req = req.header("Cookie", &self.cookie);
+        let cookie = {
+            let p = self.pairs.lock().unwrap_or_else(|e| e.into_inner());
+            p.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        if !cookie.is_empty() {
+            req = req.header("Cookie", &cookie);
         }
         if let Some(sapisid) = &self.sapisid {
             use sha1::{Digest, Sha1};
@@ -88,6 +96,15 @@ impl Client {
                 .header("X-Goog-AuthUser", "0");
         }
         let mut resp = req.send(body.to_string()).context("contacting YouTube")?;
+        let set: Vec<String> = resp
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok().map(str::to_string))
+            .collect();
+        if !set.is_empty() {
+            self.absorb(&set);
+        }
         let status = resp.status().as_u16();
         let text = resp
             .body_mut()
@@ -99,6 +116,260 @@ impl Client {
             bail!("YouTube API: HTTP {status}");
         }
         serde_json::from_str(&text).context("YouTube API: bad JSON")
+    }
+}
+
+impl Client {
+    /// YouTube refreshes session cookies in its replies (yt-dlp used to save
+    /// these for us). Keep them for later requests and write them back to
+    /// cookies.txt so the session stays fresh. Values are never logged.
+    fn absorb(&self, headers: &[String]) {
+        let parsed: Vec<SetCookie> = headers.iter().filter_map(|h| SetCookie::parse(h)).collect();
+        if parsed.is_empty() {
+            return;
+        }
+        {
+            let mut p = self.pairs.lock().unwrap_or_else(|e| e.into_inner());
+            for c in &parsed {
+                p.retain(|(n, _)| n != &c.name);
+                if !c.expired() {
+                    p.push((c.name.clone(), c.value.clone()));
+                }
+            }
+        }
+        let _guard = JAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(jar) = std::fs::read_to_string(&self.jar) else {
+            return;
+        };
+        let mut lines: Vec<String> = jar.lines().map(str::to_string).collect();
+        for c in &parsed {
+            let matches = |l: &String| {
+                let l = l.strip_prefix("#HttpOnly_").unwrap_or(l);
+                let f: Vec<&str> = l.split('\t').collect();
+                f.len() >= 7
+                    && f[5] == c.name
+                    && f[0].trim_start_matches('.') == c.domain.trim_start_matches('.')
+            };
+            let old = lines.iter().position(matches);
+            if c.expired() {
+                if let Some(i) = old {
+                    lines.remove(i);
+                }
+                continue;
+            }
+            let line = format!(
+                "{}{}\tTRUE\t{}\t{}\t{}\t{}\t{}",
+                if c.http_only { "#HttpOnly_" } else { "" },
+                c.domain,
+                c.path,
+                if c.secure { "TRUE" } else { "FALSE" },
+                c.expires.unwrap_or(0),
+                c.name,
+                c.value
+            );
+            match old {
+                Some(i) => lines[i] = line,
+                None => lines.push(line),
+            }
+        }
+        let tmp = self.jar.with_extension("txt.rot");
+        let mut text = lines.join("\n");
+        text.push('\n');
+        if std::fs::write(&tmp, text).is_ok() && crate::yt::restrict_perms(&tmp).is_ok() {
+            let _ = std::fs::rename(&tmp, &self.jar);
+        }
+    }
+}
+
+struct SetCookie {
+    name: String,
+    value: String,
+    domain: String,
+    path: String,
+    /// unix seconds; None = session cookie
+    expires: Option<i64>,
+    secure: bool,
+    http_only: bool,
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+impl SetCookie {
+    fn parse(h: &str) -> Option<SetCookie> {
+        let mut parts = h.split(';').map(str::trim);
+        let (name, value) = parts.next()?.split_once('=')?;
+        let mut c = SetCookie {
+            name: name.to_string(),
+            value: value.to_string(),
+            domain: ".youtube.com".into(),
+            path: "/".into(),
+            expires: None,
+            secure: false,
+            http_only: false,
+        };
+        let mut max_age = None;
+        for p in parts {
+            let (k, v) = p.split_once('=').unwrap_or((p, ""));
+            match k.to_ascii_lowercase().as_str() {
+                "domain" => {
+                    c.domain = if v.starts_with('.') {
+                        v.to_string()
+                    } else {
+                        format!(".{v}")
+                    }
+                }
+                "path" => c.path = v.to_string(),
+                "max-age" => max_age = v.parse::<i64>().ok(),
+                "expires" => c.expires = c.expires.or_else(|| parse_http_date(v)),
+                "secure" => c.secure = true,
+                "httponly" => c.http_only = true,
+                _ => {}
+            }
+        }
+        if let Some(m) = max_age {
+            c.expires = Some(unix_now() + m);
+        }
+        // only YouTube's own cookies belong in this jar
+        c.domain.ends_with("youtube.com").then_some(c)
+    }
+
+    fn expired(&self) -> bool {
+        self.expires.is_some_and(|e| e <= unix_now())
+    }
+}
+
+/// "Wed, 16-Nov-2027 18:00:00 GMT" (also with spaces instead of dashes).
+fn parse_http_date(s: &str) -> Option<i64> {
+    let s = s
+        .split_once(',')
+        .map_or(s, |(_, r)| r)
+        .trim()
+        .replace('-', " ");
+    let f: Vec<&str> = s.split_whitespace().collect();
+    let (d, mon, y) = (
+        f.first()?.parse::<i64>().ok()?,
+        *f.get(1)?,
+        f.get(2)?.parse::<i64>().ok()?,
+    );
+    let m = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    .iter()
+    .position(|x| x.eq_ignore_ascii_case(mon))? as i64
+        + 1;
+    let t: Vec<i64> = f
+        .get(3)?
+        .split(':')
+        .filter_map(|x| x.parse().ok())
+        .collect();
+    let y = if y < 100 { y + 2000 } else { y };
+    // days from civil (Howard Hinnant)
+    let (yy, mm) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = yy.div_euclid(400);
+    let yoe = yy - era * 400;
+    let doy = (153 * mm + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + t.first()? * 3600 + t.get(1)? * 60 + t.get(2)?)
+}
+
+/// Tell YouTube `video_id` was watched, so it appears in the account's watch
+/// history: the two stats pings youtube.com's player sends (same parameters
+/// yt-dlp's --mark-watched uses). Blocking.
+pub fn mark_watched(cookies: &Path, video_id: &str) -> Result<()> {
+    let c = Client::new(cookies)?;
+    if !c.signed_in() {
+        bail!("not signed in");
+    }
+    let r = c.post("player", json!({ "videoId": video_id }))?;
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos() as u64
+        | 1;
+    let cpn: String = (0..16)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            ALPHABET[(seed & 63) as usize] as char
+        })
+        .collect();
+    for key in ["videostatsPlaybackUrl", "videostatsWatchtimeUrl"] {
+        let url = r
+            .pointer(&format!("/playbackTracking/{key}/baseUrl"))
+            .and_then(Value::as_str)
+            .context("YouTube didn't return tracking URLs")?;
+        let (base, query) = url.split_once('?').unwrap_or((url, ""));
+        let len: f64 = query
+            .split('&')
+            .find_map(|p| p.strip_prefix("len="))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.5);
+        let at = format!("{}", len - 1.0);
+        let replaced = ["ver", "cpn", "cmt", "el", "st", "et"];
+        let mut params: Vec<String> = query
+            .split('&')
+            .filter(|p| !p.is_empty() && !replaced.contains(&p.split('=').next().unwrap_or("")))
+            .map(str::to_string)
+            .collect();
+        params.extend([
+            "ver=2".to_string(),
+            format!("cpn={cpn}"),
+            format!("cmt={at}"),
+            "el=detailpage".to_string(),
+            format!("st={at}"),
+            format!("et={at}"),
+        ]);
+        c.get(&format!("{base}?{}", params.join("&")))?;
+    }
+    Ok(())
+}
+
+impl Client {
+    /// A plain GET with the session cookies.
+    fn get(&self, url: &str) -> Result<()> {
+        let cookie = {
+            let p = self.pairs.lock().unwrap_or_else(|e| e.into_inner());
+            p.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        let resp = self
+            .agent
+            .get(url)
+            .header("Cookie", &cookie)
+            .call()
+            .context("contacting YouTube")?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            bail!("HTTP {status}");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod mark_live {
+    /// Marks "Me at the zoo" watched natively, then checks History lists it first.
+    /// `cargo test -- --ignored native_mark_watched --nocapture`
+    #[test]
+    #[ignore]
+    fn native_mark_watched() {
+        let cookies = crate::yt::config_dir().unwrap().join("cookies.txt");
+        let id = "jNQXAC9IVRw";
+        super::mark_watched(&cookies, id).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let mut p = super::Pager::new(&cookies, &crate::yt::Source::History).unwrap();
+        let page = p.next_page().unwrap().unwrap();
+        let pos = page.iter().position(|v| v.id == id);
+        eprintln!("position in history: {pos:?}");
+        assert!(pos.is_some_and(|p| p < 3));
     }
 }
 
@@ -500,6 +771,17 @@ mod tests {
         assert_eq!(parse_views("No views"), Some(0));
         assert_eq!(parse_views("5 hours ago"), None);
         assert!(is_age("Streamed 1 day ago"));
+        assert_eq!(parse_http_date("Thu, 01-Jan-1970 00:00:10 GMT"), Some(10));
+        assert_eq!(
+            parse_http_date("Mon, 16 Nov 2026 18:00:00 GMT"),
+            Some(1_794_852_000)
+        );
+        let c = SetCookie::parse(
+            "VISITOR_INFO1_LIVE=abc; Domain=.youtube.com; Max-Age=100; Path=/; Secure; HttpOnly",
+        )
+        .unwrap();
+        assert!(c.secure && c.http_only && !c.expired() && c.value == "abc");
+        assert!(SetCookie::parse("X=1; Domain=.google.com").is_none());
     }
 }
 

@@ -245,10 +245,6 @@ impl Embedded {
         for opt in tools.ytdl_raw_options() {
             mpv.command(&["change-list", "ytdl-raw-options", "append", &opt])?;
         }
-        if settings.mark_watched {
-            // yt-dlp reports the view to YouTube → appears in the account's watch history.
-            mpv.command(&["change-list", "ytdl-raw-options", "append", "mark-watched="])?;
-        }
 
         let render = Render::new(&mpv, gpa)?;
         let shared = Box::new(Shared {

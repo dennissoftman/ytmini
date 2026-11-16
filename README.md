@@ -1,7 +1,15 @@
 # ytmini
 
-A minimal personal YouTube client: egui UI, yt-dlp for listing and sign-in
-(browser cookies), mpv/libmpv for playback.
+A minimal personal YouTube client: egui UI, mpv/libmpv for playback.
+
+Who does what:
+
+| Job | How |
+|---|---|
+| Lists (feed, subscriptions, watch later, history, playlists, search, channels) | YouTube's own web API, signed with your session (`src/innertube.rs`); yt-dlp if a reply can't be read |
+| Sign-in | reads your browser's cookie database directly (Firefox; Chrome-family on macOS with one Keychain prompt); yt-dlp for Safari, Windows and custom specs |
+| Watch history, Watch later edits | YouTube's web API |
+| Playback (resolving stream URLs) | yt-dlp through mpv's ytdl hook — the part YouTube changes most often, kept with yt-dlp on purpose |
 
 ## Run
 
