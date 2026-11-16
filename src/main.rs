@@ -5,6 +5,7 @@
 
 mod app;
 mod cache;
+mod dearrow;
 mod deps;
 mod downloads;
 mod innertube;

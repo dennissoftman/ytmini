@@ -73,6 +73,8 @@ pub struct Settings {
     /// Offline downloads: max height (0 = audio only) and total size cap.
     pub download_height: u32,
     pub download_cap_gb: u64,
+    /// Experimental: DeArrow community titles and thumbnails.
+    pub dearrow: bool,
     /// Feed filters (home, subscriptions, search; never channel/playlist pages).
     pub show_shorts: bool,
     pub hide_live: bool,
@@ -137,6 +139,7 @@ impl Default for Settings {
             sb_categories: crate::sponsorblock::default_categories(),
             download_height: 720,
             download_cap_gb: 10,
+            dearrow: false,
             show_shorts: false,
             hide_live: false,
             hide_watched: false,

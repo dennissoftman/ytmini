@@ -32,13 +32,16 @@ pub enum Variant {
     Standard,
     /// 1280×720 source, stored downsized to 640 wide; old videos fall back to standard.
     High,
+    /// DeArrow's community thumbnail: the frame at this many milliseconds.
+    DeArrow(u32),
 }
 
 impl Variant {
-    fn tag(self) -> &'static str {
+    fn tag(self) -> String {
         match self {
-            Variant::Standard => "sd",
-            Variant::High => "hi",
+            Variant::Standard => "sd".into(),
+            Variant::High => "hi".into(),
+            Variant::DeArrow(ms) => format!("da{ms}"),
         }
     }
     /// Try in order; WebP is ~half the size of the JPEG for the same image.
@@ -49,6 +52,11 @@ impl Variant {
         ];
         match self {
             Variant::Standard => sd.to_vec(),
+            Variant::DeArrow(ms) => {
+                let mut v = vec![crate::dearrow::thumb_url(id, ms as f64 / 1000.0)];
+                v.extend(sd);
+                v
+            }
             Variant::High => {
                 let mut v = vec![
                     format!("https://i.ytimg.com/vi_webp/{id}/hq720.webp"),
@@ -62,7 +70,7 @@ impl Variant {
     fn max_width(self) -> u32 {
         match self {
             Variant::Standard => 320,
-            Variant::High => 640,
+            Variant::High | Variant::DeArrow(_) => 640,
         }
     }
 }

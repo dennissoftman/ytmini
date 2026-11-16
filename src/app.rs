@@ -131,6 +131,7 @@ enum Msg {
     /// Hover-prepare finished: id, format, result.
     Prepared(String, String, Result<yt::Direct, String>),
     Storyboard(String, crate::storyboard::Storyboard),
+    DeArrow(String, crate::dearrow::Branding),
     /// Thumbnail for Now Playing, fetched for a video that wasn't cached.
     NowPlayingArt(String, Vec<u8>),
     /// Silent session refresh finished: (browser label, browser id, profile) or error.
@@ -294,6 +295,9 @@ pub struct App {
     /// Stream URLs resolved on hover: id → (ytdl-format, URLs, when).
     prepared: HashMap<String, (String, yt::Direct, std::time::Instant)>,
     preparing: Option<String>,
+    /// DeArrow branding per video id (None while being fetched).
+    dearrow: HashMap<String, Option<crate::dearrow::Branding>>,
+    dearrow_tx: Option<Sender<String>>,
     /// Card under the pointer and since when (hover-to-prepare).
     hover: Option<(Video, std::time::Instant)>,
     /// In-flight downloads: id → progress 0–1.
@@ -393,6 +397,8 @@ impl App {
             np_art: None,
             downloads: crate::downloads::Manifest::load(),
             prepared: HashMap::new(),
+            dearrow: HashMap::new(),
+            dearrow_tx: None,
             preparing: None,
             hover: None,
             dl_active: HashMap::new(),
@@ -966,6 +972,9 @@ impl App {
                             .insert(id, (format, d, std::time::Instant::now()));
                     }
                 }
+                Msg::DeArrow(id, b) => {
+                    self.dearrow.insert(id, Some(b));
+                }
                 Msg::Storyboard(id, sb) => {
                     if let Some(p) = self.embedded.as_mut().filter(|p| p.id == id) {
                         p.storyboard = Some(sb);
@@ -1151,10 +1160,7 @@ impl App {
                         }
                     });
                 }
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-                    "{} — ytmini",
-                    video.title()
-                )));
+                // the player header shows the title; the window stays "ytmini"
                 self.embedded = Some(p);
             }
             Err(e) => {
@@ -1662,6 +1668,7 @@ impl App {
         let mut more = false;
         let mut reimport_from_empty = false;
         let mut hovered_video: Option<Video> = None;
+        let mut want_branding: Vec<String> = Vec::new();
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let source = self.active.clone();
             let playing_id = self.player.as_ref().map(|p| p.id.clone());
@@ -1669,6 +1676,7 @@ impl App {
             let positions = &self.positions;
             let settings = &self.settings;
             let (downloads, dl_active) = (&self.downloads, &self.dl_active);
+            let dearrow = settings.dearrow.then_some(&self.dearrow);
             let Some(tab) = self.tabs.get_mut(&source) else {
                 return;
             };
@@ -1795,7 +1803,26 @@ impl App {
                                 {
                                     hovered_video = Some(v.clone());
                                 }
-                                match video_card(ui, thumbs, variant, v, card) {
+                                // DeArrow: community title/thumbnail when there is one
+                                let mut shown_v = std::borrow::Cow::Borrowed(v);
+                                let mut card_variant = variant;
+                                if let Some(map) = dearrow {
+                                    match map.get(&v.id) {
+                                        Some(Some(b)) => {
+                                            if let Some(t) = &b.title {
+                                                shown_v.to_mut().title = Some(t.clone());
+                                            }
+                                            if let Some(t) = b.thumb_time {
+                                                card_variant =
+                                                    Variant::DeArrow((t * 1000.0) as u32);
+                                            }
+                                        }
+                                        Some(None) => {}
+                                        None if !v.is_playlist => want_branding.push(v.id.clone()),
+                                        None => {}
+                                    }
+                                }
+                                match video_card(ui, thumbs, card_variant, &shown_v, card) {
                                     CardAction::Open => clicked = Some(v.clone()),
                                     CardAction::Channel => open_channel = Some(v.clone()),
                                     CardAction::Quick(q) => quick = Some((q, v.clone())),
@@ -1860,6 +1887,9 @@ impl App {
             (_, None) => self.hover = None,
         }
         self.maybe_prepare(&ctx);
+        for id in want_branding {
+            self.request_branding(&ctx, id);
+        }
         if let Some((q, v)) = quick {
             self.quick_action(&ctx, q, &v);
         }
@@ -2479,6 +2509,7 @@ impl App {
                 ui.add_space(10.0);
                 section(ui, "Feed");
                 ui.checkbox(&mut s.show_shorts, "Show Shorts");
+                ui.checkbox(&mut s.dearrow, "Less clickbait: community titles and thumbnails (DeArrow, experimental)");
                 ui.checkbox(&mut s.hide_live, "Hide live streams and premieres");
                 ui.checkbox(&mut s.hide_watched, "Hide videos I've watched (Home and Subscriptions)");
                 ui.horizontal(|ui| {
@@ -2680,6 +2711,27 @@ impl App {
             }
         }
         self.was_focused = focused;
+    }
+
+    /// Queue a DeArrow lookup (one worker, in order of appearance on screen).
+    fn request_branding(&mut self, ctx: &egui::Context, id: String) {
+        if self.dearrow.contains_key(&id) {
+            return;
+        }
+        self.dearrow.insert(id.clone(), None);
+        let tx = self.dearrow_tx.get_or_insert_with(|| {
+            let (req_tx, req_rx) = std::sync::mpsc::channel::<String>();
+            let (tx, ctx) = (self.tx.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                for id in req_rx {
+                    let b = crate::dearrow::fetch(&id).unwrap_or_default();
+                    let _ = tx.send(Msg::DeArrow(id, b));
+                    ctx.request_repaint();
+                }
+            });
+            req_tx
+        });
+        let _ = tx.send(id);
     }
 
     /// Fresh pre-resolved URLs for `id` in `format`, if we have them.
@@ -3100,10 +3152,7 @@ impl eframe::App for App {
         if let Some(e) = &mut self.embedded {
             e.poll_events();
             if std::mem::take(&mut e.title_changed) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-                    "{} — ytmini",
-                    e.title
-                )));
+                self.np_last = None; // republish Now Playing with the real title
             }
         }
         // (the smoke test changes settings; never persist those)

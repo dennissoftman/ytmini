@@ -234,6 +234,11 @@ fn streak_step(tap: u32) -> f64 {
 
 /// Holding the side of the video this long plays at `HOLD_SPEED` until release
 /// (dragging sideways while holding scales it between `HOLD_MIN` and `HOLD_MAX`).
+/// Volume slider: 0–150 % (past 100 is mpv's software boost), with a
+/// detent at 100 % so it's easy to get back to normal.
+pub const VOLUME_MAX: f64 = 150.0;
+const VOLUME_SNAP: f64 = 5.0;
+
 const HOLD_AFTER: Duration = Duration::from_millis(350);
 const HOLD_SPEED: f64 = 1.5;
 /// While holding, dragging left eases down to this, right up to `HOLD_MAX`.
@@ -297,7 +302,11 @@ impl Embedded {
             ("input-vo-keyboard", "no".into()),
             ("terminal", "no".into()),
             ("audio-client-name", "ytmini".into()),
-            ("volume", format!("{:.0}", settings.volume)),
+            (
+                "volume",
+                format!("{:.0}", settings.volume.clamp(0.0, VOLUME_MAX)),
+            ),
+            ("volume-max", format!("{VOLUME_MAX:.0}")),
         ];
         if profile.fast {
             opts.push(("profile", "fast".into()));
@@ -816,7 +825,7 @@ impl Embedded {
     }
 
     pub fn set_volume(&mut self, v: f64) {
-        self.volume = v.clamp(0.0, 100.0);
+        self.volume = v.clamp(0.0, VOLUME_MAX);
         let _ = self.mpv().set_f64("volume", self.volume);
     }
 
@@ -1353,10 +1362,25 @@ impl Embedded {
                 ui.label(egui::RichText::new("Vol").size(13.0).color(Color32::WHITE));
                 let mut vol = self.volume;
                 ui.spacing_mut().slider_width = 90.0;
-                if ui
-                    .add(egui::Slider::new(&mut vol, 0.0..=100.0).show_value(false))
-                    .changed()
-                {
+                let r = ui
+                    .add(egui::Slider::new(&mut vol, 0.0..=VOLUME_MAX).show_value(false))
+                    .on_hover_text(format!("{:.0}%  ·  double-click: 100%", self.volume));
+                // tick at 100%: the "normal" level, past it is boost
+                let rail = r.rect.shrink2(Vec2::new(r.rect.height() / 2.0, 0.0));
+                let x = rail.left() + rail.width() * (100.0 / VOLUME_MAX) as f32;
+                ui.painter().line_segment(
+                    [
+                        Pos2::new(x, r.rect.top() + 1.0),
+                        Pos2::new(x, r.rect.bottom() - 1.0),
+                    ],
+                    Stroke::new(1.5, Color32::from_white_alpha(160)),
+                );
+                if r.double_clicked() {
+                    vol = 100.0;
+                } else if (vol - 100.0).abs() < VOLUME_SNAP {
+                    vol = 100.0; // magnetic detent
+                }
+                if (vol - self.volume).abs() > f64::EPSILON {
                     self.set_volume(vol);
                     act.volume_changed = true;
                 }
