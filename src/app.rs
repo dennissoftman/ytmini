@@ -14,7 +14,7 @@ use crate::theme::{
 };
 use crate::thumbs::{Thumbs, Variant};
 use crate::tray::{self, Tray, TrayEvent};
-use crate::yt::{self, Browser, Source, Tools, Video};
+use crate::yt::{self, Source, Tools, Video};
 use eframe::egui::{
     self, text::LayoutJob, Align, Align2, Color32, CornerRadius, FontId, Key, Layout, Margin,
     RichText, Sense, Stroke, StrokeKind, TextFormat, Vec2,
@@ -209,7 +209,8 @@ pub struct App {
     rx: Receiver<Msg>,
 
     // onboarding
-    browsers: Vec<Browser>,
+    /// Safari is installed but its cookies need Full Disk Access.
+    safari_blocked: bool,
     /// Browser profiles for "Sign in with Google", most recent first.
     sessions: Vec<Session>,
     session_pick: usize,
@@ -219,7 +220,6 @@ pub struct App {
     started: std::time::Instant,
     /// Where the import in flight comes from, saved on success for "Refresh session".
     import_source: Option<(String, std::path::PathBuf)>,
-    custom_spec: String,
     importing: Option<String>,
     import_error: Option<String>,
 
@@ -303,14 +303,13 @@ impl App {
             screen: Screen::Onboarding,
             tx,
             rx,
-            browsers: yt::detect_browsers(),
+            safari_blocked: signin::safari_needs_access(),
             sessions: signin::sessions(),
             session_pick: 0,
             import_source: None,
             view_shown: Source::Feed,
             view_since: std::time::Instant::now(),
             started: std::time::Instant::now(),
-            custom_spec: String::new(),
             importing: None,
             import_error: None,
             tabs: HashMap::new(),
@@ -673,27 +672,6 @@ impl App {
         if let Some(tab) = self.tabs.get_mut(&source) {
             tab.stream = stream;
         }
-    }
-
-    fn start_import(&mut self, ctx: &egui::Context, spec: String) {
-        let Some(tools) = self.tools.clone() else {
-            return;
-        };
-        self.import_error = None;
-        self.import_source = None;
-        self.importing = Some(spec.clone());
-        let (tx, ctx, cookies) = (self.tx.clone(), ctx.clone(), self.cookies.clone());
-        std::thread::spawn(move || {
-            // A plain browser name ("firefox", "chrome"): read its newest profile
-            // ourselves; custom specs, Safari and failures go through yt-dlp.
-            let session = signin::sessions().into_iter().find(|s| s.id == spec.trim());
-            let r = session
-                .map(|s| import_session(&tools, &s, &cookies))
-                .unwrap_or_else(|| yt::import_cookies(&tools, &spec, &cookies))
-                .map_err(|e| format!("{e:#}"));
-            let _ = tx.send(Msg::Imported(r));
-            ctx.request_repaint();
-        });
     }
 
     fn handle_messages(&mut self, ctx: &egui::Context) {
@@ -1147,11 +1125,9 @@ impl App {
     }
 
     fn ui_onboarding(&mut self, ui: &mut egui::Ui) {
-        let mut chosen: Option<String> = None;
         let mut cancel = false;
         let can_cancel = yt::logged_in(&self.cookies) && self.importing.is_none();
         let busy = self.importing.is_some();
-        let browsers = self.browsers.clone();
         let mut google = GoogleAction::None;
 
         egui::ScrollArea::vertical()
@@ -1163,86 +1139,31 @@ impl App {
                     ui.label(RichText::new("Sign in to YouTube").size(20.0).color(text()));
                     ui.add_space(14.0);
                     google = self.ui_google_signin(ui, busy);
-                    ui.add_space(22.0);
+                    ui.add_space(10.0);
                     ui.label(
-                        RichText::new("Or use a browser you're already signed in to")
-                            .strong()
-                            .color(text()),
+                        RichText::new(
+                            "ytmini copies your YouTube session from the browser; the cookies \
+                             stay on this computer.",
+                        )
+                        .small()
+                        .color(text_dim()),
                     );
-                    ui.label(
-                        RichText::new("Cookies are stored only on this computer.")
+                    if self.safari_blocked {
+                        ui.label(
+                            RichText::new(
+                                "Safari: give ytmini Full Disk Access (System Settings → Privacy & \
+                                 Security) to use its session.",
+                            )
                             .small()
                             .color(text_dim()),
-                    );
-                    ui.add_space(10.0);
-
-                    if browsers.is_empty() {
-                        ui.label(
-                            RichText::new("No browsers detected — type a yt-dlp spec below.")
-                                .color(text_dim()),
                         );
                     }
-                    for b in &browsers {
-                        egui::Frame::new()
-                            .fill(card())
-                            .corner_radius(RADIUS)
-                            .inner_margin(Margin::symmetric(14, 10))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.horizontal(|ui| {
-                                    ui.vertical(|ui| {
-                                        ui.label(
-                                            RichText::new(b.name).size(16.0).strong().color(text()),
-                                        );
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(yt::browser_note(b.id))
-                                                    .size(12.5)
-                                                    .color(text_dim()),
-                                            )
-                                            .wrap(),
-                                        );
-                                    });
-                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        if ui.add_enabled(!busy, accent_btn("Use")).clicked() {
-                                            chosen = Some(b.id.to_string());
-                                        }
-                                    });
-                                });
-                            });
-                        ui.add_space(8.0);
-                    }
-
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Or a yt-dlp browser spec").color(text_dim()));
-                    ui.horizontal(|ui| {
-                        let r = ui.add_enabled(
-                            !busy,
-                            egui::TextEdit::singleline(&mut self.custom_spec)
-                                .hint_text("chrome:Profile 1")
-                                .desired_width(ui.available_width() - 90.0),
-                        );
-                        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                        if (ui.add_enabled(!busy, accent_btn("Import")).clicked() || enter)
-                            && !self.custom_spec.trim().is_empty()
-                        {
-                            chosen = Some(self.custom_spec.trim().to_string());
-                        }
-                    });
-                    if !self.custom_spec.trim().is_empty() {
-                        ui.label(
-                            RichText::new(yt::browser_note(&self.custom_spec))
-                                .size(12.5)
-                                .color(text_dim()),
-                        );
-                    }
-
                     ui.add_space(16.0);
                     if let Some(spec) = &self.importing {
                         ui.horizontal(|ui| {
                             ui.spinner();
                             ui.label(format!(
-                                "Reading cookies from {spec}… (answer any system prompt)"
+                                "Reading your session from {spec}… (answer any system prompt)"
                             ));
                         });
                     }
@@ -1254,15 +1175,13 @@ impl App {
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 ui.label(
-                                    RichText::new("Import failed")
+                                    RichText::new("Couldn't sign in")
                                         .strong()
                                         .color(crate::theme::err()),
                                 );
                                 ui.add(
-                                    egui::Label::new(
-                                        RichText::new(err).monospace().size(12.0).color(text()),
-                                    )
-                                    .wrap(),
+                                    egui::Label::new(RichText::new(err).size(13.0).color(text()))
+                                        .wrap(),
                                 );
                             });
                     }
@@ -1275,9 +1194,6 @@ impl App {
                 });
             });
 
-        if let Some(spec) = chosen {
-            self.start_import(ui.ctx(), spec);
-        }
         match google {
             GoogleAction::Start => {
                 if let Some(s) = self.sessions.get(self.session_pick).cloned() {
@@ -1692,7 +1608,7 @@ impl App {
         }
         if reimport_from_empty {
             self.import_error = None;
-            self.browsers = yt::detect_browsers();
+            self.safari_blocked = signin::safari_needs_access();
             self.sessions = signin::sessions();
             self.session_pick = 0;
             self.screen = Screen::Onboarding;
@@ -1897,13 +1813,15 @@ impl App {
             let pick = self.session_pick.min(self.sessions.len() - 1);
             let chosen = &self.sessions[pick];
             ui.horizontal(|ui| {
-                ui.vertical(|ui| {
+                let text_w = (ui.available_width() - 110.0).max(120.0);
+                ui.allocate_ui_with_layout(Vec2::new(text_w, 0.0), Layout::top_down(Align::Min), |ui| {
+                    ui.set_max_width(text_w);
                     ui.label(RichText::new("Sign in with Google").size(16.0).strong().color(text()));
                     let mut note = format!(
                         "Uses your {} session. If you're not signed in there yet, Google's sign-in page opens in it.",
                         chosen.browser
                     );
-                    if !chosen.firefox && cfg!(target_os = "macos") {
+                    if !chosen.firefox && !chosen.safari && cfg!(target_os = "macos") {
                         note.push_str(" macOS asks for Keychain access once — click Allow.");
                     }
                     ui.add(egui::Label::new(RichText::new(note).size(12.5).color(text_dim())).wrap());
@@ -1997,15 +1915,15 @@ impl App {
     /// Step 2: the profile is signed in → import a snapshot of its cookies.
     fn finish_signin(&mut self, ctx: &egui::Context) {
         let Some(s) = self.signin.take() else { return };
-        let Some(tools) = self.tools.clone() else {
-            return;
-        };
         self.importing = Some(s.session.label());
         self.import_error = None;
         self.import_source = Some((s.session.id.to_string(), s.session.profile.clone()));
         let (tx, ctx, cookies) = (self.tx.clone(), ctx.clone(), self.cookies.clone());
         std::thread::spawn(move || {
-            let r = import_session(&tools, &s.session, &cookies).map_err(|e| format!("{e:#}"));
+            let r = s
+                .session
+                .export_cookies(&cookies)
+                .map_err(|e| format!("{e:#}"));
             let _ = tx.send(Msg::Imported(r));
             ctx.request_repaint();
         });
@@ -2238,7 +2156,7 @@ impl App {
             let src = self.settings.signin_source.clone();
             if let Some(s) = src.and_then(|src| signin::find(&src.id, &src.profile)) {
                 self.import_error = None;
-                self.browsers = yt::detect_browsers();
+                self.safari_blocked = signin::safari_needs_access();
                 self.sessions = signin::sessions();
                 self.session_pick = self.sessions.iter().position(|x| x == &s).unwrap_or(0);
                 self.screen = Screen::Onboarding;
@@ -2258,7 +2176,7 @@ impl App {
         }
         if reimport {
             self.import_error = None;
-            self.browsers = yt::detect_browsers();
+            self.safari_blocked = signin::safari_needs_access();
             self.sessions = signin::sessions();
             self.session_pick = 0;
             self.screen = Screen::Onboarding;
@@ -2530,23 +2448,6 @@ impl eframe::App for App {
         self.positions.save();
         if self.smoke.is_none() && self.settings != self.saved_settings {
             self.settings.save();
-        }
-    }
-}
-
-/// Copy a browser profile's YouTube session into `cookies`: natively (no
-/// yt-dlp; Chromium asks the Keychain once), else via yt-dlp on a snapshot.
-fn import_session(tools: &Tools, s: &Session, cookies: &std::path::Path) -> anyhow::Result<()> {
-    match s.export_cookies(cookies) {
-        Ok(()) => Ok(()),
-        // signed out is signed out; yt-dlp wouldn't find more
-        Err(e) if format!("{e:#}").contains("no YouTube login") => Err(e),
-        Err(_) => {
-            let r = s
-                .snapshot_spec()
-                .and_then(|spec| yt::import_cookies(tools, &spec, cookies));
-            signin::clear_snapshot();
-            r
         }
     }
 }

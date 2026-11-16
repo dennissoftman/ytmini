@@ -201,10 +201,14 @@ pub fn install_hint() -> &'static str {
 
 /// `~/Library/Application Support/ytmini` on macOS, `~/.config/ytmini` on Linux,
 /// `%APPDATA%\ytmini` on Windows.
+/// `YTMINI_CONFIG_DIR` overrides it (testing a fresh install / signed-out state).
 pub fn config_dir() -> Result<PathBuf> {
-    let d = dirs::config_dir()
-        .context("no config directory on this system")?
-        .join("ytmini");
+    let d = match std::env::var_os("YTMINI_CONFIG_DIR") {
+        Some(d) => PathBuf::from(d),
+        None => dirs::config_dir()
+            .context("no config directory on this system")?
+            .join("ytmini"),
+    };
     fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;
     Ok(d)
 }
@@ -275,16 +279,6 @@ pub const ALL_BROWSERS: &[Browser] = &[
     },
 ];
 
-/// Browsers that have a profile on this machine (that's what yt-dlp reads,
-/// so it's a better signal than "the app is installed").
-pub fn detect_browsers() -> Vec<Browser> {
-    ALL_BROWSERS
-        .iter()
-        .copied()
-        .filter(|b| profile_dirs(b.id).iter().any(|p| p.exists()))
-        .collect()
-}
-
 pub fn profile_dirs(id: &str) -> Vec<PathBuf> {
     let home = dirs::home_dir().unwrap_or_default();
     #[cfg(target_os = "macos")]
@@ -346,83 +340,12 @@ pub fn profile_dirs(id: &str) -> Vec<PathBuf> {
     }
 }
 
-/// One-line heads-up about what will happen when importing from this browser.
-pub fn browser_note(spec: &str) -> &'static str {
-    let id = spec
-        .split([':', '+'])
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    let family = ALL_BROWSERS.iter().find(|b| b.id == id).map(|b| b.family);
-    match family {
-        Some(Family::Firefox) => "No prompts — just make sure you're signed in to YouTube.",
-        Some(Family::Safari) => {
-            "Needs Full Disk Access for ytmini (or your terminal, if run from one): \
-             System Settings → Privacy & Security → Full Disk Access."
-        }
-        Some(Family::Chromium) if cfg!(target_os = "macos") => {
-            "macOS will ask for Keychain access to the browser's \"Safe Storage\" key — click Allow."
-        }
-        Some(Family::Chromium) if cfg!(windows) => {
-            "Close the browser first. Recent Chrome/Edge versions may block cookie export — Firefox is more reliable."
-        }
-        Some(Family::Chromium) => "Your desktop keyring may ask to unlock — allow it.",
-        None => "Custom yt-dlp spec, e.g. chrome:Profile 1 or firefox:my-profile.",
-    }
-}
-
 /// A logged-in YouTube cookie jar contains these Google session cookies.
 /// (Only checks for names; never reads values out.)
 pub fn logged_in(cookies: &Path) -> bool {
     fs::read_to_string(cookies)
         .map(|s| s.contains("LOGIN_INFO") || s.contains("SAPISID"))
         .unwrap_or(false)
-}
-
-/// Export cookies from a browser into `dest` using yt-dlp. Blocking (may sit on a
-/// Keychain prompt), so run it on a worker thread.
-pub fn import_cookies(tools: &Tools, spec: &str, dest: &Path) -> Result<()> {
-    let spec = spec.trim();
-    if spec.is_empty() {
-        bail!("no browser chosen");
-    }
-    // Write to a temp file first so a failed import doesn't destroy working cookies.
-    let tmp = dest.with_extension("txt.new");
-    let _ = fs::remove_file(&tmp);
-    // yt-dlp loads cookies from the browser and writes the jar to --cookies on exit.
-    let out = tools
-        .ytdlp_cmd()
-        .args(["--cookies-from-browser", spec, "--cookies"])
-        .arg(&tmp)
-        .args([
-            "--skip-download",
-            "--flat-playlist",
-            "--playlist-end",
-            "1",
-            "-q",
-            "-j",
-            ":ytrec",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .context("running yt-dlp")?;
-
-    if tmp.exists() {
-        restrict_perms(&tmp)?;
-    }
-    if !logged_in(&tmp) {
-        let _ = fs::remove_file(&tmp);
-        let err = String::from_utf8_lossy(&out.stderr);
-        let err = err.trim();
-        if err.is_empty() {
-            bail!("no YouTube login found in '{spec}' — sign in to youtube.com in that browser and try again");
-        }
-        bail!("no YouTube login found in '{spec}'.\n\nyt-dlp said:\n{err}");
-    }
-    fs::rename(&tmp, dest).context("saving cookies")?;
-    Ok(())
 }
 
 pub fn restrict_perms(_p: &Path) -> Result<()> {

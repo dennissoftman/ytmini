@@ -7,7 +7,7 @@ Who does what:
 | Job | How |
 |---|---|
 | Lists (feed, subscriptions, watch later, history, playlists, search, channels) | YouTube's own web API, signed with your session (`src/innertube.rs`); yt-dlp if a reply can't be read |
-| Sign-in | reads your browser's cookie database directly (Firefox; Chrome-family on macOS with one Keychain prompt); yt-dlp for Safari, Windows and custom specs |
+| Sign-in | reads your browser's cookie store directly: Firefox (any OS), Chrome/Brave/Edge/Chromium/Opera/Vivaldi on macOS (one Keychain prompt), Safari (needs Full Disk Access). No yt-dlp. In-app Google login isn't possible: Google blocks sign-in in embedded web views, and OAuth doesn't give access to the feed/history/watch later |
 | Watch history, Watch later edits | YouTube's web API |
 | Playback (resolving stream URLs) | yt-dlp through mpv's ytdl hook — the part YouTube changes most often, kept with yt-dlp on purpose |
 

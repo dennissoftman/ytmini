@@ -11,8 +11,10 @@
 //! sign-in inside embedded web views.
 //!
 //! Detection only reads cookie *names* from a copy of the database — never
-//! values — so it never triggers a Keychain prompt. The import (yt-dlp) does
-//! decrypt Chromium cookies, so Chrome & co. ask for Keychain access once.
+//! values — so it never triggers a Keychain prompt. The import reads the
+//! cookie store directly (no yt-dlp): Firefox plain, Chromium-family on macOS
+//! decrypted with the Keychain "Safe Storage" key (one prompt), Safari's
+//! binary cookie file (needs Full Disk Access).
 
 use anyhow::{Context, Result};
 use std::{
@@ -35,6 +37,7 @@ pub struct Session {
     /// yt-dlp browser id
     pub id: &'static str,
     pub firefox: bool,
+    pub safari: bool,
     /// The profile folder ("…/Profiles/abcd.default-release", "…/Chrome/Default").
     pub profile: PathBuf,
     /// The cookie database inside it.
@@ -48,8 +51,25 @@ pub fn sessions() -> Vec<Session> {
     for b in crate::yt::ALL_BROWSERS {
         let firefox = match b.family {
             crate::yt::Family::Firefox => true,
-            crate::yt::Family::Chromium => false,
-            crate::yt::Family::Safari => continue, // binary cookie file, needs Full Disk Access
+            // decryption is implemented for macOS's Keychain only
+            crate::yt::Family::Chromium if cfg!(target_os = "macos") => false,
+            crate::yt::Family::Chromium => continue,
+            crate::yt::Family::Safari => {
+                if let Some(db) = safari_cookie_file().filter(|f| std::fs::File::open(f).is_ok()) {
+                    let profile = db.parent().map(Path::to_path_buf).unwrap_or_default();
+                    let modified = newest_mtime(&db);
+                    out.push(Session {
+                        browser: b.name,
+                        id: b.id,
+                        firefox: false,
+                        safari: true,
+                        profile,
+                        db,
+                        modified,
+                    });
+                }
+                continue;
+            }
         };
         for root in crate::yt::profile_dirs(b.id) {
             // Firefox: <root>/Profiles/<p> (macOS, Windows) or <root>/<p> (Linux).
@@ -77,6 +97,7 @@ pub fn sessions() -> Vec<Session> {
                         browser: b.name,
                         id: b.id,
                         firefox,
+                        safari: false,
                         profile,
                         db,
                         modified,
@@ -87,6 +108,32 @@ pub fn sessions() -> Vec<Session> {
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.modified));
     out
+}
+
+/// Safari's cookie file (macOS). Readable only with Full Disk Access.
+fn safari_cookie_file() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let home = dirs::home_dir()?;
+    [
+        "Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies",
+        "Library/Cookies/Cookies.binarycookies",
+    ]
+    .iter()
+    .map(|r| home.join(r))
+    .find(|p| {
+        std::fs::metadata(p).is_ok()
+            || std::fs::File::open(p)
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+    })
+}
+
+/// Safari is installed but macOS won't let us read its cookies (no Full Disk Access).
+pub fn safari_needs_access() -> bool {
+    cfg!(target_os = "macos")
+        && std::path::Path::new("/Applications/Safari.app").exists()
+        && !sessions().iter().any(|s| s.safari)
 }
 
 /// A previously used profile, if it still exists.
@@ -112,6 +159,9 @@ fn newest_mtime(db: &Path) -> SystemTime {
 impl Session {
     /// "Firefox (default-release)" / "Chrome (Profile 1)"
     pub fn label(&self) -> String {
+        if self.safari {
+            return "Safari".into();
+        }
         let p = self
             .profile
             .file_name()
@@ -155,6 +205,12 @@ impl Session {
 
     /// Is this profile signed in to Google? Checks cookie names only.
     pub fn has_login(&self) -> Result<bool> {
+        if self.safari {
+            let rows = safari_cookies(&self.db)?;
+            return Ok(rows
+                .iter()
+                .any(|c| LOGIN_COOKIES.contains(&c.name.as_str())));
+        }
         let dir = crate::yt::config_dir()?.join("signin-check");
         let db = self.snapshot_to(&dir)?;
         let (table, host) = if self.firefox {
@@ -180,37 +236,17 @@ impl Session {
         Ok(n > 0)
     }
 
-    /// Snapshot the profile and return a `--cookies-from-browser` spec for it.
-    /// Remove the snapshot with [`clear_snapshot`] after importing.
-    pub fn snapshot_spec(&self) -> Result<String> {
-        let dir = crate::yt::config_dir()?.join("signin-snapshot");
-        self.snapshot_to(&dir)?;
-        if !self.firefox {
-            // Windows Chromium keeps the cookie key in "Local State" next to the profiles.
-            if let Some(ls) = self
-                .profile
-                .parent()
-                .map(|p| p.join("Local State"))
-                .filter(|p| p.is_file())
-            {
-                let _ = std::fs::copy(ls, dir.join("Local State"));
-            }
-        }
-        let p = if self.firefox {
-            dir
-        } else {
-            dir.join(self.profile.file_name().context("profile has no name")?)
-        };
-        Ok(format!("{}:{}", self.id, p.display()))
-    }
-
     /// Open Google sign-in in this browser and profile (joins the running
     /// browser if it's open).
     pub fn open_signin(&self) -> Result<()> {
-        let mut c = if cfg!(target_os = "macos") && self.firefox {
+        let mut c = if cfg!(target_os = "macos") && (self.firefox || self.safari) {
             // `open` hands the URL to a running Firefox; the binary would refuse.
             let mut c = Command::new("open");
-            c.args(["-a", "Firefox", SIGN_IN_URL]);
+            c.args([
+                "-a",
+                if self.safari { "Safari" } else { "Firefox" },
+                SIGN_IN_URL,
+            ]);
             c
         } else {
             let exe =
@@ -239,13 +275,16 @@ impl Session {
 
 impl Session {
     /// Write this profile's YouTube/Google cookies to `dest` (Netscape
-    /// cookies.txt, mode 600) without yt-dlp. Firefox: plain reads.
-    /// Chromium on macOS: the "Safe Storage" key from the Keychain (one
-    /// prompt) decrypts the values. Elsewhere Chromium is left to yt-dlp.
-    /// Fails if the result isn't signed in.
+    /// cookies.txt, mode 600). Firefox: plain reads. Chromium on macOS: the
+    /// "Safe Storage" key from the Keychain (one prompt) decrypts the values.
+    /// Safari: its binary cookie file. Fails if the result isn't signed in.
     pub fn export_cookies(&self, dest: &Path) -> Result<()> {
-        if !self.firefox && !cfg!(target_os = "macos") {
-            anyhow::bail!("native Chromium cookie export is macOS-only");
+        if self.safari {
+            let rows: Vec<Cookie> = safari_cookies(&self.db)?
+                .into_iter()
+                .filter(|c| c.host.ends_with("youtube.com") || c.host.ends_with("google.com"))
+                .collect();
+            return write_jar(&rows, dest, &self.label());
         }
         let dir = crate::yt::config_dir()?.join("signin-export");
         let db = self.snapshot_to(&dir)?;
@@ -327,9 +366,15 @@ impl Session {
                 });
             }
         }
+        write_jar(&rows, dest, &self.label())
+    }
+}
+
+fn write_jar(rows: &[Cookie], dest: &Path, label: &str) -> Result<()> {
+    {
         let mut out =
             String::from("# Netscape HTTP Cookie File\n# Exported by ytmini. Do not share.\n\n");
-        for c in &rows {
+        for c in rows {
             let sub = if c.host.starts_with('.') {
                 "TRUE"
             } else {
@@ -351,7 +396,7 @@ impl Session {
         crate::yt::restrict_perms(&tmp)?;
         if !crate::yt::logged_in(&tmp) {
             let _ = std::fs::remove_file(&tmp);
-            anyhow::bail!("no YouTube login found in {}", self.label());
+            anyhow::bail!("no YouTube login found in {label}");
         }
         std::fs::rename(&tmp, dest).context("saving cookies")?;
         Ok(())
@@ -410,10 +455,72 @@ fn decrypt_chromium(key: &[u8; 16], enc: &[u8], hashed_host: bool) -> Option<Str
     String::from_utf8(plain.to_vec()).ok()
 }
 
-pub fn clear_snapshot() {
-    if let Ok(d) = crate::yt::config_dir() {
-        let _ = std::fs::remove_dir_all(d.join("signin-snapshot"));
+/// Parse Safari's `Cookies.binarycookies`: "cook", big-endian page count and
+/// sizes; each page lists cookies (little-endian) with flags, string offsets
+/// and an expiry in Mac absolute time (seconds since 2001-01-01).
+fn safari_cookies(path: &Path) -> Result<Vec<Cookie>> {
+    let data = std::fs::read(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            anyhow::anyhow!(
+                "macOS doesn't let ytmini read Safari's cookies. Allow it in System Settings → \
+                 Privacy & Security → Full Disk Access, or use Firefox/Chrome"
+            )
+        } else {
+            anyhow::anyhow!("reading Safari's cookies: {e}")
+        }
+    })?;
+    parse_binarycookies(&data).context("Safari's cookie file has an unexpected format")
+}
+
+fn parse_binarycookies(d: &[u8]) -> Option<Vec<Cookie>> {
+    let be = |o: usize| {
+        d.get(o..o + 4)
+            .map(|b| u32::from_be_bytes(b.try_into().unwrap()) as usize)
+    };
+    if d.get(0..4)? != b"cook" {
+        return None;
     }
+    let pages = be(4)?;
+    let mut off = 8 + pages * 4;
+    let mut out = Vec::new();
+    for i in 0..pages {
+        let size = be(8 + i * 4)?;
+        let page = d.get(off..off + size)?;
+        off += size;
+        let le = |o: usize| {
+            page.get(o..o + 4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize)
+        };
+        let n = le(4)?;
+        for k in 0..n {
+            let c = le(8 + k * 4)?;
+            let rec = page.get(c..c + le(c)?)?;
+            let r32 = |o: usize| {
+                rec.get(o..o + 4)
+                    .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize)
+            };
+            let f64at = |o: usize| {
+                rec.get(o..o + 8)
+                    .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+            };
+            let cstr = |o: usize| -> Option<String> {
+                let s = rec.get(o..)?;
+                let end = s.iter().position(|&b| b == 0)?;
+                Some(String::from_utf8_lossy(&s[..end]).into_owned())
+            };
+            let flags = r32(8)?;
+            out.push(Cookie {
+                host: cstr(r32(16)?)?,
+                name: cstr(r32(20)?)?,
+                path: cstr(r32(24)?)?,
+                value: cstr(r32(28)?)?,
+                expiry: f64at(40)? as i64 + 978_307_200,
+                secure: flags & 1 != 0,
+                http_only: flags & 4 != 0,
+            });
+        }
+    }
+    Some(out)
 }
 
 /// The browser's executable.
@@ -472,6 +579,50 @@ fn exe(id: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// Builds a one-page, one-cookie file in Safari's layout and parses it.
+    #[test]
+    fn safari_binarycookies() {
+        let strings = [".youtube.com", "SAPISID", "/", "abc123"];
+        let mut rec = vec![0u8; 56];
+        let mut offs = Vec::new();
+        for s in strings {
+            offs.push(rec.len() as u32);
+            rec.extend_from_slice(s.as_bytes());
+            rec.push(0);
+        }
+        let len = rec.len() as u32;
+        rec[0..4].copy_from_slice(&len.to_le_bytes());
+        rec[8..12].copy_from_slice(&5u32.to_le_bytes()); // secure + httponly
+        for (i, o) in offs.iter().enumerate() {
+            rec[16 + i * 4..20 + i * 4].copy_from_slice(&o.to_le_bytes());
+        }
+        rec[40..48].copy_from_slice(&(800_000_000f64).to_le_bytes());
+        let mut page = vec![0, 0, 1, 0];
+        page.extend_from_slice(&1u32.to_le_bytes());
+        page.extend_from_slice(&16u32.to_le_bytes()); // cookie offset
+        page.extend_from_slice(&0u32.to_le_bytes());
+        page.extend_from_slice(&rec);
+        let mut file = b"cook".to_vec();
+        file.extend_from_slice(&1u32.to_be_bytes());
+        file.extend_from_slice(&(page.len() as u32).to_be_bytes());
+        file.extend_from_slice(&page);
+        let c = parse_binarycookies(&file).unwrap();
+        assert_eq!(c.len(), 1);
+        let c = &c[0];
+        assert_eq!(
+            (
+                c.host.as_str(),
+                c.name.as_str(),
+                c.path.as_str(),
+                c.value.as_str()
+            ),
+            (".youtube.com", "SAPISID", "/", "abc123")
+        );
+        assert!(c.secure && c.http_only);
+        assert_eq!(c.expiry, 800_000_000 + 978_307_200);
+        assert!(parse_binarycookies(b"nope").is_none());
+    }
+
     #[test]
     fn chromium_decrypt_roundtrip() {
         use aes::cipher::{block_padding::Pkcs7, BlockModeEncrypt, KeyIvInit};
@@ -503,8 +654,7 @@ mod tests {
 mod live {
     use super::*;
 
-    /// Native export of the current profile vs yt-dlp's: same cookie names,
-    /// and the native file works for a signed-in API call. Chromium asks the
+    /// Native export of the current profile works for a signed-in API call. Chromium asks the
     /// Keychain, so it only runs with YTMINI_IMPORT set.
     /// `cargo test -- --ignored native_export --nocapture`
     #[test]
@@ -515,7 +665,7 @@ mod live {
             .find(|s| s.firefox || std::env::var_os("YTMINI_IMPORT").is_some())
             .unwrap();
         let tmp = std::env::temp_dir();
-        let (a, b) = (tmp.join("ytmini-native.txt"), tmp.join("ytmini-ytdlp.txt"));
+        let a = tmp.join("ytmini-native.txt");
         let t = std::time::Instant::now();
         s.export_cookies(&a).unwrap();
         eprintln!(
@@ -523,41 +673,12 @@ mod live {
             s.label(),
             t.elapsed().as_secs_f32()
         );
-        let tools = crate::yt::Tools::locate().unwrap();
-        let t = std::time::Instant::now();
-        crate::yt::import_cookies(&tools, &s.snapshot_spec().unwrap(), &b).unwrap();
-        clear_snapshot();
-        eprintln!("yt-dlp export: {:.2}s", t.elapsed().as_secs_f32());
-        let names = |p: &Path| -> std::collections::BTreeSet<String> {
-            std::fs::read_to_string(p)
-                .unwrap()
-                .lines()
-                .map(|l| l.strip_prefix("#HttpOnly_").unwrap_or(l))
-                .filter(|l| !l.starts_with('#') && !l.is_empty())
-                .filter_map(|l| {
-                    let f: Vec<&str> = l.split('\t').collect();
-                    (f.len() >= 7
-                        && (f[0].ends_with("youtube.com") || f[0].ends_with("google.com")))
-                    .then(|| format!("{} {}", f[0], f[5]))
-                })
-                .collect()
-        };
-        let (na, nb) = (names(&a), names(&b));
-        eprintln!(
-            "native {} cookies, yt-dlp {}; only yt-dlp: {:?}",
-            na.len(),
-            nb.len(),
-            nb.difference(&na).collect::<Vec<_>>()
-        );
-        // YSC is a per-visit cookie YouTube hands yt-dlp during its own request
-        assert!(nb.difference(&na).all(|n| n.ends_with(" YSC")));
         let mut p = crate::innertube::Pager::new(&a, &crate::yt::Source::WatchLater).unwrap();
         assert!(
             !p.next_page().unwrap().unwrap().is_empty(),
             "signed-in call with native cookies"
         );
         let _ = std::fs::remove_file(a);
-        let _ = std::fs::remove_file(b);
     }
 
     /// Finds your most recent browser profile and reports whether it's signed
@@ -575,11 +696,8 @@ mod live {
         eprintln!("current: {} signed in: {logged}", s.label());
         // Importing Chromium cookies asks for Keychain access, so opt in.
         if logged && (s.firefox || std::env::var_os("YTMINI_IMPORT").is_some()) {
-            let tools = crate::yt::Tools::locate().unwrap();
             let out = std::env::temp_dir().join("ytmini-signin-test-cookies.txt");
-            let spec = s.snapshot_spec().unwrap();
-            crate::yt::import_cookies(&tools, &spec, &out).unwrap();
-            clear_snapshot();
+            s.export_cookies(&out).unwrap();
             assert!(crate::yt::logged_in(&out));
             let _ = std::fs::remove_file(out);
         }
