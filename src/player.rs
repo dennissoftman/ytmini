@@ -233,6 +233,11 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(300);
 /// (and anywhere on that half) and still count.
 const STREAK_GAP: Duration = Duration::from_millis(700);
 
+/// Volume leveling: ffmpeg's dynamic normalizer, gentle settings (half-second
+/// frames, max 5× gain) so quiet talk comes up and loud intros come down
+/// without pumping.
+pub const LEVELING: &str = "lavfi=[dynaudnorm=f=500:g=31:p=0.9:m=5]";
+
 const OBSERVED: &[(&str, std::ffi::c_int)] = &[
     ("time-pos", mpv::FORMAT_DOUBLE),
     ("duration", mpv::FORMAT_DOUBLE),
@@ -273,6 +278,8 @@ impl Embedded {
             ("idle", "yes".into()),
             ("osc", "no".into()),
             ("input-default-bindings", "no".into()),
+            // ytmini owns the media keys / Now Playing (nowplaying.rs)
+            ("input-media-keys", "no".into()),
             ("input-vo-keyboard", "no".into()),
             ("terminal", "no".into()),
             ("audio-client-name", "ytmini".into()),
@@ -280,6 +287,9 @@ impl Embedded {
         ];
         if profile.fast {
             opts.push(("profile", "fast".into()));
+        }
+        if settings.volume_leveling {
+            opts.push(("af", LEVELING.into()));
         }
         if profile.audio_only {
             opts.push(("vid", "no".into()));
@@ -709,6 +719,10 @@ impl Embedded {
     pub fn set_volume(&mut self, v: f64) {
         self.volume = v.clamp(0.0, 100.0);
         let _ = self.mpv().set_f64("volume", self.volume);
+    }
+
+    pub fn set_leveling(&mut self, on: bool) {
+        let _ = self.mpv().set_str("af", if on { LEVELING } else { "" });
     }
 
     pub fn set_speed(&mut self, s: f64) {

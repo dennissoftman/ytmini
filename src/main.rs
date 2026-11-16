@@ -9,6 +9,7 @@ mod deps;
 mod innertube;
 mod links;
 mod mpv;
+mod nowplaying;
 mod player;
 mod positions;
 mod settings;

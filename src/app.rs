@@ -121,6 +121,8 @@ enum Msg {
     Status(String, bool),
     /// SponsorBlock segments for a video id.
     Segments(String, Vec<crate::sponsorblock::Segment>),
+    /// Thumbnail for Now Playing, fetched for a video that wasn't cached.
+    NowPlayingArt(String, Vec<u8>),
     /// Silent session refresh finished: (browser label, browser id, profile) or error.
     SessionRefreshed(Result<(String, String, std::path::PathBuf), String>),
     /// Watch later add (true) / remove finished for a video id.
@@ -269,6 +271,11 @@ pub struct App {
     /// Settings → Feed "hide titles containing" text, as typed.
     muted_words_buf: String,
     session_refresh: SessionRefresh,
+    /// Now Playing: last published state and when, the channel name and
+    /// thumbnail of what's playing.
+    np_last: Option<(crate::nowplaying::Info, std::time::Instant)>,
+    np_artist: String,
+    np_art: Option<Vec<u8>>,
 
     // background (tray)
     tray: Option<Tray>,
@@ -359,6 +366,9 @@ impl App {
             was_focused: false,
             muted_words_buf: String::new(),
             session_refresh: SessionRefresh::Idle,
+            np_last: None,
+            np_artist: String::new(),
+            np_art: None,
             tray,
             tray_rx,
             hidden: false,
@@ -372,6 +382,7 @@ impl App {
         app.enforce_cache(ctx);
         app.muted_words_buf = app.settings.muted_words.join(", ");
         crate::links::install(ctx);
+        crate::nowplaying::install(ctx);
         // `ytmini --play <url|id>` opens straight into the player.
         let mut args = std::env::args().skip(1);
         while let Some(a) = args.next() {
@@ -904,6 +915,12 @@ impl App {
                         }
                     }
                 }
+                Msg::NowPlayingArt(id, bytes) => {
+                    if self.embedded.as_ref().is_some_and(|p| p.id == id) {
+                        self.np_art = Some(bytes);
+                        self.np_last = None; // republish with artwork
+                    }
+                }
                 Msg::Segments(id, segs) => {
                     if let Some(p) = self.embedded.as_mut().filter(|p| p.id == id) {
                         p.segments = segs;
@@ -931,6 +948,25 @@ impl App {
 
     fn play(&mut self, video: &Video) {
         self.stop_player();
+        self.np_artist = video.channel().to_string();
+        self.np_art = ["hi", "sd"]
+            .iter()
+            .find_map(|t| cache::read_thumb(&format!("{}-{t}", video.id)));
+        self.np_last = None;
+        if self.np_art.is_none() {
+            // not in the thumbnail cache (e.g. opened from a link): fetch one, no cookies
+            let (tx, id) = (self.tx.clone(), video.id.clone());
+            std::thread::spawn(move || {
+                let url = format!("https://i.ytimg.com/vi/{id}/mqdefault.jpg");
+                let bytes = ureq::get(&url)
+                    .call()
+                    .ok()
+                    .and_then(|mut r| r.body_mut().read_to_vec().ok());
+                if let Some(b) = bytes {
+                    let _ = tx.send(Msg::NowPlayingArt(id, b));
+                }
+            });
+        }
         // Report the view so it shows in YouTube's watch history (as the website does).
         if self.settings.mark_watched && self.smoke.is_none() {
             let (tx, cookies, id) = (self.tx.clone(), self.cookies.clone(), video.id.clone());
@@ -2224,6 +2260,7 @@ impl App {
                     ui.end_row();
                 });
                 ui.checkbox(&mut s.mark_watched, "Add videos I watch to my YouTube history");
+                ui.checkbox(&mut s.volume_leveling, "Level volume (quiet voices up, loud parts down)");
                 ui.label(
                     RichText::new(format!(
                         "Auto never exceeds what this screen can show ({}p), and drops to 1080p30 on battery, 720p30 in Low Power Mode.",
@@ -2462,6 +2499,50 @@ impl App {
         self.was_focused = focused;
     }
 
+    /// Media keys / Control Center → player, and player state → Now Playing.
+    fn sync_now_playing(&mut self) {
+        use crate::nowplaying::{self as np, Cmd};
+        for c in np::take() {
+            let Some(p) = &mut self.embedded else {
+                continue;
+            };
+            match c {
+                Cmd::Toggle => p.toggle_pause(),
+                Cmd::Play if p.paused || p.eof => p.toggle_pause(),
+                Cmd::Pause if !p.paused => p.toggle_pause(),
+                Cmd::Seek(t) => p.seek_absolute(t, true),
+                Cmd::Skip(d) => p.seek_relative(d),
+                _ => {}
+            }
+        }
+        let Some(p) = &self.embedded else {
+            if self.np_last.take().is_some() {
+                np::publish(None, None);
+            }
+            return;
+        };
+        if !p.started {
+            return;
+        }
+        let info = np::Info {
+            id: p.id.clone(),
+            title: p.title.clone(),
+            artist: self.np_artist.clone(),
+            duration: p.duration,
+            pos: p.pos,
+            playing: !p.paused && !p.eof,
+            rate: p.speed,
+        };
+        let due = match &self.np_last {
+            None => true,
+            Some((old, at)) => info.differs(old, at.elapsed().as_secs_f64()),
+        };
+        if due {
+            np::publish(Some(&info), self.np_art.as_deref());
+            self.np_last = Some((info, std::time::Instant::now()));
+        }
+    }
+
     fn open_link(&mut self, ctx: &egui::Context, frame: &eframe::Frame, link: crate::links::Link) {
         use crate::links::Link;
         self.clip_link = None;
@@ -2682,6 +2763,7 @@ impl eframe::App for App {
         self.track_positions(ctx);
         self.poll_signin(ctx);
         self.poll_links(ctx);
+        self.sync_now_playing();
         if let Some(e) = &mut self.embedded {
             e.poll_events();
             if std::mem::take(&mut e.title_changed) {
@@ -2693,6 +2775,11 @@ impl eframe::App for App {
         }
         // (the smoke test changes settings; never persist those)
         if self.smoke.is_none() && self.settings != self.saved_settings {
+            if self.settings.volume_leveling != self.saved_settings.volume_leveling {
+                if let Some(p) = &mut self.embedded {
+                    p.set_leveling(self.settings.volume_leveling);
+                }
+            }
             if (self.settings.cache_mb, self.settings.cache_days)
                 != (self.saved_settings.cache_mb, self.saved_settings.cache_days)
             {

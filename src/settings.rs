@@ -62,6 +62,8 @@ pub struct Settings {
     pub density: Density,
     /// Sidebar shows icons only.
     pub sidebar_collapsed: bool,
+    /// Even out loudness between and within videos (mpv dynaudnorm).
+    pub volume_leveling: bool,
     /// Skip SponsorBlock segments.
     pub sponsorblock: bool,
     /// SponsorBlock categories to skip (ids from `sponsorblock::CATEGORIES`).
@@ -124,6 +126,7 @@ impl Default for Settings {
             signin_source: None,
             density: Density::Comfortable,
             sidebar_collapsed: false,
+            volume_leveling: true,
             sponsorblock: true,
             sb_categories: crate::sponsorblock::default_categories(),
             show_shorts: false,
