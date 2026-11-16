@@ -455,6 +455,7 @@ impl Pager {
             Source::WatchLater => browse("VLWL"),
             Source::History => browse("FEhistory"),
             Source::Playlists => browse("FEplaylist_aggregation"),
+            Source::Downloads => bail!("downloads are local"),
             Source::Playlist { id, .. } => browse(&format!("VL{id}")),
             // "EgIQAQ==": videos only (no channels, shorts shelves, …)
             Source::Search(q) => ("search", json!({ "query": q, "params": "EgIQAQ%3D%3D" })),

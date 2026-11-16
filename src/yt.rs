@@ -74,7 +74,7 @@ impl Tools {
         }
     }
 
-    fn ytdlp_cmd(&self) -> Command {
+    pub fn ytdlp_cmd(&self) -> Command {
         let mut c = Command::new(&self.ytdlp);
         c.env("PATH", &self.path_env).stdin(Stdio::null());
         if let Some(d) = &self.deno {
@@ -460,6 +460,8 @@ pub enum Source {
         id: String,
         title: String,
     },
+    /// Videos saved for offline viewing (local, see downloads.rs).
+    Downloads,
 }
 
 impl Source {
@@ -473,6 +475,7 @@ impl Source {
             Source::Search(_) => "Search".into(),
             Source::Channel { name, .. } | Source::ChannelPlaylists { name, .. } => name.clone(),
             Source::Playlist { title, .. } => title.clone(),
+            Source::Downloads => "Downloads".into(),
         }
     }
 
@@ -498,6 +501,7 @@ impl Source {
                 format!("{}/playlists", url.trim_end_matches('/'))
             }
             Source::Playlist { id, .. } => format!("https://www.youtube.com/playlist?list={id}"),
+            Source::Downloads => String::new(), // local; never fetched
         }
     }
 }

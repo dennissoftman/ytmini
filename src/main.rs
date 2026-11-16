@@ -6,6 +6,7 @@
 mod app;
 mod cache;
 mod deps;
+mod downloads;
 mod innertube;
 mod links;
 mod mpv;

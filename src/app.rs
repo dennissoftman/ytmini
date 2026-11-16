@@ -60,12 +60,13 @@ fn metrics(d: Density) -> Metrics {
     }
 }
 
-const BASE_TABS: [Source; 5] = [
+const BASE_TABS: [Source; 6] = [
     Source::Feed,
     Source::Subscriptions,
     Source::WatchLater,
     Source::History,
     Source::Playlists,
+    Source::Downloads,
 ];
 
 // ---------- state ----------
@@ -121,6 +122,7 @@ enum Msg {
     Status(String, bool),
     /// SponsorBlock segments for a video id.
     Segments(String, Vec<crate::sponsorblock::Segment>),
+    Download(crate::downloads::Progress),
     /// Thumbnail for Now Playing, fetched for a video that wasn't cached.
     NowPlayingArt(String, Vec<u8>),
     /// Silent session refresh finished: (browser label, browser id, profile) or error.
@@ -159,7 +161,8 @@ fn list_name(s: &Source) -> Option<&'static str> {
         Source::Search(_)
         | Source::Channel { .. }
         | Source::ChannelPlaylists { .. }
-        | Source::Playlist { .. } => None,
+        | Source::Playlist { .. }
+        | Source::Downloads => None,
     }
 }
 
@@ -193,6 +196,8 @@ enum Quick {
     WatchLater(bool),
     /// Hide this video's channel from feeds and search.
     MuteChannel,
+    Download,
+    DeleteDownload,
     CopyLink,
     OpenInBrowser,
     Watched(bool),
@@ -276,6 +281,9 @@ pub struct App {
     np_last: Option<(crate::nowplaying::Info, std::time::Instant)>,
     np_artist: String,
     np_art: Option<Vec<u8>>,
+    downloads: crate::downloads::Manifest,
+    /// In-flight downloads: id → progress 0–1.
+    dl_active: HashMap<String, f32>,
 
     // background (tray)
     tray: Option<Tray>,
@@ -369,6 +377,8 @@ impl App {
             np_last: None,
             np_artist: String::new(),
             np_art: None,
+            downloads: crate::downloads::Manifest::load(),
+            dl_active: HashMap::new(),
             tray,
             tray_rx,
             hidden: false,
@@ -678,6 +688,18 @@ impl App {
 
     /// Load the first page of `source` (if not cached, or always when `refresh`).
     fn load(&mut self, ctx: &egui::Context, source: Source, refresh: bool) {
+        if source == Source::Downloads {
+            let tab = self.tabs.entry(source).or_default();
+            tab.videos = self
+                .downloads
+                .entries
+                .iter()
+                .rev()
+                .map(|e| e.as_video())
+                .collect();
+            (tab.loading, tab.loaded_once, tab.exhausted, tab.error) = (false, true, true, None);
+            return;
+        }
         let tab = self.tabs.entry(source.clone()).or_default();
         if tab.loading && !refresh {
             return;
@@ -915,6 +937,7 @@ impl App {
                         }
                     }
                 }
+                Msg::Download(p) => self.on_download(ctx, p),
                 Msg::NowPlayingArt(id, bytes) => {
                     if self.embedded.as_ref().is_some_and(|p| p.id == id) {
                         self.np_art = Some(bytes);
@@ -1033,6 +1056,9 @@ impl App {
             resume,
             gpa,
             ctx,
+            self.downloads
+                .get(&video.id)
+                .map(|e| (e.video_path(), e.audio_path())),
         ) {
             Ok(p) => {
                 self.status = None;
@@ -1567,6 +1593,7 @@ impl App {
             let thumbs = &mut self.thumbs;
             let positions = &self.positions;
             let settings = &self.settings;
+            let (downloads, dl_active) = (&self.downloads, &self.dl_active);
             let Some(tab) = self.tabs.get_mut(&source) else {
                 return;
             };
@@ -1679,6 +1706,10 @@ impl App {
                                     progress,
                                     m,
                                     in_watch_later: source == Source::WatchLater,
+                                    download: dl_active
+                                        .get(&v.id)
+                                        .copied()
+                                        .or_else(|| downloads.get(&v.id).map(|_| 1.0)),
                                 };
                                 match video_card(ui, thumbs, variant, v, card) {
                                     CardAction::Open => clicked = Some(v.clone()),
@@ -1804,6 +1835,12 @@ impl App {
                 if let Err(e) = open_url(&url) {
                     self.status = Some((format!("Couldn't open the browser: {e}"), true));
                 }
+            }
+            Quick::Download => self.start_download(ctx, v),
+            Quick::DeleteDownload => {
+                self.downloads.remove(&v.id);
+                self.status = Some(("Download deleted.".into(), false));
+                self.load(ctx, Source::Downloads, true);
             }
             Quick::MuteChannel => {
                 if let Some(ch) = v.channel.clone() {
@@ -2232,6 +2269,7 @@ impl App {
         let mut reimport = false;
         let mut refresh_session = false;
         let mut check_updates = false;
+        let mut clear_downloads = false;
         let before_quality = self.settings.quality;
         egui::Window::new("Settings")
             .open(&mut open)
@@ -2292,6 +2330,44 @@ impl App {
                 }
                 ui.label(
                     RichText::new("Segments come from the SponsorBlock community (sponsor.ajay.app). Only a short hash prefix of the video id is sent, never the id itself.")
+                        .small()
+                        .color(text_dim()),
+                );
+
+                ui.add_space(10.0);
+                section(ui, "Downloads");
+                ui.horizontal(|ui| {
+                    ui.label("Quality");
+                    let label = |h: u32| if h == 0 { "Audio only".to_string() } else { format!("{h}p") };
+                    egui::ComboBox::from_id_salt("dlq").selected_text(label(s.download_height)).show_ui(ui, |ui| {
+                        for h in [480, 720, 1080, 1440, 0] {
+                            ui.selectable_value(&mut s.download_height, h, label(h));
+                        }
+                    });
+                    ui.label("Keep at most");
+                    ui.add(egui::DragValue::new(&mut s.download_cap_gb).range(1..=500).suffix(" GB"));
+                });
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} used · {} videos",
+                            crate::downloads::fmt_bytes(self.downloads.total_bytes()),
+                            self.downloads.entries.len()
+                        ))
+                        .color(text_dim()),
+                    );
+                    if ui.button("Show in Finder").clicked() {
+                        if let Ok(d) = crate::downloads::dir() {
+                            let _ = open_url(&d.display().to_string());
+                        }
+                    }
+                    if !self.downloads.entries.is_empty() && ui.button("Delete all").clicked() {
+                        self.downloads.clear();
+                        clear_downloads = true;
+                    }
+                });
+                ui.label(
+                    RichText::new("Saved to Movies/ytmini. When full, the oldest videos you've already watched are deleted first. Hardware-friendly codecs only, so offline playback is easy on the battery.")
                         .small()
                         .color(text_dim()),
                 );
@@ -2450,6 +2526,9 @@ impl App {
         if check_updates {
             self.run_deps_job(ctx, vec![Dep::YtDlp], true);
         }
+        if clear_downloads {
+            self.load(ctx, Source::Downloads, true);
+        }
         if clear {
             cache::clear();
             self.thumbs.clear();
@@ -2497,6 +2576,97 @@ impl App {
             }
         }
         self.was_focused = focused;
+    }
+
+    fn start_download(&mut self, ctx: &egui::Context, v: &Video) {
+        let Some(tools) = self.tools.clone() else {
+            return;
+        };
+        if self.dl_active.contains_key(&v.id) || self.downloads.get(&v.id).is_some() {
+            return;
+        }
+        let cap = self.settings.download_cap_gb * 1_000_000_000;
+        let positions = &self.positions;
+        let evicted =
+            self.downloads
+                .evict(cap, |id| positions.get(id).is_some_and(|e| e.watched()), "");
+        if self.downloads.total_bytes() >= cap {
+            self.status = Some((
+                format!(
+                    "Downloads are full ({} of {}). Delete some, or raise the limit in Settings.",
+                    crate::downloads::fmt_bytes(self.downloads.total_bytes()),
+                    crate::downloads::fmt_bytes(cap)
+                ),
+                true,
+            ));
+            return;
+        }
+        if evicted > 0 {
+            self.status = Some((
+                format!("Made room: deleted {evicted} watched download(s)."),
+                false,
+            ));
+        }
+        self.dl_active.insert(v.id.clone(), 0.0);
+        let (tx, ctx, cookies, video, height) = (
+            self.tx.clone(),
+            ctx.clone(),
+            self.cookies.clone(),
+            v.clone(),
+            self.settings.download_height,
+        );
+        std::thread::spawn(move || {
+            use crate::downloads::{download, Progress};
+            let mut last = 0.0f32;
+            let r = download(&tools, &cookies, &video, height, |p| {
+                if p - last >= 0.01 {
+                    last = p;
+                    let _ = tx.send(Msg::Download(Progress::Running(video.id.clone(), p)));
+                    ctx.request_repaint();
+                }
+            });
+            let _ = tx.send(Msg::Download(Progress::Done(
+                video.id.clone(),
+                r.map_err(|e| format!("{e:#}")),
+            )));
+            ctx.request_repaint();
+        });
+    }
+
+    fn on_download(&mut self, ctx: &egui::Context, p: crate::downloads::Progress) {
+        use crate::downloads::Progress;
+        match p {
+            Progress::Running(id, f) => {
+                if let Some(x) = self.dl_active.get_mut(&id) {
+                    *x = f.min(0.99);
+                }
+            }
+            Progress::Done(id, r) => {
+                self.dl_active.remove(&id);
+                match r {
+                    Ok(e) => {
+                        self.status = Some((
+                            format!(
+                                "Downloaded “{}” ({}).",
+                                e.title,
+                                crate::downloads::fmt_bytes(e.bytes)
+                            ),
+                            false,
+                        ));
+                        self.downloads.add(e);
+                        let cap = self.settings.download_cap_gb * 1_000_000_000;
+                        let positions = &self.positions;
+                        self.downloads.evict(
+                            cap,
+                            |id| positions.get(id).is_some_and(|e| e.watched()),
+                            &id,
+                        );
+                        self.load(ctx, Source::Downloads, true);
+                    }
+                    Err(e) => self.status = Some((format!("Download failed: {e}"), true)),
+                }
+            }
+        }
     }
 
     /// Media keys / Control Center → player, and player state → Now Playing.
@@ -2944,6 +3114,8 @@ struct CardInfo {
     progress: Option<crate::positions::Entry>,
     m: Metrics,
     in_watch_later: bool,
+    /// None: not downloaded; Some(1.0): downloaded; less: in progress.
+    download: Option<f32>,
 }
 
 fn video_card(
@@ -2960,6 +3132,7 @@ fn video_card(
         progress,
         m,
         in_watch_later,
+        download,
     } = info;
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if !ui.is_rect_visible(rect) {
@@ -3112,6 +3285,23 @@ fn video_card(
         painter.rect_stroke(rect, r, Stroke::new(2.0, accent()), StrokeKind::Outside);
     }
 
+    // downloaded: small badge top-left; downloading: progress along the bottom
+    match download {
+        Some(p) if p >= 1.0 => {
+            let c = thumb.left_top() + Vec2::new(16.0, 16.0);
+            painter.circle_filled(c, 10.0, Color32::from_black_alpha(170));
+            paint_icon(&painter, Icon::Download, c, Color32::WHITE);
+        }
+        Some(p) => {
+            let bar = egui::Rect::from_min_max(
+                thumb.left_bottom() - Vec2::new(0.0, 4.0),
+                egui::Pos2::new(thumb.left() + thumb.width() * p.max(0.02), thumb.bottom()),
+            );
+            painter.rect_filled(bar, 0, accent());
+        }
+        None => {}
+    }
+
     // ⋯ menu button on hover, top-right of the thumbnail
     let mut action = CardAction::None;
     let menu_rect = egui::Rect::from_center_size(
@@ -3155,6 +3345,26 @@ fn video_card(
         }
         if v.channel_url.is_some() && ui.button("Go to channel").clicked() {
             *action = CardAction::Channel;
+        }
+        if !v.is_playlist {
+            match download {
+                None => {
+                    if ui.button("Download").clicked() {
+                        *action = CardAction::Quick(Quick::Download);
+                    }
+                }
+                Some(p) if p < 1.0 => {
+                    ui.add_enabled(
+                        false,
+                        egui::Button::new(format!("Downloading… {:.0}%", p * 100.0)),
+                    );
+                }
+                Some(_) => {
+                    if ui.button("Delete download").clicked() {
+                        *action = CardAction::Quick(Quick::DeleteDownload);
+                    }
+                }
+            }
         }
         if v.channel.is_some() && !v.is_playlist && ui.button("Hide this channel").clicked() {
             *action = CardAction::Quick(Quick::MuteChannel);
@@ -3310,6 +3520,7 @@ fn tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response 
 
 #[derive(Clone, Copy)]
 enum Icon {
+    Download,
     Home,
     Subs,
     Later,
@@ -3328,6 +3539,7 @@ fn nav_icon(s: &Source) -> Icon {
         Source::WatchLater => Icon::Later,
         Source::History => Icon::History,
         Source::Playlists => Icon::Lists,
+        Source::Downloads => Icon::Download,
         _ => Icon::Search,
     }
 }
@@ -3387,6 +3599,12 @@ fn paint_icon(p: &egui::Painter, icon: Icon, c: egui::Pos2, color: Color32) {
                 Stroke::NONE,
             ));
             p.line(vec![v(0.0, -3.5), v(0.0, 0.0), v(2.5, 2.0)], st);
+        }
+        Icon::Download => {
+            p.line_segment([v(0.0, -7.0), v(0.0, 3.0)], st);
+            p.line_segment([v(-4.0, -1.0), v(0.0, 3.0)], st);
+            p.line_segment([v(4.0, -1.0), v(0.0, 3.0)], st);
+            p.line_segment([v(-7.0, 7.0), v(7.0, 7.0)], st);
         }
         Icon::Lists => {
             for y in [-4.5, 0.0, 4.5] {

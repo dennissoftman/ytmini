@@ -155,6 +155,8 @@ pub struct Embedded {
     pub profile_label: String,
     /// The ytdl-format currently in use.
     pub format: String,
+    /// Playing a download: no quality switching.
+    pub local: bool,
 
     pub pos: f64,
     pub duration: f64,
@@ -263,6 +265,8 @@ impl Embedded {
         resume: Option<f64>,
         gpa: mpv::GetProcAddress,
         ctx: &egui::Context,
+        // A download: (video file, separate audio file). Played offline.
+        local: Option<(Option<std::path::PathBuf>, Option<std::path::PathBuf>)>,
     ) -> Result<Embedded, String> {
         let mut opts: Vec<(&str, String)> = vec![
             ("vo", "libmpv".into()),
@@ -294,6 +298,18 @@ impl Embedded {
         if profile.audio_only {
             opts.push(("vid", "no".into()));
         }
+        // what to load: the YouTube URL (resolved by the ytdl hook) or local files
+        let target = match &local {
+            Some((Some(v), audio)) => {
+                if let Some(a) = audio {
+                    // one-entry list; ':' never appears in our download paths
+                    opts.push(("audio-files", a.display().to_string()));
+                }
+                v.display().to_string()
+            }
+            Some((None, Some(a))) => a.display().to_string(),
+            _ => video.url(),
+        };
         let mpv = Mpv::new(&opts)?;
         mpv.request_log_messages("error");
         for (i, (name, fmt)) in OBSERVED.iter().enumerate() {
@@ -324,12 +340,12 @@ impl Embedded {
         match resume {
             Some(t) => mpv.command(&[
                 "loadfile",
-                &video.url(),
+                &target,
                 "replace",
                 "-1",
                 &format!("start={t:.1}"),
             ])?,
-            None => mpv.command(&["loadfile", &video.url()])?,
+            None => mpv.command(&["loadfile", &target])?,
         }
 
         Ok(Embedded {
@@ -339,7 +355,12 @@ impl Embedded {
             title: video.title().to_string(),
             id: video.id.clone(),
             url: video.url(),
-            profile_label: profile.label.clone(),
+            profile_label: if local.is_some() {
+                "offline".into()
+            } else {
+                profile.label.clone()
+            },
+            local: local.is_some(),
             format: profile.ytdl_format.clone(),
             pos: 0.0,
             duration: 0.0,
@@ -731,7 +752,7 @@ impl Embedded {
 
     /// Switch format in place: keep the position, reload with the new format.
     pub fn apply_profile(&mut self, profile: &Profile) {
-        if self.format == profile.ytdl_format {
+        if self.local || self.format == profile.ytdl_format {
             return;
         }
         self.format = profile.ytdl_format.clone();
