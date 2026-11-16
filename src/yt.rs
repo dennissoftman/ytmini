@@ -741,6 +741,40 @@ pub struct Direct {
     pub offline: bool,
 }
 
+impl Direct {
+    /// Still worth using: YouTube's URLs carry their expiry (`expire=`,
+    /// Unix seconds, ~6 h out); keep a 10-minute margin.
+    pub fn fresh(&self) -> bool {
+        if self.offline {
+            return true;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        url_expiry(&self.video).is_none_or(|e| e > now + 600)
+    }
+}
+
+/// `expire` from a googlevideo URL (query `expire=…` or path `/expire/…/`).
+fn url_expiry(url: &str) -> Option<u64> {
+    let i = url
+        .find("expire=")
+        .map(|i| i + 7)
+        .or_else(|| url.find("/expire/").map(|i| i + 8))?;
+    let digits: String = url[i..].chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// The local address the default route uses: changes when you switch
+/// Wi-Fi, turn a VPN on/off or move networks (stream URLs are bound to the
+/// IP they were resolved from). No packets are sent: UDP "connect" only
+/// picks the route.
+pub fn route_fingerprint() -> Option<std::net::IpAddr> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("1.1.1.1:53").ok()?;
+    Some(s.local_addr().ok()?.ip())
+}
+
 /// Resolve `video` with yt-dlp for `format` (blocking, ~4 s).
 pub fn resolve(tools: &Tools, cookies: &Path, video: &Video, format: &str) -> Result<Direct> {
     let jar = CookieCopy::new(cookies)?;
@@ -1424,6 +1458,19 @@ mod tests {
     use super::*;
 
     /// yt-dlp gets a private copy of the cookies, gone when dropped.
+    #[test]
+    fn expiry_parse() {
+        assert_eq!(
+            url_expiry("https://rr1.googlevideo.com/videoplayback?expire=1794887000&ei=x"),
+            Some(1794887000)
+        );
+        assert_eq!(
+            url_expiry("https://manifest.googlevideo.com/api/manifest/hls/expire/1794887000/ei/x"),
+            Some(1794887000)
+        );
+        assert_eq!(url_expiry("/path/file.webm"), None);
+    }
+
     #[test]
     fn cookie_copy_private() {
         use std::os::unix::fs::PermissionsExt;

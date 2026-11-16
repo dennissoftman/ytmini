@@ -64,7 +64,11 @@ fn metrics(d: Density) -> Metrics {
 /// Hover a card this long and its stream gets resolved in the background.
 const HOVER_PREPARE: Duration = Duration::from_millis(350);
 /// Resolved stream URLs last ~6 h; use them only while clearly fresh.
-const PREPARED_TTL: Duration = Duration::from_secs(30 * 60);
+/// Stream URLs resolved ahead are kept this long (YouTube's expire after
+/// ~6 h, and only work from the network they were resolved on).
+const PREPARED_TTL: Duration = Duration::from_secs(3 * 3600);
+/// How often the network route is checked (a single local syscall).
+const NET_CHECK: Duration = Duration::from_secs(15);
 /// How long a click waits for a running resolve before starting its own.
 const RESOLVE_WAIT_MAX: Duration = Duration::from_secs(8);
 
@@ -339,6 +343,9 @@ pub struct App {
     preparing: std::collections::HashSet<String>,
     /// The player opened idle at this moment, waiting for a running resolve.
     resolve_wait: Option<std::time::Instant>,
+    /// The default route's local address, and when it was last checked.
+    net_route: Option<std::net::IpAddr>,
+    net_checked: std::time::Instant,
     /// DeArrow branding per video id (None while being fetched).
     dearrow: HashMap<String, Option<crate::dearrow::Branding>>,
     dearrow_tx: Option<Sender<String>>,
@@ -464,6 +471,8 @@ impl App {
             dearrow_tx: None,
             preparing: std::collections::HashSet::new(),
             resolve_wait: None,
+            net_route: yt::route_fingerprint(),
+            net_checked: std::time::Instant::now(),
             hover: None,
             dl_active: HashMap::new(),
             tray,
@@ -3953,7 +3962,7 @@ impl App {
     fn prepared_for(&self, id: &str, format: &str) -> Option<yt::Direct> {
         self.prepared
             .get(id)
-            .filter(|(f, _, t)| f == format && t.elapsed() < PREPARED_TTL)
+            .filter(|(f, d, t)| f == format && t.elapsed() < PREPARED_TTL && d.fresh())
             .map(|(_, d, _)| d.clone())
     }
 
@@ -4017,6 +4026,28 @@ impl App {
             let _ = tx.send(Msg::Prepared(video.id, format, r));
             ctx.request_repaint();
         });
+    }
+
+    /// Stored stream URLs only work from the IP they were resolved on: drop
+    /// them when the route changes (Wi-Fi switch, VPN, new network).
+    fn watch_network(&mut self) {
+        if self.net_checked.elapsed() < NET_CHECK {
+            return;
+        }
+        self.net_checked = std::time::Instant::now();
+        let now = yt::route_fingerprint();
+        if now != self.net_route {
+            if self.net_route.is_some() && !self.prepared.is_empty() {
+                if std::env::var_os("YTMINI_DEBUG").is_some() {
+                    eprintln!(
+                        "network changed: dropping {} stored resolves",
+                        self.prepared.len()
+                    );
+                }
+                self.prepared.clear();
+            }
+            self.net_route = now;
+        }
     }
 
     /// While a video plays, resolve the one Next / autoplay would start, so
@@ -4418,8 +4449,13 @@ impl eframe::App for App {
         self.poll_links(ctx);
         self.watch_session(ctx);
         self.sync_now_playing();
+        self.watch_network();
         if let Some(e) = &mut self.embedded {
             e.poll_events();
+            if std::mem::take(&mut e.resolved_failed) {
+                // probably a new network: the other stored URLs won't work either
+                self.prepared.clear();
+            }
             if std::mem::take(&mut e.title_changed) {
                 self.np_last = None; // republish Now Playing with the real title
             }

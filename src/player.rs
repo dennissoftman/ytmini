@@ -164,6 +164,11 @@ pub struct Embedded {
     _jar: yt::CookieCopy,
     /// Opened idle, waiting for stream URLs (Some(resume position)).
     waiting: Option<Option<f64>>,
+    /// Playing URLs resolved earlier: if they fail (expired, or resolved on
+    /// another network), reload once through mpv's own yt-dlp.
+    from_resolved: bool,
+    /// Set when that happened, so the app drops its other stored URLs.
+    pub resolved_failed: bool,
 
     pub pos: f64,
     pub duration: f64,
@@ -364,7 +369,6 @@ impl Embedded {
         // URLs/files we already have, which skips yt-dlp entirely.
         let target = match &direct {
             Some(d) => {
-                opts.push(("ytdl", "no".into()));
                 opts.push(("force-media-title", video.title().to_string()));
                 if let Some(ua) = &d.user_agent {
                     opts.push(("user-agent", ua.clone()));
@@ -384,6 +388,15 @@ impl Embedded {
             "ytdl-raw-options",
             "append",
             &format!("cookies={}", jar.path().display()),
+        ])?;
+        // The hook stays loaded (it can't be turned on later, which the
+        // fallback and quality switches need), but leaves stream URLs we
+        // resolved ourselves to ffmpeg.
+        mpv.command(&[
+            "change-list",
+            "script-opts",
+            "append",
+            "ytdl_hook-exclude=googlevideo%.com",
         ])?;
         for opt in tools.ytdl_raw_options() {
             mpv.command(&["change-list", "ytdl-raw-options", "append", &opt])?;
@@ -412,6 +425,8 @@ impl Embedded {
         Ok(Embedded {
             _jar: jar,
             waiting: wait.then_some(resume),
+            from_resolved: direct.as_ref().is_some_and(|d| !d.offline),
+            resolved_failed: false,
             render: Some(render),
             mpv: Some(mpv),
             shared: Some(shared),
@@ -470,10 +485,10 @@ impl Embedded {
         let Some(resume) = self.waiting.take() else {
             return;
         };
+        self.from_resolved = direct.is_some();
         let mpv = self.mpv();
         let target = match &direct {
             Some(d) => {
-                let _ = mpv.set_str("ytdl", "no");
                 let _ = mpv.set_str("force-media-title", &self.title);
                 if let Some(ua) = &d.user_agent {
                     let _ = mpv.set_str("user-agent", ua);
@@ -545,7 +560,24 @@ impl Embedded {
                 mpv::EVENT_END_FILE => {
                     // SAFETY: END_FILE data is an mpv_event_end_file.
                     let e = unsafe { &*(ev.data as *const mpv::EventEndFile) };
-                    if e.reason == mpv::END_FILE_REASON_ERROR {
+                    if e.reason == mpv::END_FILE_REASON_ERROR && self.from_resolved {
+                        // stale URLs: quietly go through yt-dlp, same position
+                        self.from_resolved = false;
+                        self.resolved_failed = true;
+                        let at = if self.pos > 0.0 {
+                            Some(self.pos)
+                        } else {
+                            self.resumed_from.map(|(t, _)| t)
+                        };
+                        if std::env::var_os("YTMINI_DEBUG").is_some() {
+                            eprintln!("resolved URLs failed; reloading through yt-dlp");
+                        }
+                        let mpv = self.mpv();
+                        let _ = mpv.command(&["change-list", "audio-files", "clr", ""]);
+                        if let Err(e) = load(mpv, &self.url, at) {
+                            self.error = Some(e);
+                        }
+                    } else if e.reason == mpv::END_FILE_REASON_ERROR {
                         self.error = Some(
                             self.last_log_error
                                 .clone()
@@ -975,8 +1007,9 @@ impl Embedded {
         let mpv = self.mpv();
         let _ = mpv.set_str("ytdl-format", &profile.ytdl_format);
         let _ = mpv.set_str("vid", if profile.audio_only { "no" } else { "auto" });
-        // if we started from pre-resolved URLs, go back through yt-dlp
-        let _ = mpv.set_str("ytdl", "yes");
+        // if we started from pre-resolved URLs, this goes back through yt-dlp
+        self.from_resolved = false;
+        let mpv = self.mpv();
         let _ = mpv.command(&["change-list", "audio-files", "clr", ""]);
         let pos = mpv.get_f64("time-pos").unwrap_or(self.pos);
         let _ = mpv.command(&[
