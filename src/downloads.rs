@@ -178,11 +178,12 @@ pub fn download(
     ));
     let (mut vfile, mut afile, mut bytes) = (None, None, 0u64);
     for (kind, fmt, from, to) in parts {
+        let jar = yt::CookieCopy::new(cookies)?;
         let mut child = tools
             .ytdlp_cmd()
             .env("PYTHONUNBUFFERED", "1")
             .arg("--cookies")
-            .arg(cookies)
+            .arg(jar.path())
             .args(["--no-warnings", "--no-playlist", "--newline", "--no-part", "--no-mtime", "--progress"])
             .args(["-f", &fmt])
             .args([

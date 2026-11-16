@@ -65,6 +65,8 @@ fn metrics(d: Density) -> Metrics {
 const HOVER_PREPARE: Duration = Duration::from_millis(350);
 /// Resolved stream URLs last ~6 h; use them only while clearly fresh.
 const PREPARED_TTL: Duration = Duration::from_secs(30 * 60);
+/// How long a click waits for a running resolve before starting its own.
+const RESOLVE_WAIT_MAX: Duration = Duration::from_secs(8);
 
 const BASE_TABS: [Source; 6] = [
     Source::Feed,
@@ -222,6 +224,8 @@ enum Quick {
 
 struct Player {
     child: Child,
+    /// mpv's yt-dlp reads this private copy of the cookies.
+    _jar: yt::CookieCopy,
     title: String,
     id: String,
     url: String,
@@ -331,7 +335,10 @@ pub struct App {
     downloads: crate::downloads::Manifest,
     /// Stream URLs resolved on hover: id → (ytdl-format, URLs, when).
     prepared: HashMap<String, (String, yt::Direct, std::time::Instant)>,
-    preparing: Option<String>,
+    /// Resolves running now (hover ×2, the next video ×1).
+    preparing: std::collections::HashSet<String>,
+    /// The player opened idle at this moment, waiting for a running resolve.
+    resolve_wait: Option<std::time::Instant>,
     /// DeArrow branding per video id (None while being fetched).
     dearrow: HashMap<String, Option<crate::dearrow::Branding>>,
     dearrow_tx: Option<Sender<String>>,
@@ -383,6 +390,7 @@ impl App {
 
         let (tx, rx) = channel();
         let cookies = yt::cookie_file().unwrap_or_else(|_| PathBuf::from("cookies.txt"));
+        yt::CookieCopy::clean_stale();
         let settings = Settings::load();
         crate::i18n::set(settings.language);
         crate::i18n::set_region(settings.region.clone());
@@ -454,7 +462,8 @@ impl App {
             prepared: HashMap::new(),
             dearrow: HashMap::new(),
             dearrow_tx: None,
-            preparing: None,
+            preparing: std::collections::HashSet::new(),
+            resolve_wait: None,
             hover: None,
             dl_active: HashMap::new(),
             tray,
@@ -1031,7 +1040,23 @@ impl App {
                 }
                 Msg::Download(p) => self.on_download(ctx, p),
                 Msg::Prepared(id, format, r) => {
-                    self.preparing = None;
+                    self.preparing.remove(&id);
+                    // the player opened for this one and is waiting
+                    if let Some(p) = self
+                        .embedded
+                        .as_mut()
+                        .filter(|p| p.id == id && p.is_waiting())
+                    {
+                        let ok = r.as_ref().ok().filter(|_| p.format == format).cloned();
+                        if std::env::var_os("YTMINI_DEBUG").is_some() {
+                            eprintln!(
+                                "waited resolve for {id}: {}",
+                                if ok.is_some() { "ok" } else { "fallback" }
+                            );
+                        }
+                        p.load_resolved(ok);
+                        self.resolve_wait = None;
+                    }
                     if let Ok(d) = r {
                         if self.prepared.len() > 30 {
                             self.prepared
@@ -1375,6 +1400,9 @@ impl App {
                 eprintln!("playing {} from pre-resolved URLs", video.id);
             }
         }
+        // hovered a moment ago and its resolve is still running: wait for it
+        let wait = direct.is_none() && self.preparing.contains(&video.id);
+        self.resolve_wait = wait.then(std::time::Instant::now);
         match Embedded::start(
             &tools,
             &self.cookies,
@@ -1385,6 +1413,7 @@ impl App {
             gpa,
             ctx,
             direct,
+            wait,
         ) {
             Ok(p) => {
                 self.status = None;
@@ -1475,10 +1504,11 @@ impl App {
             _ => self.positions.resume_at(&video.id),
         };
         match yt::play(tools, &self.cookies, video, &profile, resume) {
-            Ok(child) => {
+            Ok((child, jar)) => {
                 self.status = None;
                 self.player = Some(Player {
                     child,
+                    _jar: jar,
                     title: video.title().to_string(),
                     id: video.id.clone(),
                     url: video.url(),
@@ -3931,7 +3961,8 @@ impl App {
     /// its stream in the background, one at a time. In Low Power Mode it
     /// waits for a longer hover, so passing over cards costs nothing.
     fn maybe_prepare(&mut self, ctx: &egui::Context) {
-        if !self.settings.prepare_on_hover || self.preparing.is_some() {
+        // two at a time: moving from one card to the next doesn't queue behind it
+        if !self.settings.prepare_on_hover || self.preparing.len() >= 2 {
             return;
         }
         let dwell = if self.power.saver {
@@ -3957,14 +3988,24 @@ impl App {
             },
         };
         let Some(video) = candidate else { return };
+        self.start_prepare(ctx, tools, video);
+    }
+
+    /// Resolve `video`'s stream in the background (unless it's already
+    /// resolved, running, or downloaded).
+    fn start_prepare(&mut self, ctx: &egui::Context, tools: Tools, video: Video) {
         let profile = yt::profile(self.settings.quality, self.power, self.screen_cap);
         if profile.audio_only
+            || self.preparing.contains(&video.id)
             || self.downloads.get(&video.id).is_some()
             || self.prepared_for(&video.id, &profile.ytdl_format).is_some()
         {
             return;
         }
-        self.preparing = Some(video.id.clone());
+        if std::env::var_os("YTMINI_DEBUG").is_some() {
+            eprintln!("resolving {} ahead", video.id);
+        }
+        self.preparing.insert(video.id.clone());
         let (tx, ctx, cookies, format) = (
             self.tx.clone(),
             ctx.clone(),
@@ -3976,6 +4017,29 @@ impl App {
             let _ = tx.send(Msg::Prepared(video.id, format, r));
             ctx.request_repaint();
         });
+    }
+
+    /// While a video plays, resolve the one Next / autoplay would start, so
+    /// it opens at once. Waits a little into playback (longer in Low Power
+    /// Mode) so it doesn't compete with the start of this one.
+    fn prepare_next(&mut self, ctx: &egui::Context) {
+        if !self.settings.prepare_on_hover || self.preparing.len() >= 3 {
+            return;
+        }
+        let after = if self.power.saver { 20.0 } else { 5.0 };
+        // ...but never later than the last 30 s (short videos)
+        let due = |p: &Embedded| p.pos >= after || (p.duration > 0.0 && p.duration - p.pos < 30.0);
+        if !self
+            .embedded
+            .as_ref()
+            .is_some_and(|p| p.started && !p.local && due(p))
+        {
+            return;
+        }
+        let (Some(next), Some(tools)) = (self.peek_next().cloned(), self.tools.clone()) else {
+            return;
+        };
+        self.start_prepare(ctx, tools, next);
     }
 
     fn start_download(&mut self, ctx: &egui::Context, v: &Video) {
@@ -4422,6 +4486,18 @@ impl eframe::App for App {
         if self.pending_play.is_some() {
             self.start_embedded(&ctx, frame);
         }
+        // a waited-for resolve is taking too long: let mpv's yt-dlp go ahead
+        if let Some(t) = self.resolve_wait {
+            match self.embedded.as_mut().filter(|p| p.is_waiting()) {
+                Some(p) if t.elapsed() >= RESOLVE_WAIT_MAX => {
+                    p.load_resolved(None);
+                    self.resolve_wait = None;
+                }
+                Some(_) => ctx.request_repaint_after(RESOLVE_WAIT_MAX.saturating_sub(t.elapsed())),
+                None => self.resolve_wait = None,
+            }
+        }
+        self.prepare_next(&ctx);
         egui::Frame::new().fill(bg()).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
             match &self.screen {

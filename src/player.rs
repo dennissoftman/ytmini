@@ -160,6 +160,10 @@ pub struct Embedded {
     pub local: bool,
     /// For YTMINI_DEBUG's "first frame after …".
     opened_at: Option<Instant>,
+    /// mpv's yt-dlp reads this private copy of the cookies.
+    _jar: yt::CookieCopy,
+    /// Opened idle, waiting for stream URLs (Some(resume position)).
+    waiting: Option<Option<f64>>,
 
     pub pos: f64,
     pub duration: f64,
@@ -317,7 +321,11 @@ impl Embedded {
         ctx: &egui::Context,
         // Pre-resolved stream URLs, or a download's files: skips the ytdl hook.
         direct: Option<yt::Direct>,
+        // A resolve for this video is already running: open idle and wait
+        // for `load_resolved` instead of running yt-dlp a second time.
+        wait: bool,
     ) -> Result<Embedded, String> {
+        let jar = yt::CookieCopy::new(cookies).map_err(|e| format!("{e:#}"))?;
         let mut opts: Vec<(&str, String)> = vec![
             ("vo", "libmpv".into()),
             // mpv defaults to software decoding; hardware decoding is the biggest battery win.
@@ -375,7 +383,7 @@ impl Embedded {
             "change-list",
             "ytdl-raw-options",
             "append",
-            &format!("cookies={}", cookies.display()),
+            &format!("cookies={}", jar.path().display()),
         ])?;
         for opt in tools.ytdl_raw_options() {
             mpv.command(&["change-list", "ytdl-raw-options", "append", &opt])?;
@@ -397,18 +405,13 @@ impl Embedded {
             mpv.set_wakeup_callback(on_wakeup, data);
             render.set_update_callback(on_frame, data);
         }
-        match resume {
-            Some(t) => mpv.command(&[
-                "loadfile",
-                &target,
-                "replace",
-                "-1",
-                &format!("start={t:.1}"),
-            ])?,
-            None => mpv.command(&["loadfile", &target])?,
+        if !wait {
+            load(&mpv, &target, resume)?;
         }
 
         Ok(Embedded {
+            _jar: jar,
+            waiting: wait.then_some(resume),
             render: Some(render),
             mpv: Some(mpv),
             shared: Some(shared),
@@ -454,6 +457,37 @@ impl Embedded {
             pending_click: None,
             streak: None,
         })
+    }
+
+    /// Still waiting for stream URLs from a resolve that was running?
+    pub fn is_waiting(&self) -> bool {
+        self.waiting.is_some()
+    }
+
+    /// The resolve we waited for finished: play its URLs, or (failed / too
+    /// slow / wrong format) fall back to mpv's own yt-dlp.
+    pub fn load_resolved(&mut self, direct: Option<yt::Direct>) {
+        let Some(resume) = self.waiting.take() else {
+            return;
+        };
+        let mpv = self.mpv();
+        let target = match &direct {
+            Some(d) => {
+                let _ = mpv.set_str("ytdl", "no");
+                let _ = mpv.set_str("force-media-title", &self.title);
+                if let Some(ua) = &d.user_agent {
+                    let _ = mpv.set_str("user-agent", ua);
+                }
+                if let Some(a) = &d.audio {
+                    let _ = mpv.command(&["change-list", "audio-files", "append", a]);
+                }
+                d.video.clone()
+            }
+            None => self.url.clone(),
+        };
+        if let Err(e) = load(mpv, &target, resume) {
+            self.error = Some(e);
+        }
     }
 
     fn mpv(&self) -> &Mpv {
@@ -981,6 +1015,19 @@ impl Embedded {
         self.render.take();
         self.mpv.take(); // terminate_destroy blocks until mpv is done
         self.shared.take();
+    }
+}
+
+fn load(mpv: &Mpv, target: &str, resume: Option<f64>) -> Result<(), String> {
+    match resume {
+        Some(t) => mpv.command(&[
+            "loadfile",
+            target,
+            "replace",
+            "-1",
+            &format!("start={t:.1}"),
+        ]),
+        None => mpv.command(&["loadfile", target]),
     }
 }
 

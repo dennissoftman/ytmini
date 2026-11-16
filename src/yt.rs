@@ -220,6 +220,47 @@ pub fn config_dir() -> Result<PathBuf> {
     Ok(d)
 }
 
+/// A private, throwaway copy of the session cookies for one yt-dlp run
+/// (deleted on drop). yt-dlp writes its cookie jar back to `--cookies` when
+/// it exits; with several runs at once (hover, player, downloads, feeds)
+/// they'd overwrite the real file with each other's copies, which can log
+/// the session out. Copies live in the private config dir, never /tmp.
+pub struct CookieCopy(PathBuf);
+
+impl CookieCopy {
+    pub fn new(src: &Path) -> Result<CookieCopy> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let dir = config_dir()?.join("run");
+        fs::create_dir_all(&dir)?;
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let p = dir.join(format!("cookies-{}-{n}.txt", std::process::id()));
+        // signed out: an empty jar
+        let data = fs::read(src).unwrap_or_default();
+        write_private(&p.with_extension("tmp"), &p, &data)?;
+        Ok(CookieCopy(p))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Leftovers from a crash (call once at startup).
+    pub fn clean_stale() {
+        if let Ok(rd) = config_dir().and_then(|d| Ok(fs::read_dir(d.join("run"))?)) {
+            for e in rd.flatten() {
+                let _ = fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
+impl Drop for CookieCopy {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
 /// Write a file that only this user can read, created that way (no window
 /// with default permissions), replacing `dest` atomically via `tmp`.
 pub fn write_private(tmp: &Path, dest: &Path, data: &[u8]) -> Result<()> {
@@ -702,10 +743,11 @@ pub struct Direct {
 
 /// Resolve `video` with yt-dlp for `format` (blocking, ~4 s).
 pub fn resolve(tools: &Tools, cookies: &Path, video: &Video, format: &str) -> Result<Direct> {
+    let jar = CookieCopy::new(cookies)?;
     let out = tools
         .ytdlp_cmd()
         .arg("--cookies")
-        .arg(cookies)
+        .arg(jar.path())
         .args(["-J", "--no-warnings", "--no-playlist", "-f", format])
         .arg(video.url())
         .stdout(Stdio::piped())
@@ -763,10 +805,11 @@ pub fn fetch(
 ) -> Result<Vec<Video>> {
     let first = start + 1;
     let last = start + count;
+    let jar = CookieCopy::new(cookies)?;
     let out = tools
         .ytdlp_cmd()
         .arg("--cookies")
-        .arg(cookies)
+        .arg(jar.path())
         .args(["--flat-playlist", "-j", "--no-warnings"])
         .args([
             "--playlist-start",
@@ -801,6 +844,7 @@ const STREAM_MAX: usize = 2000;
 /// "load more" never refetches earlier pages. Dropping it kills the process.
 pub struct Stream {
     child: Child,
+    _jar: CookieCopy,
     out: std::io::BufReader<std::process::ChildStdout>,
     stderr: std::sync::Arc<std::sync::Mutex<String>>,
     ended: bool,
@@ -809,11 +853,12 @@ pub struct Stream {
 impl Stream {
     /// Start at 0-based `start` (for resuming a stream that was closed while idle).
     pub fn open(tools: &Tools, cookies: &Path, source: &Source, start: usize) -> Result<Stream> {
+        let jar = CookieCopy::new(cookies)?;
         let mut child = tools
             .ytdlp_cmd()
             .env("PYTHONUNBUFFERED", "1")
             .arg("--cookies")
-            .arg(cookies)
+            .arg(jar.path())
             .args(["--flat-playlist", "--lazy-playlist", "-j", "--no-warnings"])
             .args([
                 "--playlist-start",
@@ -849,6 +894,7 @@ impl Stream {
         }
         Ok(Stream {
             child,
+            _jar: jar,
             out,
             stderr,
             ended: false,
@@ -1219,7 +1265,8 @@ pub fn play(
     video: &Video,
     profile: &Profile,
     resume: Option<f64>,
-) -> Result<Child> {
+) -> Result<(Child, CookieCopy)> {
+    let jar = CookieCopy::new(cookies)?;
     let mpv = tools
         .mpv
         .as_ref()
@@ -1231,7 +1278,7 @@ pub fn play(
         // `-append` takes one key=value as-is, so a path with spaces/commas is safe.
         .arg(format!(
             "--ytdl-raw-options-append=cookies={}",
-            cookies.display()
+            jar.path().display()
         ))
         .arg(format!(
             "--script-opts-append=ytdl_hook-ytdl_path={}",
@@ -1258,7 +1305,7 @@ pub fn play(
         .stdout(log_file.try_clone()?)
         .stderr(log_file);
     hide_console(&mut c);
-    c.spawn().context("starting mpv")
+    Ok((c.spawn().context("starting mpv")?, jar))
 }
 
 /// Switch a running mpv to a new profile without restarting the video: read the
@@ -1375,6 +1422,25 @@ pub fn last_player_error() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// yt-dlp gets a private copy of the cookies, gone when dropped.
+    #[test]
+    fn cookie_copy_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let src = std::env::temp_dir().join(format!("ytmini-cc-{}.txt", std::process::id()));
+        fs::write(&src, b"# Netscape HTTP Cookie File\n").unwrap();
+        let c = CookieCopy::new(&src).unwrap();
+        let p = c.path().to_path_buf();
+        assert_ne!(p, src);
+        assert_eq!(fs::read(&p).unwrap(), fs::read(&src).unwrap());
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(c);
+        assert!(!p.exists());
+        let _ = fs::remove_file(src);
+    }
 
     fn v(d: Option<f64>) -> Video {
         Video {
@@ -1587,7 +1653,7 @@ mod live {
         let v = fetch(&t, &c, &Source::Search("big buck bunny".into()), 0, 1)
             .unwrap()
             .remove(0);
-        let mut child = play(
+        let (mut child, _jar) = play(
             &t,
             &c,
             &v,
@@ -1613,7 +1679,7 @@ mod live {
         let v = fetch(&t, &c, &Source::Search("big buck bunny 1080p".into()), 0, 1)
             .unwrap()
             .remove(0);
-        let mut child = play(
+        let (mut child, _jar) = play(
             &t,
             &c,
             &v,
