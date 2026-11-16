@@ -65,6 +65,8 @@ struct Player {
     child: Child,
     title: String,
     id: String,
+    /// e.g. "720p30 · battery saver"
+    profile: String,
 }
 
 pub struct App {
@@ -89,6 +91,7 @@ pub struct App {
     status: Option<(String, bool)>,
     focus_search: bool,
     thumbs: Thumbs,
+    quality: yt::Quality,
 }
 
 impl App {
@@ -117,6 +120,7 @@ impl App {
             status: None,
             focus_search: false,
             thumbs: Thumbs::new(ctx),
+            quality: yt::Quality::Auto,
         };
         app.check_tools(ctx);
         app
@@ -241,10 +245,16 @@ impl App {
     fn play(&mut self, video: &Video) {
         self.stop_player();
         let Some(tools) = &self.tools else { return };
-        match yt::play(tools, &self.cookies, video) {
+        let profile = yt::profile(self.quality, yt::power_state());
+        match yt::play(tools, &self.cookies, video, &profile) {
             Ok(child) => {
                 self.status = None;
-                self.player = Some(Player { child, title: video.title().to_string(), id: video.id.clone() });
+                self.player = Some(Player {
+                    child,
+                    title: video.title().to_string(),
+                    id: video.id.clone(),
+                    profile: profile.label,
+                });
             }
             Err(e) => self.status = Some((format!("Couldn't start mpv: {e:#}"), true)),
         }
@@ -445,6 +455,13 @@ impl App {
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.menu_button(RichText::new("☰").size(18.0), |ui| {
+                            ui.label(RichText::new("Playback quality").small().color(TEXT_DIM));
+                            for q in yt::Quality::ALL {
+                                if ui.radio_value(&mut self.quality, q, q.label()).clicked() {
+                                    ui.close();
+                                }
+                            }
+                            ui.separator();
                             if ui.button("Re-import cookies…").clicked() {
                                 reimport = true;
                                 ui.close();
@@ -490,6 +507,7 @@ impl App {
                     } else if let Some(p) = &self.player {
                         ui.label(RichText::new("▶").color(ACCENT));
                         ui.label(RichText::new(format!("Playing: {}", p.title)).color(TEXT));
+                        ui.label(RichText::new(&p.profile).color(TEXT_DIM));
                         if ui.small_button("Stop").clicked() {
                             stop = true;
                         }

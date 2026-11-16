@@ -15,7 +15,6 @@ use std::{
 
 /// Videos fetched per page.
 pub const PAGE: usize = 30;
-const FORMAT: &str = "bv*[height<=1080]+ba/b";
 
 // ---------------------------------------------------------------------------
 // External tools
@@ -442,12 +441,147 @@ fn summarize_err(stderr: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Power & quality
+// ---------------------------------------------------------------------------
+
+/// What the OS says about power right now.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Power {
+    pub on_battery: bool,
+    /// macOS Low Power Mode / Windows Battery Saver / Linux "low-power" profile.
+    pub saver: bool,
+}
+
+/// Cheap (a couple of ms); called when playback starts.
+pub fn power_state() -> Power {
+    #[cfg(target_os = "macos")]
+    {
+        let pmset = |args: &[&str]| {
+            Command::new("/usr/bin/pmset")
+                .args(args)
+                .stderr(Stdio::null())
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default()
+        };
+        let saver = pmset(&["-g"]).lines().any(|l| {
+            let mut w = l.split_whitespace();
+            matches!((w.next(), w.next()), (Some("lowpowermode" | "powermode"), Some("1")))
+        });
+        let on_battery = pmset(&["-g", "batt"]).contains("'Battery Power'");
+        Power { on_battery, saver }
+    }
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        #[derive(Default)]
+        struct SystemPowerStatus {
+            ac_line_status: u8,
+            battery_flag: u8,
+            battery_life_percent: u8,
+            system_status_flag: u8,
+            battery_life_time: u32,
+            battery_full_life_time: u32,
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetSystemPowerStatus(status: *mut SystemPowerStatus) -> i32;
+        }
+        let mut st = SystemPowerStatus::default();
+        // SAFETY: plain Win32 call filling a repr(C) struct we own.
+        if unsafe { GetSystemPowerStatus(&mut st) } == 0 {
+            return Power::default();
+        }
+        Power { on_battery: st.ac_line_status == 0, saver: st.system_status_flag == 1 }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let read = |p: &Path| fs::read_to_string(p).map(|s| s.trim().to_string()).unwrap_or_default();
+        let saver = read(Path::new("/sys/firmware/acpi/platform_profile")) == "low-power";
+        let mut has_mains = false;
+        let mut mains_online = false;
+        if let Ok(entries) = fs::read_dir("/sys/class/power_supply") {
+            for e in entries.flatten() {
+                if read(&e.path().join("type")) == "Mains" {
+                    has_mains = true;
+                    mains_online |= read(&e.path().join("online")) == "1";
+                }
+            }
+        }
+        Power { on_battery: has_mains && !mains_online, saver }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Quality {
+    /// Pick from the power state.
+    #[default]
+    Auto,
+    P1080,
+    P720,
+    P480,
+    AudioOnly,
+}
+
+impl Quality {
+    pub const ALL: [Quality; 5] = [Quality::Auto, Quality::P1080, Quality::P720, Quality::P480, Quality::AudioOnly];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Quality::Auto => "Auto (power-aware)",
+            Quality::P1080 => "1080p",
+            Quality::P720 => "720p",
+            Quality::P480 => "480p",
+            Quality::AudioOnly => "Audio only",
+        }
+    }
+}
+
+/// Concrete mpv settings for one playback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Profile {
+    pub ytdl_format: String,
+    /// Use mpv's built-in `fast` profile (cheaper scaling, no extras).
+    pub fast: bool,
+    pub audio_only: bool,
+    /// Shown in the status bar, e.g. "720p30 · battery saver".
+    pub label: String,
+}
+
+pub fn profile(q: Quality, p: Power) -> Profile {
+    let cap = |h: u32| format!("bv*[height<={h}]+ba/b");
+    let mk = |f: String, fast, audio_only, label: &str| Profile { ytdl_format: f, fast, audio_only, label: label.into() };
+    match q {
+        Quality::P1080 => mk(cap(1080), false, false, "1080p"),
+        Quality::P720 => mk(cap(720), false, false, "720p"),
+        Quality::P480 => mk(cap(480), true, false, "480p"),
+        Quality::AudioOnly => mk("ba/b".into(), true, true, "audio only"),
+        Quality::Auto if p.saver => mk(
+            // H.264 is hardware-decoded everywhere and the cheapest to decode;
+            // fall back step by step if a video doesn't have it.
+            "bv*[height<=720][fps<=30][vcodec^=avc1]+ba[abr<=128]/bv*[height<=720][fps<=30]+ba/bv*[height<=720]+ba/b"
+                .into(),
+            true,
+            false,
+            "720p30 · battery saver",
+        ),
+        Quality::Auto if p.on_battery => mk(
+            "bv*[height<=1080][fps<=30]+ba/bv*[height<=1080]+ba/b".into(),
+            false,
+            false,
+            "1080p30 · on battery",
+        ),
+        Quality::Auto => mk(cap(1080), false, false, "1080p"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Playback
 // ---------------------------------------------------------------------------
 
 /// Launch mpv in its own window. Returns immediately; the caller owns the child
 /// and must `try_wait`/`kill` it.
-pub fn play(tools: &Tools, cookies: &Path, video: &Video) -> Result<Child> {
+pub fn play(tools: &Tools, cookies: &Path, video: &Video, profile: &Profile) -> Result<Child> {
     let log = config_dir()?.join("mpv.log");
     let log_file = fs::File::create(&log).context("creating mpv.log")?;
     let mut c = Command::new(&tools.mpv);
@@ -455,10 +589,14 @@ pub fn play(tools: &Tools, cookies: &Path, video: &Video) -> Result<Child> {
         // `-append` takes one key=value as-is, so a path with spaces/commas is safe.
         .arg(format!("--ytdl-raw-options-append=cookies={}", cookies.display()))
         .arg(format!("--script-opts-append=ytdl_hook-ytdl_path={}", tools.ytdlp.display()))
-        .arg(format!("--ytdl-format={FORMAT}"))
+        .arg(format!("--ytdl-format={}", profile.ytdl_format))
+        // mpv defaults to software decoding; hardware decoding is the biggest battery win.
+        .arg("--hwdec=auto-safe")
         .arg("--force-window=immediate")
         .arg("--keep-open=no")
         .arg(format!("--title={} — ytmini", video.title()))
+        .args(profile.fast.then_some("--profile=fast"))
+        .args(profile.audio_only.then_some("--no-video"))
         .arg(video.url())
         .stdin(Stdio::null())
         .stdout(log_file.try_clone()?)
@@ -494,6 +632,17 @@ mod tests {
         assert_eq!(v(Some(3725.0)).duration_label(), "1:02:05");
         assert_eq!(v(None).duration_label(), "LIVE");
         assert_eq!(v(Some(0.0)).duration_label(), "LIVE");
+    }
+
+    #[test]
+    fn power_profiles() {
+        let saver = Power { on_battery: true, saver: true };
+        let batt = Power { on_battery: true, saver: false };
+        assert!(profile(Quality::Auto, saver).ytdl_format.starts_with("bv*[height<=720][fps<=30][vcodec^=avc1]"));
+        assert!(profile(Quality::Auto, batt).ytdl_format.contains("[fps<=30]"));
+        assert_eq!(profile(Quality::Auto, Power::default()).ytdl_format, "bv*[height<=1080]+ba/b");
+        // a manual choice wins over the power state
+        assert_eq!(profile(Quality::P1080, saver).ytdl_format, "bv*[height<=1080]+ba/b");
     }
 
     #[test]
@@ -541,7 +690,7 @@ mod live {
     fn mpv_starts_and_dies() {
         let (t, c) = setup();
         let v = fetch(&t, &c, &Source::Search("big buck bunny".into()), 0, 1).unwrap().remove(0);
-        let mut child = play(&t, &c, &v).unwrap();
+        let mut child = play(&t, &c, &v, &profile(Quality::Auto, power_state())).unwrap();
         std::thread::sleep(std::time::Duration::from_secs(8));
         assert!(child.try_wait().unwrap().is_none(), "mpv exited early: {:?}", last_player_error());
         child.kill().unwrap();
