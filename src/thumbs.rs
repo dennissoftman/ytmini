@@ -16,8 +16,12 @@ use std::{
 
 const WORKERS: usize = 6;
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
-/// Textures kept in memory (~0.9 MB each at 640×360). Visible cards are ~20.
-const MAX_TEXTURES: usize = 160;
+/// Textures kept in GPU memory (~0.9 MB each at 640×360) ≈ 3 screens of cards.
+/// Anything evicted reloads from the disk cache in ~1.6 ms (read + JPEG
+/// decode, measured), spread over the workers — faster than a frame for a
+/// whole screen, so a small in-memory tier costs nothing visible. Keeping
+/// decoded pixels on disk instead would be ~15× larger for no real gain.
+const MAX_TEXTURES: usize = 64;
 /// Run cache eviction every this many new files.
 const ENFORCE_EVERY: u32 = 200;
 
@@ -225,4 +229,26 @@ fn download_first(agent: &ureq::Agent, urls: &[String]) -> Result<Vec<u8>, Strin
         }
     }
     Err(last_err)
+}
+
+#[cfg(test)]
+mod bench {
+    /// `cargo test --release thumb_reload -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn thumb_reload_cost() {
+        let dir = dirs::cache_dir().unwrap().join("ytmini/thumbs");
+        let files: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).collect();
+        assert!(!files.is_empty(), "run the app once to fill the cache");
+        let t = std::time::Instant::now();
+        let mut bytes_total = 0;
+        for p in &files {
+            let b = std::fs::read(p).unwrap();
+            bytes_total += b.len();
+            let img = image::load_from_memory(&b).unwrap().to_rgba8();
+            std::hint::black_box(img);
+        }
+        let per = t.elapsed() / files.len() as u32;
+        eprintln!("{} thumbs, avg {} KB on disk, read+decode {per:?} each", files.len(), bytes_total / files.len() / 1024);
+    }
 }

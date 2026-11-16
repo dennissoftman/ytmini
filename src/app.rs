@@ -6,6 +6,7 @@ use crate::mpv;
 use crate::player::{self, Embedded, Surface};
 use crate::settings::{PlayerMode, Settings, ThumbQuality};
 use crate::thumbs::{Thumbs, Variant};
+use crate::tray::{self, Tray, TrayEvent};
 use crate::yt::{self, Browser, Source, Tools, Video};
 use eframe::egui::{
     self, text::LayoutJob, Align, Color32, CornerRadius, FontFamily, FontId, Key, Layout, Margin, RichText, Sense,
@@ -134,6 +135,12 @@ pub struct App {
     /// Clicked video waiting for `ui` (where the GL context and Frame are available).
     pending_play: Option<Video>,
     smoke: Option<Smoke>,
+
+    // background (tray)
+    tray: Option<Tray>,
+    tray_rx: Receiver<TrayEvent>,
+    hidden: bool,
+    quitting: bool,
 }
 
 /// `--smoke-test <id>`: drives the embedded player through play → seek → back →
@@ -144,6 +151,7 @@ struct Smoke {
     step: u8,
     since: std::time::Instant,
     failed: bool,
+    mark: f64,
 }
 
 impl Smoke {
@@ -162,6 +170,8 @@ impl App {
         let (tx, rx) = channel();
         let cookies = yt::cookie_file().unwrap_or_else(|_| PathBuf::from("cookies.txt"));
         let settings = Settings::load();
+        let (tray_tx, tray_rx) = channel();
+        let tray = Tray::new(ctx, tray_tx).ok();
         let limits = Arc::new(Limits::new(settings.cache_mb, settings.cache_days));
         let mut app = App {
             tools: None,
@@ -193,6 +203,10 @@ impl App {
             embedded: None,
             pending_play: None,
             smoke: None,
+            tray,
+            tray_rx,
+            hidden: false,
+            quitting: false,
         };
         app.enforce_cache(ctx);
         // `ytmini --play <url|id>` opens straight into the player.
@@ -201,7 +215,7 @@ impl App {
             if a == "--smoke-test" {
                 if let Some(v) = args.next().as_deref().and_then(Video::from_url_or_id) {
                     app.settings.player = PlayerMode::Embedded;
-                    app.smoke = Some(Smoke { video: v.clone(), step: 0, since: std::time::Instant::now(), failed: false });
+                    app.smoke = Some(Smoke { video: v.clone(), step: 0, since: std::time::Instant::now(), failed: false, mark: 0.0 });
                     app.play(&v);
                 }
             }
@@ -390,7 +404,7 @@ impl App {
         }
         self.power = yt::power_state();
         let profile = yt::profile(self.settings.quality, self.power, self.screen_cap);
-        match Embedded::start(&tools, &self.cookies, &video, &profile, self.settings.volume, gpa, ctx) {
+        match Embedded::start(&tools, &self.cookies, &video, &profile, &self.settings, gpa, ctx) {
             Ok(p) => {
                 self.status = None;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{} — ytmini", video.title())));
@@ -422,7 +436,7 @@ impl App {
         let Some(tools) = &self.tools else { return };
         self.power = yt::power_state();
         let profile = yt::profile(self.settings.quality, self.power, self.screen_cap);
-        match yt::play(tools, &self.cookies, video, &profile) {
+        match yt::play(tools, &self.cookies, video, &profile, self.settings.mark_watched) {
             Ok(child) => {
                 self.status = None;
                 self.player = Some(Player {
@@ -826,6 +840,12 @@ impl App {
             ui.add_space(GAP * 0.5);
             ui.spacing_mut().item_spacing.y = GAP;
             scroll.show_rows(ui, card_h, rows, |ui, range| {
+                // Infinite scroll: start fetching the next page when we're within
+                // a screenful of the end, so it's usually there before you arrive.
+                let lookahead = range.len().max(2);
+                if range.end + lookahead >= video_rows && !tab.loading && !tab.exhausted && tab.error.is_none() {
+                    more = true;
+                }
                 for row in range {
                     ui.horizontal(|ui| {
                         ui.add_space(GAP);
@@ -838,22 +858,20 @@ impl App {
                                 }
                             }
                         } else {
-                            // footer row: load more / error
+                            // footer row: spinner while the next page loads; retry on error
                             ui.allocate_ui_with_layout(
                                 Vec2::new(avail_w, card_h),
                                 Layout::top_down(Align::Center),
                                 |ui| {
                                     ui.add_space(12.0);
-                                    if tab.loading {
-                                        ui.spinner();
-                                    } else {
-                                        if let Some(e) = &tab.error {
-                                            error_box(ui, e);
-                                            ui.add_space(8.0);
-                                        }
-                                        if !tab.exhausted && accent_button(ui, "Load more").clicked() {
+                                    if let Some(e) = tab.error.as_ref().filter(|_| !tab.loading) {
+                                        error_box(ui, e);
+                                        ui.add_space(8.0);
+                                        if accent_button(ui, "Retry").clicked() {
                                             more = true;
                                         }
+                                    } else {
+                                        ui.spinner();
                                     }
                                 },
                             );
@@ -1006,6 +1024,7 @@ impl App {
                     });
                     ui.end_row();
                 });
+                ui.checkbox(&mut s.mark_watched, "Add videos I watch to my YouTube history");
                 ui.label(
                     RichText::new(format!(
                         "Auto never exceeds what this screen can show ({}p), and drops to 1080p30 on battery, 720p30 in Low Power Mode.",
@@ -1059,6 +1078,12 @@ impl App {
                 );
 
                 ui.add_space(10.0);
+                if self.tray.is_some() {
+                    section(ui, "Window");
+                    ui.checkbox(&mut s.close_to_tray, "Closing the window keeps ytmini in the menu bar");
+                    ui.label(RichText::new("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.").small().color(TEXT_DIM));
+                    ui.add_space(10.0);
+                }
                 section(ui, "Account");
                 if ui.button("Re-import cookies…").clicked() {
                     reimport = true;
@@ -1084,6 +1109,50 @@ impl App {
 }
 
 impl App {
+    fn hide_to_tray(&mut self, ctx: &egui::Context) {
+        self.hidden = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        tray::set_dock_visible(false);
+        if let Some(p) = &mut self.embedded {
+            p.set_background(true);
+        }
+    }
+
+    fn show_from_tray(&mut self, ctx: &egui::Context) {
+        self.hidden = false;
+        tray::set_dock_visible(true);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        if let Some(p) = &mut self.embedded {
+            p.set_background(false);
+        }
+    }
+
+    /// Menu-bar icon actions. Runs in `logic`, so it works while hidden.
+    fn handle_tray(&mut self, ctx: &egui::Context) {
+        while let Ok(ev) = self.tray_rx.try_recv() {
+            match ev {
+                TrayEvent::Show => self.show_from_tray(ctx),
+                TrayEvent::PlayPause => {
+                    if let Some(p) = &mut self.embedded {
+                        p.toggle_pause();
+                    }
+                }
+                TrayEvent::Quit => {
+                    self.quitting = true;
+                    if self.hidden {
+                        // a hidden window may not process Close on every platform
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    }
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+        if let Some(t) = &mut self.tray {
+            t.set_playing(self.embedded.as_ref().map(|p| p.paused));
+        }
+    }
+
     fn drive_smoke(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let Some(mut sm) = self.smoke.take() else { return };
         ctx.request_repaint_after(Duration::from_millis(100));
@@ -1127,12 +1196,32 @@ impl App {
             4 if started && t > 4.0 => {
                 let h = self.embedded.as_ref().and_then(Embedded::height).unwrap_or(0.0);
                 sm.log(h > 0.0 && h <= 480.0, &format!("live switch to 480p (height {h})"));
+                if self.tray.is_some() {
+                    sm.mark = pos;
+                    self.hide_to_tray(ctx);
+                    next(&mut sm);
+                } else {
+                    sm.step = 6;
+                }
+            }
+            5 if t > 5.0 => {
+                let h = self.embedded.as_ref().and_then(Embedded::height);
+                sm.log(pos > sm.mark + 3.0, &format!("keeps playing while hidden ({:.1}s → {pos:.1}s)", sm.mark));
+                sm.log(h.is_none(), &format!("audio only while hidden (video height {h:?})"));
+                self.show_from_tray(ctx);
+                next(&mut sm);
+            }
+            6 if t > 3.0 => {
+                let h = self.embedded.as_ref().and_then(Embedded::height).unwrap_or(0.0);
+                sm.log(h > 0.0, &format!("video back after showing window (height {h})"));
                 eprintln!("[smoke] quitting during playback; {}", if sm.failed { "SOME FAILED" } else { "ALL PASSED" });
+                self.quitting = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 next(&mut sm);
             }
-            0..=4 if t > 40.0 => {
+            0..=6 if t > 40.0 => {
                 sm.log(false, &format!("timed out at step {}", sm.step));
+                self.quitting = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 sm.step = 99;
             }
@@ -1159,11 +1248,13 @@ fn ago(unix: u64) -> String {
 }
 
 impl eframe::App for App {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.drive_smoke(ctx, frame);
         self.handle_messages(ctx);
         self.thumbs.poll(ctx);
         self.poll_player();
         self.update_screen_cap(ctx);
+        self.handle_tray(ctx);
         if let Some(e) = &mut self.embedded {
             e.poll_events();
             if std::mem::take(&mut e.title_changed) {
@@ -1189,7 +1280,15 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.drive_smoke(&ctx, frame);
+        // Red close button → hide to the menu bar (Cmd+Q / tray "Quit" really quit).
+        if ctx.input(|i| i.viewport().close_requested())
+            && self.tray.is_some()
+            && self.settings.close_to_tray
+            && !self.quitting
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.hide_to_tray(&ctx);
+        }
         if self.pending_play.is_some() {
             self.start_embedded(&ctx, frame);
         }

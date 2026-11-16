@@ -707,7 +707,7 @@ pub fn ipc_path() -> PathBuf {
     }
 }
 
-pub fn play(tools: &Tools, cookies: &Path, video: &Video, profile: &Profile) -> Result<Child> {
+pub fn play(tools: &Tools, cookies: &Path, video: &Video, profile: &Profile, mark_watched: bool) -> Result<Child> {
     let log = config_dir()?.join("mpv.log");
     let log_file = fs::File::create(&log).context("creating mpv.log")?;
     let mut c = Command::new(&tools.mpv);
@@ -722,6 +722,8 @@ pub fn play(tools: &Tools, cookies: &Path, video: &Video, profile: &Profile) -> 
         .arg("--keep-open=no")
         .arg(format!("--input-ipc-server={}", ipc_path().display()))
         .arg(format!("--title={} — ytmini", video.title()))
+        // yt-dlp reports the view to YouTube so it lands in the account's watch history.
+        .args(mark_watched.then_some("--ytdl-raw-options-append=mark-watched="))
         .args(profile.fast.then_some("--profile=fast"))
         .args(profile.audio_only.then_some("--no-video"))
         .arg(video.url())
@@ -902,7 +904,7 @@ mod live {
     fn mpv_starts_and_dies() {
         let (t, c) = setup();
         let v = fetch(&t, &c, &Source::Search("big buck bunny".into()), 0, 1).unwrap().remove(0);
-        let mut child = play(&t, &c, &v, &profile(Quality::Auto, power_state(), 1080)).unwrap();
+        let mut child = play(&t, &c, &v, &profile(Quality::Auto, power_state(), 1080), false).unwrap();
         std::thread::sleep(std::time::Duration::from_secs(8));
         assert!(child.try_wait().unwrap().is_none(), "mpv exited early: {:?}", last_player_error());
         child.kill().unwrap();
@@ -915,7 +917,7 @@ mod live {
         use std::time::Duration;
         let (t, c) = setup();
         let v = fetch(&t, &c, &Source::Search("big buck bunny 1080p".into()), 0, 1).unwrap().remove(0);
-        let mut child = play(&t, &c, &v, &profile(Quality::Max(1080), Power::default(), 2160)).unwrap();
+        let mut child = play(&t, &c, &v, &profile(Quality::Max(1080), Power::default(), 2160), false).unwrap();
         std::thread::sleep(Duration::from_secs(12));
         let get = |prop: &str| Ipc::connect(&ipc_path()).unwrap().request(serde_json::json!(["get_property", prop]));
         let before = get("time-pos").unwrap().as_f64().unwrap();

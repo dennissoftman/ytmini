@@ -9,6 +9,7 @@ mod mpv;
 mod player;
 mod settings;
 mod thumbs;
+mod tray;
 mod yt;
 
 fn main() -> eframe::Result {

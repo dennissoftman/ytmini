@@ -169,7 +169,7 @@ impl Embedded {
         cookies: &Path,
         video: &Video,
         profile: &Profile,
-        volume: f64,
+        settings: &crate::settings::Settings,
         gpa: mpv::GetProcAddress,
         ctx: &egui::Context,
     ) -> Result<Embedded, String> {
@@ -187,7 +187,7 @@ impl Embedded {
             ("input-vo-keyboard", "no".into()),
             ("terminal", "no".into()),
             ("audio-client-name", "ytmini".into()),
-            ("volume", format!("{volume:.0}")),
+            ("volume", format!("{:.0}", settings.volume)),
         ];
         if profile.fast {
             opts.push(("profile", "fast".into()));
@@ -202,6 +202,10 @@ impl Embedded {
         }
         // change-list handles any characters in the path (spaces, commas).
         mpv.command(&["change-list", "ytdl-raw-options", "append", &format!("cookies={}", cookies.display())])?;
+        if settings.mark_watched {
+            // yt-dlp reports the view to YouTube → appears in the account's watch history.
+            mpv.command(&["change-list", "ytdl-raw-options", "append", "mark-watched="])?;
+        }
 
         let render = Render::new(&mpv, gpa)?;
         let shared = Box::new(Shared { ctx: ctx.clone(), frame_ready: AtomicBool::new(false) });
@@ -225,7 +229,7 @@ impl Embedded {
             pos: 0.0,
             duration: 0.0,
             paused: false,
-            volume,
+            volume: settings.volume,
             speed: 1.0,
             buffering: true,
             started: false,
@@ -383,6 +387,14 @@ impl Embedded {
     }
 
     /// Register user activity (shows the controls for a while).
+    /// While the window is hidden (tray) play audio only: no video decoding
+    /// for frames nobody sees. Restores video when shown again.
+    pub fn set_background(&mut self, background: bool) {
+        let audio_only = self.format == "ba/b";
+        let vid = if background || audio_only { "no" } else { "auto" };
+        let _ = self.mpv().set_str("vid", vid);
+    }
+
     /// Current video height (for the smoke test).
     pub fn height(&self) -> Option<f64> {
         self.mpv.as_ref().and_then(|m| m.get_f64("height"))

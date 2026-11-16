@@ -37,6 +37,10 @@ pub struct Settings {
     pub cache_days: u64,
     /// 0–100
     pub volume: f64,
+    /// Tell YouTube we watched it, so it shows up in YouTube's watch history.
+    pub mark_watched: bool,
+    /// Closing the window keeps ytmini in the menu bar / tray.
+    pub close_to_tray: bool,
 }
 
 pub const DEFAULT_CACHE_MB: u64 = 256;
@@ -51,6 +55,8 @@ impl Default for Settings {
             cache_mb: DEFAULT_CACHE_MB,
             cache_days: DEFAULT_CACHE_DAYS,
             volume: 80.0,
+            mark_watched: true,
+            close_to_tray: true,
         }
     }
 }
