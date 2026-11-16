@@ -193,15 +193,16 @@ pub struct Embedded {
     /// Seek-bar previews (filled in once fetched); sheets load on hover.
     pub storyboard: Option<crate::storyboard::Storyboard>,
     sb_sheets: std::collections::HashMap<u32, Option<egui::TextureHandle>>,
-    sb_chan: (
-        std::sync::mpsc::Sender<(u32, egui::ColorImage)>,
-        std::sync::mpsc::Receiver<(u32, egui::ColorImage)>,
-    ),
+    sb_chan: (Sender<SheetMsg>, std::sync::mpsc::Receiver<SheetMsg>),
     /// A single click waiting out the double-click window before it pauses.
     pending_click: Option<(Instant, Pos2)>,
     /// Double-click-and-keep-tapping seek on the left/right side.
     streak: Option<Streak>,
 }
+
+/// A downloaded storyboard sheet: (sheet number, image).
+type SheetMsg = (u32, egui::ColorImage);
+use std::sync::mpsc::Sender;
 
 struct Press {
     at: Instant,
