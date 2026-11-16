@@ -513,15 +513,29 @@ pub fn power_state() -> Power {
     }
 }
 
-/// Re-reads the power state every few seconds on its own thread and calls
-/// `on_change` only when it differs from the last reading.
+/// Watches the power state on its own thread and calls `on_change` only when
+/// it differs from the last reading.
+///
+/// macOS: waits on the notify(3) keys IOKit/powerd post when the power source
+/// or Low Power Mode changes. Checking a key is a shared-memory read, so we
+/// can check every second for free and only run `pmset` when one fires (plus
+/// a slow safety re-check). Elsewhere the state is a cheap syscall/sysfs read,
+/// so we just poll it.
 pub fn watch_power(initial: Power, on_change: impl Fn(Power) + Send + 'static) {
+    use std::time::{Duration, Instant};
     std::thread::Builder::new()
         .name("power".into())
         .spawn(move || {
             let mut last = initial;
+            let mut changed = power_change_detector();
+            let mut last_full = Instant::now();
             loop {
-                std::thread::sleep(std::time::Duration::from_secs(10));
+                std::thread::sleep(Duration::from_secs(if cfg!(target_os = "macos") { 1 } else { 2 }));
+                let due = last_full.elapsed() >= Duration::from_secs(60);
+                if !(changed() || due) {
+                    continue;
+                }
+                last_full = Instant::now();
                 let now = power_state();
                 if now != last {
                     last = now;
@@ -532,29 +546,86 @@ pub fn watch_power(initial: Power, on_change: impl Fn(Power) + Send + 'static) {
         .expect("spawning power watcher");
 }
 
+/// Returns a closure that says "something power-related may have changed".
+#[cfg(target_os = "macos")]
+fn power_change_detector() -> Box<dyn FnMut() -> bool + Send> {
+    use std::ffi::{c_char, c_int};
+    extern "C" {
+        // libSystem (notify.h)
+        fn notify_register_check(name: *const c_char, out_token: *mut c_int) -> u32;
+        fn notify_check(token: c_int, check: *mut c_int) -> u32;
+    }
+    const KEYS: [&std::ffi::CStr; 2] = [c"com.apple.system.powersources.source", c"com.apple.system.lowpowermode"];
+    let mut tokens = Vec::new();
+    for key in KEYS {
+        let mut tok: c_int = 0;
+        // SAFETY: valid NUL-terminated name and out-pointer.
+        if unsafe { notify_register_check(key.as_ptr(), &mut tok) } == 0 {
+            let mut first: c_int = 0;
+            // SAFETY: token just registered; the first check always reports a change, consume it.
+            unsafe { notify_check(tok, &mut first) };
+            tokens.push(tok);
+        }
+    }
+    if tokens.len() < KEYS.len() {
+        // Couldn't subscribe: fall back to polling pmset every few seconds.
+        let mut n = 0u32;
+        return Box::new(move || {
+            n += 1;
+            n.is_multiple_of(5)
+        });
+    }
+    Box::new(move || {
+        tokens.iter().fold(false, |any, &tok| {
+            let mut c: c_int = 0;
+            // SAFETY: registered token, valid out-pointer.
+            let ok = unsafe { notify_check(tok, &mut c) } == 0;
+            any | (ok && c != 0)
+        })
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn power_change_detector() -> Box<dyn FnMut() -> bool + Send> {
+    Box::new(|| true) // reading the state is cheap; just check every tick
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Quality {
-    /// Pick from the power state.
+    /// Highest the screen can show; lowered on battery / in saver mode.
     #[default]
     Auto,
-    P1080,
-    P720,
-    P480,
+    Max(u32),
     AudioOnly,
 }
 
-impl Quality {
-    pub const ALL: [Quality; 5] = [Quality::Auto, Quality::P1080, Quality::P720, Quality::P480, Quality::AudioOnly];
+/// Standard YouTube heights, highest first.
+pub const TIERS: [u32; 6] = [2160, 1440, 1080, 720, 480, 360];
 
-    pub fn label(self) -> &'static str {
+impl Quality {
+    pub fn label(self) -> String {
         match self {
-            Quality::Auto => "Auto (power-aware)",
-            Quality::P1080 => "1080p",
-            Quality::P720 => "720p",
-            Quality::P480 => "480p",
-            Quality::AudioOnly => "Audio only",
+            Quality::Auto => "Auto (screen + power aware)".into(),
+            Quality::Max(h) => format!("{h}p"),
+            Quality::AudioOnly => "Audio only".into(),
         }
     }
+
+    /// Choices for the menu: Auto, every tier the screen can show, audio only.
+    pub fn choices(screen_cap: u32) -> Vec<Quality> {
+        let mut v = vec![Quality::Auto];
+        v.extend(TIERS.iter().filter(|&&h| h <= screen_cap).map(|&h| Quality::Max(h)));
+        v.push(Quality::AudioOnly);
+        v
+    }
+}
+
+/// Largest standard tier that fits a fullscreen 16:9 video on a monitor with
+/// this many *physical* pixels. Anything higher would just be downscaled.
+pub fn screen_cap(width_px: f32, height_px: f32) -> u32 {
+    let video_h = height_px.min(width_px * 9.0 / 16.0);
+    // 3% slack so e.g. a 1050-line screen still counts as a 1080p screen.
+    TIERS.iter().copied().find(|&h| h as f32 <= video_h * 1.03).unwrap_or(360)
 }
 
 /// Concrete mpv settings for one playback.
@@ -568,30 +639,34 @@ pub struct Profile {
     pub label: String,
 }
 
-pub fn profile(q: Quality, p: Power) -> Profile {
-    let cap = |h: u32| format!("bv*[height<={h}]+ba/b");
-    let mk = |f: String, fast, audio_only, label: &str| Profile { ytdl_format: f, fast, audio_only, label: label.into() };
+/// yt-dlp format chain: preferred variant first, then progressively looser.
+/// We skip AV1 in the first pick: most Macs before M3 (and many PCs) can't
+/// hardware-decode it, and software AV1 at high res is a battery killer.
+fn format_for(h: u32, fps30: bool, saver: bool) -> String {
+    let fps = if fps30 { "[fps<=30]" } else { "" };
+    let (codec, audio) = if saver { ("[vcodec^=avc1]", "ba[abr<=128]") } else { ("[vcodec!^=av01]", "ba") };
+    format!("bv*[height<={h}]{fps}{codec}+{audio}/bv*[height<={h}]{fps}+ba/bv*[height<={h}]+ba/b[height<={h}]/b")
+}
+
+pub fn profile(q: Quality, p: Power, screen_cap: u32) -> Profile {
+    let mk = |h: u32, fps30: bool, saver: bool, why: &str| Profile {
+        ytdl_format: format_for(h, fps30, saver),
+        fast: saver || h <= 480,
+        audio_only: false,
+        label: format!("{h}p{}{why}", if fps30 { "30" } else { "" }),
+    };
     match q {
-        Quality::P1080 => mk(cap(1080), false, false, "1080p"),
-        Quality::P720 => mk(cap(720), false, false, "720p"),
-        Quality::P480 => mk(cap(480), true, false, "480p"),
-        Quality::AudioOnly => mk("ba/b".into(), true, true, "audio only"),
-        Quality::Auto if p.saver => mk(
-            // H.264 is hardware-decoded everywhere and the cheapest to decode;
-            // fall back step by step if a video doesn't have it.
-            "bv*[height<=720][fps<=30][vcodec^=avc1]+ba[abr<=128]/bv*[height<=720][fps<=30]+ba/bv*[height<=720]+ba/b"
-                .into(),
-            true,
-            false,
-            "720p30 · battery saver",
-        ),
-        Quality::Auto if p.on_battery => mk(
-            "bv*[height<=1080][fps<=30]+ba/bv*[height<=1080]+ba/b".into(),
-            false,
-            false,
-            "1080p30 · on battery",
-        ),
-        Quality::Auto => mk(cap(1080), false, false, "1080p"),
+        Quality::AudioOnly => Profile {
+            ytdl_format: "ba/b".into(),
+            fast: true,
+            audio_only: true,
+            label: "audio only".into(),
+        },
+        // Manual pick, still never above the screen (window may have moved).
+        Quality::Max(h) => mk(h.min(screen_cap), false, false, ""),
+        Quality::Auto if p.saver => mk(screen_cap.min(720), true, true, " · battery saver"),
+        Quality::Auto if p.on_battery => mk(screen_cap.min(1080), true, false, " · on battery"),
+        Quality::Auto => mk(screen_cap, false, false, ""),
     }
 }
 
@@ -733,11 +808,23 @@ mod tests {
     fn power_profiles() {
         let saver = Power { on_battery: true, saver: true };
         let batt = Power { on_battery: true, saver: false };
-        assert!(profile(Quality::Auto, saver).ytdl_format.starts_with("bv*[height<=720][fps<=30][vcodec^=avc1]"));
-        assert!(profile(Quality::Auto, batt).ytdl_format.contains("[fps<=30]"));
-        assert_eq!(profile(Quality::Auto, Power::default()).ytdl_format, "bv*[height<=1080]+ba/b");
-        // a manual choice wins over the power state
-        assert_eq!(profile(Quality::P1080, saver).ytdl_format, "bv*[height<=1080]+ba/b");
+        let ac = Power::default();
+        assert!(profile(Quality::Auto, saver, 1440).ytdl_format.starts_with("bv*[height<=720][fps<=30][vcodec^=avc1]"));
+        assert!(profile(Quality::Auto, batt, 1440).ytdl_format.starts_with("bv*[height<=1080][fps<=30]"));
+        assert!(profile(Quality::Auto, ac, 1440).ytdl_format.starts_with("bv*[height<=1440][vcodec!^=av01]"));
+        // a manual choice wins over the power state, but never exceeds the screen
+        assert!(profile(Quality::Max(1080), saver, 1440).ytdl_format.starts_with("bv*[height<=1080][vcodec!^=av01]+ba/"));
+        assert!(profile(Quality::Max(2160), ac, 1080).ytdl_format.starts_with("bv*[height<=1080]"));
+    }
+
+    #[test]
+    fn screen_caps() {
+        assert_eq!(screen_cap(1920.0, 1080.0), 1080);
+        assert_eq!(screen_cap(1680.0, 1050.0), 720); // 16:9 video is 945 tall there
+        assert_eq!(screen_cap(3456.0, 2234.0), 1440); // 16" MacBook Pro
+        assert_eq!(screen_cap(3840.0, 2160.0), 2160);
+        assert_eq!(screen_cap(2560.0, 1600.0), 1440);
+        assert_eq!(Quality::choices(1080).len(), 6); // auto, 1080/720/480/360, audio
     }
 
     #[test]
@@ -785,7 +872,7 @@ mod live {
     fn mpv_starts_and_dies() {
         let (t, c) = setup();
         let v = fetch(&t, &c, &Source::Search("big buck bunny".into()), 0, 1).unwrap().remove(0);
-        let mut child = play(&t, &c, &v, &profile(Quality::Auto, power_state())).unwrap();
+        let mut child = play(&t, &c, &v, &profile(Quality::Auto, power_state(), 1080)).unwrap();
         std::thread::sleep(std::time::Duration::from_secs(8));
         assert!(child.try_wait().unwrap().is_none(), "mpv exited early: {:?}", last_player_error());
         child.kill().unwrap();
@@ -798,12 +885,12 @@ mod live {
         use std::time::Duration;
         let (t, c) = setup();
         let v = fetch(&t, &c, &Source::Search("big buck bunny 1080p".into()), 0, 1).unwrap().remove(0);
-        let mut child = play(&t, &c, &v, &profile(Quality::P1080, Power::default())).unwrap();
+        let mut child = play(&t, &c, &v, &profile(Quality::Max(1080), Power::default(), 2160)).unwrap();
         std::thread::sleep(Duration::from_secs(12));
         let get = |prop: &str| Ipc::connect(&ipc_path()).unwrap().request(serde_json::json!(["get_property", prop]));
         let before = get("time-pos").unwrap().as_f64().unwrap();
         eprintln!("before: pos {before:.1}, height {:?}", get("height").ok());
-        switch_profile(&v.url(), &profile(Quality::P480, Power::default())).unwrap();
+        switch_profile(&v.url(), &profile(Quality::Max(480), Power::default(), 2160)).unwrap();
         std::thread::sleep(Duration::from_secs(10));
         let after = get("time-pos").unwrap().as_f64().unwrap();
         let height = get("height").unwrap().as_i64().unwrap();

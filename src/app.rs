@@ -98,6 +98,8 @@ pub struct App {
     thumbs: Thumbs,
     quality: yt::Quality,
     power: yt::Power,
+    /// Highest useful video height on the monitor the window is on.
+    screen_cap: u32,
 }
 
 impl App {
@@ -128,6 +130,7 @@ impl App {
             thumbs: Thumbs::new(ctx),
             quality: yt::Quality::Auto,
             power: yt::power_state(),
+            screen_cap: 1080,
         };
         let (tx, ctx2) = (app.tx.clone(), ctx.clone());
         yt::watch_power(app.power, move |p| {
@@ -267,7 +270,7 @@ impl App {
         self.stop_player();
         let Some(tools) = &self.tools else { return };
         self.power = yt::power_state();
-        let profile = yt::profile(self.quality, self.power);
+        let profile = yt::profile(self.quality, self.power, self.screen_cap);
         match yt::play(tools, &self.cookies, video, &profile) {
             Ok(child) => {
                 self.status = None;
@@ -287,7 +290,7 @@ impl App {
     /// If the effective quality changed (power state or menu), retune the
     /// running player in place.
     fn apply_profile_live(&mut self, ctx: &egui::Context) {
-        let profile = yt::profile(self.quality, self.power);
+        let profile = yt::profile(self.quality, self.power, self.screen_cap);
         let Some(p) = &mut self.player else { return };
         if p.format == profile.ytdl_format {
             return;
@@ -300,6 +303,17 @@ impl App {
             let _ = tx.send(Msg::Switched(r));
             ctx.request_repaint();
         });
+    }
+
+    /// Track the monitor the window is on (it can be dragged between screens).
+    fn update_screen_cap(&mut self, ctx: &egui::Context) {
+        let (size, ppp) = ctx.input(|i| (i.viewport().monitor_size, i.viewport().native_pixels_per_point));
+        let (Some(size), Some(ppp)) = (size, ppp) else { return };
+        let cap = yt::screen_cap(size.x * ppp, size.y * ppp);
+        if cap != self.screen_cap {
+            self.screen_cap = cap;
+            self.apply_profile_live(ctx);
+        }
     }
 
     fn stop_player(&mut self) {
@@ -502,7 +516,7 @@ impl App {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.menu_button(RichText::new("☰").size(18.0), |ui| {
                             ui.label(RichText::new("Playback quality").small().color(TEXT_DIM));
-                            for q in yt::Quality::ALL {
+                            for q in yt::Quality::choices(self.screen_cap) {
                                 if ui.radio_value(&mut self.quality, q, q.label()).clicked() {
                                     quality_changed = true;
                                     ui.close();
@@ -720,6 +734,7 @@ impl eframe::App for App {
         self.handle_messages(ctx);
         self.thumbs.poll(ctx);
         self.poll_player();
+        self.update_screen_cap(ctx);
         if self.player.is_some() {
             // Nobody else wakes us when mpv exits; check twice a second.
             ctx.request_repaint_after(Duration::from_millis(500));
