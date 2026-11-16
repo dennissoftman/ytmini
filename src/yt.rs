@@ -69,6 +69,14 @@ impl Tools {
     }
 }
 
+/// Put the package-manager locations on this process's PATH (call at startup,
+/// before spawning threads) so libmpv's ytdl hook finds yt-dlp and yt-dlp finds deno.
+pub fn extend_process_path() {
+    if let Ok(p) = std::env::join_paths(search_dirs()) {
+        std::env::set_var("PATH", p);
+    }
+}
+
 /// The current PATH followed by the usual package-manager locations.
 fn search_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
@@ -357,7 +365,7 @@ impl Source {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 pub struct Video {
     pub id: String,
     pub title: Option<String>,
@@ -367,14 +375,26 @@ pub struct Video {
 }
 
 impl Video {
+    /// A bare video from a YouTube URL or an 11-character id (for `--play`).
+    pub fn from_url_or_id(s: &str) -> Option<Video> {
+        let s = s.trim();
+        let id = if s.len() == 11 && !s.contains('/') {
+            s.to_string()
+        } else if let Some(i) = s.find("v=") {
+            s[i + 2..].chars().take(11).collect()
+        } else {
+            let i = s.find("youtu.be/").map(|i| i + 9).or_else(|| s.find("/shorts/").map(|i| i + 8))?;
+            s[i..].chars().take(11).collect()
+        };
+        let ok = id.len() == 11 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        ok.then_some(Video { id, title: None, channel: None, uploader: None, duration: None })
+    }
+
     pub fn title(&self) -> &str {
         self.title.as_deref().unwrap_or(&self.id)
     }
     pub fn channel(&self) -> &str {
         self.channel.as_deref().or(self.uploader.as_deref()).unwrap_or("")
-    }
-    pub fn thumbnail(&self) -> String {
-        format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", self.id)
     }
     pub fn url(&self) -> String {
         format!("https://www.youtube.com/watch?v={}", self.id)
@@ -590,7 +610,7 @@ fn power_change_detector() -> Box<dyn FnMut() -> bool + Send> {
     Box::new(|| true) // reading the state is cheap; just check every tick
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
 pub enum Quality {
     /// Highest the screen can show; lowered on battery / in saver mode.
     #[default]
@@ -825,6 +845,16 @@ mod tests {
         assert_eq!(screen_cap(3840.0, 2160.0), 2160);
         assert_eq!(screen_cap(2560.0, 1600.0), 1440);
         assert_eq!(Quality::choices(1080).len(), 6); // auto, 1080/720/480/360, audio
+    }
+
+    #[test]
+    fn parse_play_arg() {
+        let id = |s: &str| Video::from_url_or_id(s).map(|v| v.id);
+        assert_eq!(id("dQw4w9WgXcQ").as_deref(), Some("dQw4w9WgXcQ"));
+        assert_eq!(id("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=1").as_deref(), Some("dQw4w9WgXcQ"));
+        assert_eq!(id("https://youtu.be/dQw4w9WgXcQ").as_deref(), Some("dQw4w9WgXcQ"));
+        assert_eq!(id("https://youtube.com/shorts/dQw4w9WgXcQ").as_deref(), Some("dQw4w9WgXcQ"));
+        assert_eq!(id("hello"), None);
     }
 
     #[test]

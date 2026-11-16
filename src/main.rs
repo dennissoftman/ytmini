@@ -4,10 +4,18 @@
 #![cfg_attr(windows, windows_subsystem = "windows")] // no console window on Windows
 
 mod app;
+mod cache;
+mod mpv;
+mod player;
+mod settings;
 mod thumbs;
 mod yt;
 
 fn main() -> eframe::Result {
+    // A Finder-launched .app gets a bare PATH; libmpv's ytdl hook and yt-dlp's
+    // JS runtime (deno) are found through PATH, so extend it before any threads start.
+    yt::extend_process_path();
+
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("ytmini")

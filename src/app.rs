@@ -1,7 +1,11 @@
 //! The eframe app: all UI state and drawing. Slow work (yt-dlp) runs on worker
 //! threads and reports back over an mpsc channel.
 
-use crate::thumbs::Thumbs;
+use crate::cache::{self, Limits};
+use crate::mpv;
+use crate::player::{self, Embedded, Surface};
+use crate::settings::{PlayerMode, Settings, ThumbQuality};
+use crate::thumbs::{Thumbs, Variant};
 use crate::yt::{self, Browser, Source, Tools, Video};
 use eframe::egui::{
     self, text::LayoutJob, Align, Color32, CornerRadius, FontFamily, FontId, Key, Layout, Margin, RichText, Sense,
@@ -11,8 +15,11 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     process::Child,
-    sync::mpsc::{channel, Receiver, Sender},
-    time::Duration,
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Arc,
+    },
+    time::{Duration, SystemTime},
 };
 
 // ---------- look ----------
@@ -48,6 +55,7 @@ enum Msg {
     Imported(Result<(), String>),
     Power(yt::Power),
     Switched(Result<(), String>),
+    CacheUsage(u64),
 }
 
 #[derive(Default)]
@@ -61,6 +69,19 @@ struct Tab {
     generation: u64,
     loaded_once: bool,
     scroll_to_top: bool,
+    /// Showing results from the disk cache (saved at this unix time) until fresh ones arrive.
+    cached_at: Option<u64>,
+}
+
+/// Disk-cache name for the personal tabs (search results aren't persisted).
+fn list_name(s: &Source) -> Option<&'static str> {
+    match s {
+        Source::Feed => Some("feed"),
+        Source::Subscriptions => Some("subscriptions"),
+        Source::WatchLater => Some("watchlater"),
+        Source::History => Some("history"),
+        Source::Search(_) => None,
+    }
 }
 
 struct Player {
@@ -96,10 +117,40 @@ pub struct App {
     status: Option<(String, bool)>,
     focus_search: bool,
     thumbs: Thumbs,
-    quality: yt::Quality,
     power: yt::Power,
     /// Highest useful video height on the monitor the window is on.
     screen_cap: u32,
+
+    settings: Settings,
+    saved_settings: Settings,
+    limits: Arc<Limits>,
+    cache_usage: Option<u64>,
+    show_settings: bool,
+
+    // embedded player
+    gpa: Option<mpv::GetProcAddress>,
+    surface: Option<Surface>,
+    embedded: Option<Embedded>,
+    /// Clicked video waiting for `ui` (where the GL context and Frame are available).
+    pending_play: Option<Video>,
+    smoke: Option<Smoke>,
+}
+
+/// `--smoke-test <id>`: drives the embedded player through play → seek → back →
+/// play → live quality switch → quit-while-playing, printing PASS/FAIL to stderr.
+/// For checking teardown after mpv/egui upgrades without clicking around.
+struct Smoke {
+    video: Video,
+    step: u8,
+    since: std::time::Instant,
+    failed: bool,
+}
+
+impl Smoke {
+    fn log(&mut self, ok: bool, what: &str) {
+        self.failed |= !ok;
+        eprintln!("[smoke {:>5.1}s] {} {what}", self.since.elapsed().as_secs_f32(), if ok { "PASS" } else { "FAIL" });
+    }
 }
 
 impl App {
@@ -110,6 +161,8 @@ impl App {
 
         let (tx, rx) = channel();
         let cookies = yt::cookie_file().unwrap_or_else(|_| PathBuf::from("cookies.txt"));
+        let settings = Settings::load();
+        let limits = Arc::new(Limits::new(settings.cache_mb, settings.cache_days));
         let mut app = App {
             tools: None,
             cookies,
@@ -127,11 +180,37 @@ impl App {
             player: None,
             status: None,
             focus_search: false,
-            thumbs: Thumbs::new(ctx),
-            quality: yt::Quality::Auto,
+            thumbs: Thumbs::new(ctx, limits.clone()),
             power: yt::power_state(),
             screen_cap: 1080,
+            saved_settings: settings.clone(),
+            settings,
+            limits,
+            cache_usage: None,
+            show_settings: false,
+            gpa: cc.get_proc_address.clone(),
+            surface: None,
+            embedded: None,
+            pending_play: None,
+            smoke: None,
         };
+        app.enforce_cache(ctx);
+        // `ytmini --play <url|id>` opens straight into the player.
+        let mut args = std::env::args().skip(1);
+        while let Some(a) = args.next() {
+            if a == "--smoke-test" {
+                if let Some(v) = args.next().as_deref().and_then(Video::from_url_or_id) {
+                    app.settings.player = PlayerMode::Embedded;
+                    app.smoke = Some(Smoke { video: v.clone(), step: 0, since: std::time::Instant::now(), failed: false });
+                    app.play(&v);
+                }
+            }
+            if a == "--play" {
+                if let Some(v) = args.next().as_deref().and_then(Video::from_url_or_id) {
+                    app.play(&v);
+                }
+            }
+        }
         let (tx, ctx2) = (app.tx.clone(), ctx.clone());
         yt::watch_power(app.power, move |p| {
             let _ = tx.send(Msg::Power(p));
@@ -180,6 +259,12 @@ impl App {
         if tab.loaded_once && !refresh {
             return;
         }
+        if tab.videos.is_empty() {
+            if let Some(cached) = list_name(&source).and_then(cache::read_list) {
+                tab.videos = cached.videos;
+                tab.cached_at = Some(cached.saved_at);
+            }
+        }
         tab.generation += 1;
         tab.loading = true;
         tab.error = None;
@@ -214,6 +299,7 @@ impl App {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::Fetched { source, generation, start, result } => {
+                    let name = list_name(&source);
                     let tab = self.tabs.entry(source).or_default();
                     if tab.generation != generation {
                         continue; // superseded by a refresh
@@ -234,6 +320,10 @@ impl App {
                                 }
                             }
                             tab.loaded_once = true;
+                            tab.cached_at = None;
+                            if let Some(name) = name {
+                                cache::write_list(name, &tab.videos);
+                            }
                         }
                         Err(e) => tab.error = Some(e),
                     }
@@ -242,6 +332,7 @@ impl App {
                     self.power = p;
                     self.apply_profile_live(ctx);
                 }
+                Msg::CacheUsage(n) => self.cache_usage = Some(n),
                 Msg::Switched(r) => {
                     if let Err(e) = r {
                         self.status = Some((format!("Couldn't switch quality: {e}"), true));
@@ -268,9 +359,69 @@ impl App {
 
     fn play(&mut self, video: &Video) {
         self.stop_player();
+        if self.settings.player == PlayerMode::Embedded && self.gpa.is_some() {
+            match mpv::available() {
+                Ok(()) => {
+                    self.pending_play = Some(video.clone());
+                    return;
+                }
+                Err(e) => {
+                    self.status = Some((format!("Embedded player unavailable ({e}) — using a separate window"), true));
+                }
+            }
+        }
+        self.play_in_window(video);
+    }
+
+    /// Start a pending embedded playback. Runs in `ui`, where GL is current.
+    fn start_embedded(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let Some(video) = self.pending_play.take() else { return };
+        let (Some(tools), Some(gpa), Some(gl)) = (self.tools.clone(), self.gpa.clone(), frame.gl().cloned()) else {
+            return self.play_in_window(&video);
+        };
+        if self.surface.is_none() {
+            match Surface::new(&gl, frame) {
+                Ok(s) => self.surface = Some(s),
+                Err(e) => {
+                    self.status = Some((format!("Embedded player failed ({e}) — using a separate window"), true));
+                    return self.play_in_window(&video);
+                }
+            }
+        }
+        self.power = yt::power_state();
+        let profile = yt::profile(self.settings.quality, self.power, self.screen_cap);
+        match Embedded::start(&tools, &self.cookies, &video, &profile, self.settings.volume, gpa, ctx) {
+            Ok(p) => {
+                self.status = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{} — ytmini", video.title())));
+                self.embedded = Some(p);
+            }
+            Err(e) => {
+                self.status = Some((format!("Embedded player failed ({e}) — using a separate window"), true));
+                self.play_in_window(&video);
+            }
+        }
+    }
+
+    /// Leave the player view: tear mpv down, give back VRAM, restore the window.
+    fn close_embedded(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        if let Some(p) = self.embedded.take() {
+            self.settings.volume = p.volume;
+            drop(p); // frees the render context here (GL current), core shuts down in background
+        }
+        if let (Some(s), Some(gl)) = (&mut self.surface, frame.gl()) {
+            s.shrink(gl);
+        }
+        if ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title("ytmini".into()));
+    }
+
+    fn play_in_window(&mut self, video: &Video) {
         let Some(tools) = &self.tools else { return };
         self.power = yt::power_state();
-        let profile = yt::profile(self.quality, self.power, self.screen_cap);
+        let profile = yt::profile(self.settings.quality, self.power, self.screen_cap);
         match yt::play(tools, &self.cookies, video, &profile) {
             Ok(child) => {
                 self.status = None;
@@ -290,7 +441,10 @@ impl App {
     /// If the effective quality changed (power state or menu), retune the
     /// running player in place.
     fn apply_profile_live(&mut self, ctx: &egui::Context) {
-        let profile = yt::profile(self.quality, self.power, self.screen_cap);
+        let profile = yt::profile(self.settings.quality, self.power, self.screen_cap);
+        if let Some(e) = &mut self.embedded {
+            e.apply_profile(&profile);
+        }
         let Some(p) = &mut self.player else { return };
         if p.format == profile.ytdl_format {
             return;
@@ -314,6 +468,15 @@ impl App {
             self.screen_cap = cap;
             self.apply_profile_live(ctx);
         }
+    }
+
+    /// Apply cache limits on a worker thread and report the resulting size.
+    fn enforce_cache(&self, ctx: &egui::Context) {
+        let (limits, tx, ctx) = (self.limits.clone(), self.tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::CacheUsage(cache::enforce(&limits)));
+            ctx.request_repaint();
+        });
     }
 
     fn stop_player(&mut self) {
@@ -493,7 +656,6 @@ impl App {
         let mut switch_to: Option<Source> = None;
         let mut search: Option<String> = None;
         let mut reimport = false;
-        let mut quality_changed = false;
 
         // ----- top bar -----
         egui::Panel::top("top")
@@ -515,14 +677,10 @@ impl App {
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.menu_button(RichText::new("☰").size(18.0), |ui| {
-                            ui.label(RichText::new("Playback quality").small().color(TEXT_DIM));
-                            for q in yt::Quality::choices(self.screen_cap) {
-                                if ui.radio_value(&mut self.quality, q, q.label()).clicked() {
-                                    quality_changed = true;
-                                    ui.close();
-                                }
+                            if ui.button("Settings…").clicked() {
+                                self.show_settings = true;
+                                ui.close();
                             }
-                            ui.separator();
                             if ui.button("Re-import cookies…").clicked() {
                                 reimport = true;
                                 ui.close();
@@ -562,9 +720,14 @@ impl App {
             .show_separator_line(false)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    let cached_at = self.tabs.get(&self.active).and_then(|t| t.cached_at);
                     if active_loading {
                         ui.spinner();
-                        ui.label(RichText::new("Loading…").color(TEXT_DIM));
+                        let msg = match cached_at {
+                            Some(t) => format!("Updating… (showing results from {})", ago(t)),
+                            None => "Loading…".into(),
+                        };
+                        ui.label(RichText::new(msg).color(TEXT_DIM));
                     } else if let Some(p) = &self.player {
                         ui.label(RichText::new("▶").color(ACCENT));
                         ui.label(RichText::new(format!("Playing: {}", p.title)).color(TEXT));
@@ -595,9 +758,6 @@ impl App {
             });
         if stop {
             self.stop_player();
-        }
-        if quality_changed {
-            self.apply_profile_live(&ctx);
         }
 
         // ----- grid -----
@@ -645,6 +805,13 @@ impl App {
             let cols = (((avail_w + GAP) / (CARD_MIN_W + GAP)).floor() as usize).max(1);
             let card_w = (avail_w - GAP * (cols as f32 - 1.0)) / cols as f32;
             let thumb_h = card_w * 9.0 / 16.0;
+            let variant = match self.settings.thumbs {
+                ThumbQuality::Standard => Variant::Standard,
+                ThumbQuality::High => Variant::High,
+                // 320 px source is fine up to ~1.2× upscaling
+                ThumbQuality::Auto if card_w * ui.ctx().pixels_per_point() > 380.0 => Variant::High,
+                ThumbQuality::Auto => Variant::Standard,
+            };
             let title_h = ui.fonts_mut(|f| f.row_height(&FontId::proportional(TITLE_SIZE)));
             let meta_h = ui.fonts_mut(|f| f.row_height(&FontId::proportional(META_SIZE)));
             let card_h = thumb_h + CARD_PAD + title_h * 2.0 + 4.0 + meta_h + CARD_PAD;
@@ -666,7 +833,7 @@ impl App {
                         if row < video_rows {
                             for v in tab.videos.iter().skip(row * cols).take(cols) {
                                 let playing = playing_id.as_deref() == Some(v.id.as_str());
-                                if video_card(ui, thumbs, v, Vec2::new(card_w, card_h), thumb_h, playing).clicked() {
+                                if video_card(ui, thumbs, variant, v, Vec2::new(card_w, card_h), thumb_h, playing).clicked() {
                                     clicked = Some(v.clone());
                                 }
                             }
@@ -729,19 +896,303 @@ impl App {
     }
 }
 
+impl App {
+    fn ui_player(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        let mut back = false;
+        let mut toggle_fs = false;
+
+        // Keyboard (only when no text field / popup has focus)
+        if !ctx.egui_wants_keyboard_input() {
+            let (space, left, right, up, down, f, esc) = ctx.input_mut(|i| {
+                let k = |i: &mut egui::InputState, key| i.consume_key(egui::Modifiers::NONE, key);
+                (k(i, Key::Space), k(i, Key::ArrowLeft), k(i, Key::ArrowRight), k(i, Key::ArrowUp), k(i, Key::ArrowDown), k(i, Key::F), k(i, Key::Escape))
+            });
+            if let Some(p) = &mut self.embedded {
+                if space {
+                    p.toggle_pause();
+                    p.poke();
+                }
+                if left {
+                    p.seek_relative(-5.0);
+                }
+                if right {
+                    p.seek_relative(5.0);
+                }
+                if up || down {
+                    p.set_volume(p.volume + if up { 5.0 } else { -5.0 });
+                    p.poke();
+                }
+            }
+            toggle_fs |= f;
+            if esc {
+                if fullscreen {
+                    toggle_fs = true;
+                } else {
+                    back = true;
+                }
+            }
+        }
+
+        let mut quality = None;
+        let mut open_in_window = None;
+        if let (Some(p), Some(surface), Some(gl)) = (&mut self.embedded, &mut self.surface, frame.gl()) {
+            let view = player::ViewCtx {
+                gl,
+                surface,
+                fullscreen,
+                quality: self.settings.quality,
+                screen_cap: self.screen_cap,
+                accent: ACCENT,
+            };
+            let act = p.ui(ui, view);
+            back |= act.back;
+            toggle_fs |= act.toggle_fullscreen;
+            quality = act.quality;
+            if act.open_in_window {
+                open_in_window = Some(Video {
+                    id: p.id.clone(),
+                    title: Some(p.title.clone()),
+                    channel: None,
+                    uploader: None,
+                    duration: None,
+                });
+            }
+        }
+
+        if toggle_fs {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
+        }
+        if let Some(q) = quality {
+            self.settings.quality = q;
+            self.apply_profile_live(&ctx);
+        }
+        if back || open_in_window.is_some() {
+            self.close_embedded(&ctx, frame);
+        }
+        if let Some(v) = open_in_window {
+            self.play_in_window(&v);
+        }
+    }
+
+    fn ui_settings(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        let mut clear = false;
+        let mut reimport = false;
+        let before_quality = self.settings.quality;
+        egui::Window::new("Settings")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                let s = &mut self.settings;
+                ui.add_space(4.0);
+                section(ui, "Playback");
+                egui::Grid::new("playback").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                    ui.label("Player");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut s.player, PlayerMode::Embedded, "In this window");
+                        ui.selectable_value(&mut s.player, PlayerMode::Window, "Separate window");
+                    });
+                    ui.end_row();
+                    ui.label("Quality");
+                    egui::ComboBox::from_id_salt("q").selected_text(s.quality.label()).width(220.0).show_ui(ui, |ui| {
+                        for q in yt::Quality::choices(self.screen_cap) {
+                            ui.selectable_value(&mut s.quality, q, q.label());
+                        }
+                    });
+                    ui.end_row();
+                });
+                ui.label(
+                    RichText::new(format!(
+                        "Auto never exceeds what this screen can show ({}p), and drops to 1080p30 on battery, 720p30 in Low Power Mode.",
+                        self.screen_cap
+                    ))
+                    .small()
+                    .color(TEXT_DIM),
+                );
+
+                ui.add_space(10.0);
+                section(ui, "Thumbnails");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut s.thumbs, ThumbQuality::Auto, "Auto");
+                    ui.selectable_value(&mut s.thumbs, ThumbQuality::Standard, "Standard · 320p");
+                    ui.selectable_value(&mut s.thumbs, ThumbQuality::High, "High · 640p");
+                });
+                ui.label(RichText::new("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (Retina) screens.").small().color(TEXT_DIM));
+
+                ui.add_space(10.0);
+                section(ui, "Disk cache");
+                egui::Grid::new("cache").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                    ui.label("Size limit");
+                    ui.add(
+                        egui::Slider::new(&mut s.cache_mb, 32..=4096)
+                            .logarithmic(true)
+                            .suffix(" MB")
+                            .text(""),
+                    );
+                    ui.end_row();
+                    ui.label("Keep for");
+                    ui.add(egui::Slider::new(&mut s.cache_days, 1..=365).logarithmic(true).suffix(" days"));
+                    ui.end_row();
+                    ui.label("In use");
+                    ui.horizontal(|ui| {
+                        let used = self.cache_usage.map_or("…".into(), |b| format!("{:.1} MB", b as f64 / 1_048_576.0));
+                        ui.label(used);
+                        if ui.small_button("Clear").clicked() {
+                            clear = true;
+                        }
+                    });
+                    ui.end_row();
+                });
+                ui.label(
+                    RichText::new(format!(
+                        "Recommended: {} MB, {} days — about 4,000 high-quality or 18,000 standard thumbnails, plus your last feed/subscriptions for instant startup.",
+                        crate::settings::DEFAULT_CACHE_MB,
+                        crate::settings::DEFAULT_CACHE_DAYS
+                    ))
+                    .small()
+                    .color(TEXT_DIM),
+                );
+
+                ui.add_space(10.0);
+                section(ui, "Account");
+                if ui.button("Re-import cookies…").clicked() {
+                    reimport = true;
+                }
+            });
+        if !open || reimport {
+            self.show_settings = false;
+        }
+        if self.settings.quality != before_quality {
+            self.apply_profile_live(ctx);
+        }
+        if clear {
+            cache::clear();
+            self.thumbs.clear();
+            self.cache_usage = Some(0);
+        }
+        if reimport {
+            self.import_error = None;
+            self.browsers = yt::detect_browsers();
+            self.screen = Screen::Onboarding;
+        }
+    }
+}
+
+impl App {
+    fn drive_smoke(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let Some(mut sm) = self.smoke.take() else { return };
+        ctx.request_repaint_after(Duration::from_millis(100));
+        let t = sm.since.elapsed().as_secs_f64();
+        let started = self.embedded.as_ref().is_some_and(|p| p.started && !p.buffering);
+        let pos = self.embedded.as_ref().map_or(0.0, |p| p.pos);
+        if let Some(err) = self.embedded.as_ref().and_then(|p| p.error.clone()) {
+            sm.log(false, &format!("player error: {err}"));
+        }
+        let next = |sm: &mut Smoke| {
+            sm.step += 1;
+            sm.since = std::time::Instant::now();
+        };
+        match sm.step {
+            0 if started && t > 3.0 => {
+                sm.log(self.embedded.is_some(), "embedded playback started");
+                if let Some(p) = &self.embedded {
+                    p.seek_absolute(60.0, true);
+                }
+                next(&mut sm);
+            }
+            1 if started && t > 3.0 => {
+                sm.log(pos >= 60.0, &format!("seek to 60s (pos {pos:.1})"));
+                eprintln!("[smoke] MARK before-back");
+                self.close_embedded(ctx, frame);
+                next(&mut sm);
+            }
+            2 if t > 3.0 => {
+                sm.log(self.embedded.is_none(), "back to grid, player torn down");
+                eprintln!("[smoke] MARK after-back");
+                let v = sm.video.clone();
+                self.play(&v);
+                next(&mut sm);
+            }
+            3 if started && t > 3.0 => {
+                sm.log(true, "second playback started");
+                self.settings.quality = yt::Quality::Max(480);
+                self.apply_profile_live(ctx);
+                next(&mut sm);
+            }
+            4 if started && t > 4.0 => {
+                let h = self.embedded.as_ref().and_then(Embedded::height).unwrap_or(0.0);
+                sm.log(h > 0.0 && h <= 480.0, &format!("live switch to 480p (height {h})"));
+                eprintln!("[smoke] quitting during playback; {}", if sm.failed { "SOME FAILED" } else { "ALL PASSED" });
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                next(&mut sm);
+            }
+            0..=4 if t > 40.0 => {
+                sm.log(false, &format!("timed out at step {}", sm.step));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                sm.step = 99;
+            }
+            _ => {}
+        }
+        self.smoke = Some(sm);
+    }
+}
+
+fn section(ui: &mut egui::Ui, title: &str) {
+    ui.label(RichText::new(title).strong().size(15.0).color(ACCENT));
+    ui.add_space(2.0);
+}
+
+fn ago(unix: u64) -> String {
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let d = now.saturating_sub(unix);
+    match d {
+        0..=89 => "just now".into(),
+        90..=5399 => format!("{} min ago", d / 60),
+        5400..=129_599 => format!("{} h ago", d / 3600),
+        _ => format!("{} days ago", d / 86_400),
+    }
+}
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_messages(ctx);
         self.thumbs.poll(ctx);
         self.poll_player();
         self.update_screen_cap(ctx);
+        if let Some(e) = &mut self.embedded {
+            e.poll_events();
+            if std::mem::take(&mut e.title_changed) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{} — ytmini", e.title)));
+            }
+        }
+        // (the smoke test changes settings; never persist those)
+        if self.smoke.is_none() && self.settings != self.saved_settings {
+            if (self.settings.cache_mb, self.settings.cache_days)
+                != (self.saved_settings.cache_mb, self.saved_settings.cache_days)
+            {
+                self.limits.set(self.settings.cache_mb, self.settings.cache_days);
+                self.enforce_cache(ctx);
+            }
+            self.settings.save();
+            self.saved_settings = self.settings.clone();
+        }
         if self.player.is_some() {
             // Nobody else wakes us when mpv exits; check twice a second.
             ctx.request_repaint_after(Duration::from_millis(500));
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.drive_smoke(&ctx, frame);
+        if self.pending_play.is_some() {
+            self.start_embedded(&ctx, frame);
+        }
         egui::Frame::new().fill(BG).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
             match &self.screen {
@@ -750,19 +1201,33 @@ impl eframe::App for App {
                     self.ui_missing(ui, &m);
                 }
                 Screen::Onboarding => self.ui_onboarding(ui),
+                Screen::Main if self.embedded.is_some() => self.ui_player(ui, frame),
                 Screen::Main => self.ui_main(ui),
             }
         });
+        if self.show_settings {
+            self.ui_settings(&ctx);
+        }
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        if let Some(p) = self.embedded.take() {
+            self.settings.volume = p.volume;
+            p.close_now(); // GL still current here; nothing outlives the context
+        }
+        if let (Some(s), Some(gl)) = (&self.surface, gl) {
+            s.destroy(gl);
+        }
         self.stop_player();
+        if self.smoke.is_none() && self.settings != self.saved_settings {
+            self.settings.save();
+        }
     }
 }
 
 // ---------- widgets ----------
 
-fn video_card(ui: &mut egui::Ui, thumbs: &mut Thumbs, v: &Video, size: Vec2, thumb_h: f32, playing: bool) -> egui::Response {
+fn video_card(ui: &mut egui::Ui, thumbs: &mut Thumbs, variant: Variant, v: &Video, size: Vec2, thumb_h: f32, playing: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if !ui.is_rect_visible(rect) {
         return resp;
@@ -776,7 +1241,7 @@ fn video_card(ui: &mut egui::Ui, thumbs: &mut Thumbs, v: &Video, size: Vec2, thu
     let thumb = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width(), thumb_h));
     let tr = CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 };
     painter.rect_filled(thumb, tr, Color32::from_rgb(0x24, 0x24, 0x2D));
-    if let Some(tex) = thumbs.get(&v.thumbnail()) {
+    if let Some(tex) = thumbs.get(&v.id, variant) {
         egui::Image::from_texture(egui::load::SizedTexture::from_handle(tex))
             .corner_radius(tr)
             .paint_at(ui, thumb);
