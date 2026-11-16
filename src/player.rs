@@ -1094,6 +1094,8 @@ pub struct Actions {
     pub toggle_panel: bool,
     /// Where the video is drawn (for overlays).
     pub video_rect: Option<egui::Rect>,
+    /// The header row and the width kept free at its right.
+    pub header: Option<(egui::Rect, f32)>,
 }
 
 pub struct ViewCtx<'a> {
@@ -1110,6 +1112,8 @@ pub struct ViewCtx<'a> {
     pub autoplay_in: Option<f32>,
     /// The Up next overlay's state for its toggle (`None`: no toggle).
     pub panel_open: Option<bool>,
+    /// Width to keep free at the right of the header (the app's buttons).
+    pub header_reserve: f32,
 }
 
 pub const CONTROLS_H: f32 = 64.0;
@@ -1122,7 +1126,8 @@ impl Embedded {
 
         // Header (hidden in fullscreen)
         if !v.fullscreen {
-            ui.horizontal(|ui| {
+            let reserve = v.header_reserve.min(ui.available_width() * 0.5);
+            let row = ui.horizontal(|ui| {
                 ui.add_space(12.0);
                 if ui
                     .add(
@@ -1135,7 +1140,7 @@ impl Embedded {
                 }
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(8.0);
+                    ui.add_space(8.0 + reserve);
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         ui.add(
                             egui::Label::new(egui::RichText::new(&self.title).size(16.0).strong())
@@ -1144,6 +1149,7 @@ impl Embedded {
                     });
                 });
             });
+            act.header = Some((row.response.rect, reserve));
             ui.add_space(6.0);
         }
 
@@ -1704,8 +1710,18 @@ impl Embedded {
             );
         }
 
-        // quality
-        let qr = take(150.0);
+        // quality: sized to its label ("1080p30 · battery saver" is long)
+        let label_w = ui
+            .painter()
+            .layout_no_wrap(
+                self.profile_label.clone(),
+                egui::FontId::proportional(13.0),
+                Color32::WHITE,
+            )
+            .size()
+            .x;
+        let combo_w = (label_w + 34.0).clamp(80.0, 280.0);
+        let qr = take(combo_w + 10.0);
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(qr)
@@ -1714,7 +1730,7 @@ impl Embedded {
                 let mut q = v.quality;
                 egui::ComboBox::from_id_salt("quality")
                     .selected_text(egui::RichText::new(&self.profile_label).size(13.0))
-                    .width(140.0)
+                    .width(combo_w)
                     .show_ui(ui, |ui| {
                         for choice in yt::Quality::choices(v.screen_cap) {
                             ui.selectable_value(&mut q, choice, choice.label());

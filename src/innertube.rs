@@ -557,6 +557,81 @@ mod chip_tests {
 
 #[cfg(test)]
 mod related_live {
+    /// Dumps a `next` continuation (YTMINI_CONT) to YTMINI_DUMP_FEED.
+    #[test]
+    #[ignore]
+    fn dump_cont() {
+        let cookies = crate::yt::config_dir().unwrap().join("cookies.txt");
+        let tok = std::env::var("YTMINI_CONT").unwrap();
+        let v = super::Client::new(&cookies)
+            .unwrap()
+            .post("next", serde_json::json!({ "continuation": tok }))
+            .unwrap();
+        std::fs::write(std::env::var("YTMINI_DUMP_FEED").unwrap(), v.to_string()).unwrap();
+    }
+
+    /// Watch info + two comment pages, read-only. `YTMINI_NEXT_ID=… cargo test -- --ignored watch_and_comments --nocapture`
+    #[test]
+    #[ignore]
+    fn watch_and_comments() {
+        let cookies = crate::yt::config_dir().unwrap().join("cookies.txt");
+        let id = std::env::var("YTMINI_NEXT_ID").unwrap_or_else(|_| "jNQXAC9IVRw".into());
+        let (rel, info) = super::watch_next(&cookies, &id).unwrap();
+        eprintln!("{} related; {:?}", rel.len(), WatchShow(&info));
+        let p1 = super::comments(info.comments.as_deref().unwrap()).unwrap();
+        eprintln!(
+            "count {:?}, {} comments, next {}",
+            p1.count,
+            p1.items.len(),
+            p1.next.is_some()
+        );
+        for c in p1.items.iter().take(3) {
+            eprintln!(
+                "  {} · {} · {} likes · {} replies · pinned {}: {:.60}",
+                c.author, c.published, c.likes, c.replies, c.pinned, c.text
+            );
+        }
+        let p2 = super::comments(p1.next.as_deref().unwrap()).unwrap();
+        eprintln!("page 2: {} comments", p2.items.len());
+        assert!(!p1.items.is_empty() && !p2.items.is_empty());
+        let pls = super::playlists_for(&cookies, &id).unwrap();
+        eprintln!("{} playlists", pls.len());
+    }
+
+    /// No ids or tokens in the output.
+    struct WatchShow<'a>(&'a super::WatchInfo);
+    impl std::fmt::Debug for WatchShow<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let w = self.0;
+            write!(
+                f,
+                "like {:?} ({:?}), channel {:?} ({:?} subs), subscribed {:?}, comments {}",
+                w.like,
+                w.like_count,
+                w.channel,
+                w.subscribers,
+                w.subscribed,
+                w.comments.is_some()
+            )
+        }
+    }
+
+    /// Dumps `playlist/get_add_to_playlist` for YTMINI_NEXT_ID (read-only).
+    #[test]
+    #[ignore]
+    fn dump_add_to_playlist() {
+        let cookies = crate::yt::config_dir().unwrap().join("cookies.txt");
+        let id = std::env::var("YTMINI_NEXT_ID").unwrap();
+        let v = super::Client::new(&cookies)
+            .unwrap()
+            .post(
+                "playlist/get_add_to_playlist",
+                serde_json::json!({ "videoIds": [id] }),
+            )
+            .unwrap();
+        std::fs::write(std::env::var("YTMINI_DUMP_FEED").unwrap(), v.to_string()).unwrap();
+    }
+
     /// Dumps `next` for YTMINI_NEXT_ID to YTMINI_DUMP_FEED (signed in, read-only).
     #[test]
     #[ignore]
@@ -685,9 +760,107 @@ pub fn player_extras(cookies: &Path, video_id: &str) -> Result<Extras> {
 
 /// YouTube's suggestions for a video (the column beside the player on the
 /// website), personalised like there. Reads only; nothing is recorded.
+#[cfg(test)]
 pub fn related(cookies: &Path, video_id: &str) -> Result<Vec<Video>> {
+    Ok(watch_next(cookies, video_id)?.0)
+}
+
+/// Your rating of a video.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[allow(clippy::enum_variant_names)] // Like::Like reads as YouTube's own words
+pub enum Like {
+    #[default]
+    None,
+    Like,
+    Dislike,
+}
+
+/// The parts of the watch page beyond the video: your rating, the channel
+/// and whether you're subscribed, where comments start.
+#[derive(Clone, Debug, Default)]
+pub struct WatchInfo {
+    pub like: Like,
+    /// As YouTube shows it ("20 млн").
+    pub like_count: Option<String>,
+    pub channel_id: Option<String>,
+    pub channel: Option<String>,
+    pub subscribed: Option<bool>,
+    pub subscribers: Option<String>,
+    /// Continuation token of the comments (None: comments are off).
+    pub comments: Option<String>,
+}
+
+fn watch_info(r: &Value) -> WatchInfo {
+    let mut w = WatchInfo::default();
+    let contents = r
+        .pointer("/contents/twoColumnWatchNextResults/results/results/contents")
+        .and_then(Value::as_array);
+    for c in contents.into_iter().flatten() {
+        if let Some(p) = c.get("videoPrimaryInfoRenderer") {
+            let seg = p
+                .pointer("/videoActions/menuRenderer/topLevelButtons")
+                .and_then(Value::as_array)
+                .and_then(|b| {
+                    b.iter()
+                        .find_map(|b| b.get("segmentedLikeDislikeButtonViewModel"))
+                });
+            if let Some(l) = seg.and_then(|s| s.pointer("/likeButtonViewModel/likeButtonViewModel"))
+            {
+                w.like = match l
+                    .pointer("/likeStatusEntity/likeStatus")
+                    .and_then(Value::as_str)
+                {
+                    Some("LIKE") => Like::Like,
+                    Some("DISLIKE") => Like::Dislike,
+                    _ => Like::None,
+                };
+                let which = if w.like == Like::Like {
+                    "toggled"
+                } else {
+                    "default"
+                };
+                w.like_count = l
+                    .pointer(&format!("/toggleButtonViewModel/toggleButtonViewModel/{which}ButtonViewModel/buttonViewModel/title"))
+                    .and_then(Value::as_str)
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_string);
+            }
+        }
+        if let Some(s) = c.get("videoSecondaryInfoRenderer") {
+            if let Some(b) = s.pointer("/subscribeButton/subscribeButtonRenderer") {
+                w.subscribed = b.get("subscribed").and_then(Value::as_bool);
+                w.channel_id = b
+                    .get("channelId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            let owner = s.pointer("/owner/videoOwnerRenderer");
+            w.channel = owner.and_then(|o| text(o.get("title")));
+            w.subscribers = owner.and_then(|o| text(o.get("subscriberCountText")));
+            if w.channel_id.is_none() {
+                w.channel_id = owner
+                    .and_then(|o| o.pointer("/navigationEndpoint/browseEndpoint/browseId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+        }
+        if let Some(sec) = c.get("itemSectionRenderer").filter(|s| {
+            s.get("sectionIdentifier").and_then(Value::as_str) == Some("comment-item-section")
+        }) {
+            w.comments = sec
+                .pointer("/contents/0/continuationItemRenderer/continuationEndpoint/continuationCommand/token")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+    }
+    w
+}
+
+/// The watch page, signed in: suggestions (see below) and [`WatchInfo`].
+pub fn watch_next(cookies: &Path, video_id: &str) -> Result<(Vec<Video>, WatchInfo)> {
     let c = Client::new(cookies)?;
     let r = c.post("next", json!({ "videoId": video_id }))?;
+    let info = watch_info(&r);
     let results = r
         .pointer("/contents/twoColumnWatchNextResults/secondaryResults/secondaryResults/results")
         .context("no suggestions in the reply")?;
@@ -709,13 +882,185 @@ pub fn related(cookies: &Path, video_id: &str) -> Result<Vec<Video>> {
                 eprintln!("related list: {}", out.len());
             }
             if out.len() >= 5 {
-                return Ok(out);
+                return Ok((out, info));
             }
         }
     }
     let mut out = Vec::new();
     collect(results, &mut out, &mut None);
-    Ok(tidy(out))
+    Ok((tidy(out), info))
+}
+
+/// Like, dislike or clear your rating.
+pub fn set_like(cookies: &Path, video_id: &str, like: Like) -> Result<()> {
+    let endpoint = match like {
+        Like::Like => "like/like",
+        Like::Dislike => "like/dislike",
+        Like::None => "like/removelike",
+    };
+    Client::new(cookies)?.post(endpoint, json!({ "target": { "videoId": video_id } }))?;
+    Ok(())
+}
+
+pub fn set_subscribed(cookies: &Path, channel_id: &str, on: bool) -> Result<()> {
+    let endpoint = if on {
+        "subscription/subscribe"
+    } else {
+        "subscription/unsubscribe"
+    };
+    Client::new(cookies)?.post(endpoint, json!({ "channelIds": [channel_id] }))?;
+    Ok(())
+}
+
+/// One of your playlists, and whether the video is in it.
+#[derive(Clone, Debug)]
+pub struct PlaylistChoice {
+    pub id: String,
+    pub title: String,
+    pub contains: bool,
+}
+
+/// Your playlists for "Save to playlist" (what the website's dialog lists).
+pub fn playlists_for(cookies: &Path, video_id: &str) -> Result<Vec<PlaylistChoice>> {
+    let r = Client::new(cookies)?.post(
+        "playlist/get_add_to_playlist",
+        json!({ "videoIds": [video_id] }),
+    )?;
+    let mut out = Vec::new();
+    fn walk(v: &Value, out: &mut Vec<PlaylistChoice>) {
+        match v {
+            Value::Object(m) => {
+                if let Some(o) = m.get("playlistAddToOptionRenderer") {
+                    if let (Some(id), Some(title)) = (
+                        o.get("playlistId").and_then(Value::as_str),
+                        text(o.get("title")),
+                    ) {
+                        out.push(PlaylistChoice {
+                            id: id.to_string(),
+                            title,
+                            contains: o.get("containsSelectedVideos").and_then(Value::as_str)
+                                == Some("ALL"),
+                        });
+                    }
+                    return;
+                }
+                m.values().for_each(|v| walk(v, out));
+            }
+            Value::Array(a) => a.iter().for_each(|v| walk(v, out)),
+            _ => {}
+        }
+    }
+    walk(&r, &mut out);
+    anyhow::ensure!(!out.is_empty(), "no playlists in YouTube's reply");
+    Ok(out)
+}
+
+pub fn set_in_playlist(cookies: &Path, playlist_id: &str, video_id: &str, add: bool) -> Result<()> {
+    let action = if add {
+        json!({ "addedVideoId": video_id, "action": "ACTION_ADD_VIDEO" })
+    } else {
+        json!({ "removedVideoId": video_id, "action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID" })
+    };
+    Client::new(cookies)?.post(
+        "browse/edit_playlist",
+        json!({ "playlistId": playlist_id, "actions": [action] }),
+    )?;
+    Ok(())
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Comment {
+    pub author: String,
+    pub text: String,
+    /// "6 years ago", as YouTube writes it.
+    pub published: String,
+    pub likes: String,
+    pub replies: String,
+    pub pinned: bool,
+    pub verified: bool,
+    /// Written by the video's uploader.
+    pub creator: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CommentsPage {
+    pub items: Vec<Comment>,
+    /// Token for the next page.
+    pub next: Option<String>,
+    /// "10,644,361 Comments" (first page only).
+    pub count: Option<String>,
+}
+
+/// A page of comments. Read signed out: reading shouldn't touch the account.
+pub fn comments(token: &str) -> Result<CommentsPage> {
+    let r = Client::anonymous().post("next", json!({ "continuation": token }))?;
+    let mut entities = std::collections::HashMap::new();
+    for m in r
+        .pointer("/frameworkUpdates/entityBatchUpdate/mutations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let (Some(k), Some(p)) = (
+            m.get("entityKey").and_then(Value::as_str),
+            m.pointer("/payload/commentEntityPayload"),
+        ) {
+            entities.insert(k.to_string(), p);
+        }
+    }
+    let mut page = CommentsPage::default();
+    let s = |v: Option<&Value>| v.and_then(Value::as_str).unwrap_or_default().to_string();
+    for e in r
+        .get("onResponseReceivedEndpoints")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let items = e
+            .pointer("/reloadContinuationItemsCommand/continuationItems")
+            .or_else(|| e.pointer("/appendContinuationItemsAction/continuationItems"))
+            .and_then(Value::as_array);
+        for it in items.into_iter().flatten() {
+            if let Some(h) = it.get("commentsHeaderRenderer") {
+                page.count = text(h.get("countText"));
+            } else if let Some(vm) =
+                it.pointer("/commentThreadRenderer/commentViewModel/commentViewModel")
+            {
+                let Some(p) = vm
+                    .get("commentKey")
+                    .and_then(Value::as_str)
+                    .and_then(|k| entities.get(k))
+                else {
+                    continue;
+                };
+                page.items.push(Comment {
+                    author: s(p.pointer("/author/displayName")),
+                    text: s(p.pointer("/properties/content/content")),
+                    published: s(p.pointer("/properties/publishedTime")),
+                    likes: s(p.pointer("/toolbar/likeCountNotliked")),
+                    replies: s(p.pointer("/toolbar/replyCount")),
+                    pinned: vm.get("pinnedText").is_some(),
+                    verified: p
+                        .pointer("/author/isVerified")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    creator: p
+                        .pointer("/author/isCreator")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                });
+            } else if let Some(c) = it.get("continuationItemRenderer") {
+                page.next = c
+                    .pointer("/continuationEndpoint/continuationCommand/token")
+                    .or_else(|| {
+                        c.pointer("/button/buttonRenderer/command/continuationCommand/token")
+                    })
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+        }
+    }
+    Ok(page)
 }
 
 /// The continuation token of the watch page's "Related" chip. Found by the

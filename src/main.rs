@@ -6,6 +6,7 @@
 mod app;
 mod cache;
 mod chapters;
+mod crashlog;
 mod dearrow;
 mod deps;
 mod downloads;
@@ -26,6 +27,11 @@ mod tray;
 mod yt;
 
 fn main() -> eframe::Result {
+    crashlog::install();
+    // `--crash-test`: check the crash log (dev)
+    if std::env::args().any(|a| a == "--crash-test") {
+        panic!("crash test (asked for with --crash-test)");
+    }
     // A Finder-launched .app gets a bare PATH; libmpv's ytdl hook and yt-dlp's
     // JS runtime (deno) are found through PATH, so extend it before any threads start.
     yt::extend_process_path();
