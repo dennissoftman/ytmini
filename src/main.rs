@@ -5,6 +5,7 @@
 
 mod app;
 mod cache;
+mod deps;
 mod mpv;
 mod player;
 mod settings;

@@ -11,9 +11,25 @@ A minimal personal YouTube client: egui UI, yt-dlp for listing and sign-in
 ytmini --play <url|id>   # open a video straight into the player
 ```
 
-Runtime dependencies (not bundled): `yt-dlp`, `mpv` (which provides libmpv), and
-`deno` (yt-dlp needs a JS runtime for YouTube). Keep yt-dlp current —
-"signature"/"JS challenge" errors usually mean it's stale: `brew upgrade yt-dlp`.
+`ytmini.app` is self-contained except for two downloads it manages itself:
+
+| Component | Where it comes from |
+|---|---|
+| libmpv + ~50 dylibs (FFmpeg, libass, codecs…), `mpv` fallback binary | copied from Homebrew into the bundle by `bundle.sh` (`scripts/bundle_dylibs.py` relinks them to `@rpath`, so nothing points at `/opt/homebrew`) |
+| yt-dlp | downloaded on first run from yt-dlp's GitHub release into `~/Library/Application Support/ytmini/bin/`, SHA-256 verified, update check daily (and right away when YouTube errors look like a stale yt-dlp) |
+| deno (JS runtime yt-dlp needs for YouTube) | a system `deno` if present, otherwise downloaded and verified the same way |
+
+Why the *unpacked* yt-dlp build (`yt-dlp_macos.zip`, 124 MB on disk) and not the
+single-file one: the single-file build unpacks itself on every launch and macOS
+re-scans those files each time — 13 s per call, measured, vs 0.26 s unpacked.
+
+Building the bundle needs `brew install mpv` on the build machine; running it
+doesn't need Homebrew at all.
+
+**Licensing:** Homebrew's FFmpeg is built with `--enable-gpl --enable-version3`
+and mpv is GPL-2.0+/LGPL-2.1+. Fine for personal use; if you distribute the
+`.app`, the GPL applies (ship or offer the mpv/FFmpeg sources, and license
+ytmini compatibly).
 
 ## Embedded player and libmpv
 
@@ -25,7 +41,7 @@ not linked at build time**, so:
 - the app still starts if libmpv is missing or an mpv upgrade breaks it, and
   falls back to playing in a separate mpv window (also selectable in Settings).
 
-Search order: `<app>/Contents/Frameworks/libmpv.2.dylib`, next to the
+Search order: `<app>/Contents/Frameworks/libmpv.2.dylib` (bundled), next to the
 executable, `/opt/homebrew/lib` (Apple Silicon Homebrew), `/usr/local/lib`
 (Intel Homebrew), `/opt/local/lib` (MacPorts), then the system loader path.
 On Linux `libmpv.so.2`, on Windows `libmpv-2.dll` next to the exe or on PATH.
@@ -39,7 +55,7 @@ yt-dlp finds deno.
 
 | What | Path |
 |---|---|
-| Cookies (chmod 600), settings, mpv log | `~/Library/Application Support/ytmini/` |
+| Cookies (chmod 600), settings, mpv log, managed yt-dlp/deno (`bin/`) | `~/Library/Application Support/ytmini/` |
 | Disk cache (thumbnails, last tab results) | `~/Library/Caches/ytmini/` |
 
 Cache defaults: 256 MB, 30 days, LRU — both adjustable in Settings.

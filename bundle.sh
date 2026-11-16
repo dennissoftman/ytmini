@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds dist/ytmini.app (macOS). Pass --install to copy it to ~/Applications.
-# Runtime deps (yt-dlp, mpv, deno) are NOT bundled; the app finds them in
-# Homebrew's paths even when launched from Finder.
+# libmpv (+ deps) and mpv are copied in from Homebrew at build time, so the
+# result runs on Macs without Homebrew. yt-dlp and deno are downloaded by the
+# app itself on first run (and yt-dlp kept up to date) — see src/deps.rs.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -46,6 +47,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+# libmpv + its ~50 dylibs and the mpv fallback binary, relinked to live inside the app.
+python3 scripts/bundle_dylibs.py "$APP" --prefix "$(brew --prefix)"
 
 # Ad-hoc signature so Gatekeeper/TCC treat it as one consistent app.
 codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || echo "warning: codesign failed (app still runs locally)"

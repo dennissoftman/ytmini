@@ -154,7 +154,10 @@ fn load() -> Result<Lib, String> {
         }
         // SAFETY: loading libmpv runs its (trusted) initializers only.
         match unsafe { libloading::Library::new(&path) } {
-            Ok(lib) => return bind(lib).map_err(|e| format!("{}: {e}", path.display())),
+            Ok(lib) => {
+                let _ = LOADED_FROM.set(path.display().to_string());
+                return bind(lib).map_err(|e| format!("{}: {e}", path.display()));
+            }
             Err(e) => errors.push(format!("{}: {e}", path.display())),
         }
     }
@@ -200,6 +203,20 @@ fn bind(lib: libloading::Library) -> Result<Lib, String> {
 fn lib() -> Result<&'static Lib, String> {
     static LIB: OnceLock<Result<Lib, String>> = OnceLock::new();
     LIB.get_or_init(load).as_ref().map_err(Clone::clone)
+}
+
+/// Where libmpv came from: `Some(true)` = inside the app bundle, `Some(false)` =
+/// system/Homebrew, `None` = not available.
+pub fn bundled_or_system() -> Option<bool> {
+    lib().ok()?;
+    let path = LOADED_FROM.get()?;
+    Some(path.contains("/Frameworks/") || path.starts_with(&exe_dir()))
+}
+
+static LOADED_FROM: OnceLock<String> = OnceLock::new();
+
+fn exe_dir() -> String {
+    std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.display().to_string())).unwrap_or_default()
 }
 
 /// Is an embeddable libmpv available? (Loads it on first call.)

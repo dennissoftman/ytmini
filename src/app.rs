@@ -2,6 +2,7 @@
 //! threads and reports back over an mpsc channel.
 
 use crate::cache::{self, Limits};
+use crate::deps::{self, Dep};
 use crate::mpv;
 use crate::player::{self, Embedded, Surface};
 use crate::settings::{PlayerMode, Settings, ThumbQuality};
@@ -47,8 +48,21 @@ const BASE_TABS: [Source; 4] = [Source::Feed, Source::Subscriptions, Source::Wat
 
 enum Screen {
     MissingTools(yt::Missing),
+    /// First run without yt-dlp: downloading our own copy.
+    Setup,
     Onboarding,
     Main,
+}
+
+/// Background install/update of yt-dlp / deno.
+#[derive(Default)]
+struct DepsState {
+    /// What's happening right now, for the setup screen / status bar.
+    activity: Option<String>,
+    error: Option<String>,
+    busy: bool,
+    /// "yt-dlp 2026.10.26 (auto-updated)" etc., for Settings.
+    versions: Vec<(String, String)>,
 }
 
 enum Msg {
@@ -57,6 +71,10 @@ enum Msg {
     Power(yt::Power),
     Switched(Result<(), String>),
     CacheUsage(u64),
+    DepProgress(deps::Progress),
+    /// A deps job finished: Ok(message for the status bar) / Err.
+    DepsDone(Result<Option<String>, String>),
+    Versions(Vec<(String, String)>),
 }
 
 #[derive(Default)]
@@ -141,6 +159,7 @@ pub struct App {
     tray_rx: Receiver<TrayEvent>,
     hidden: bool,
     quitting: bool,
+    deps: DepsState,
 }
 
 /// `--smoke-test <id>`: drives the embedded player through play → seek → back →
@@ -207,6 +226,7 @@ impl App {
             tray_rx,
             hidden: false,
             quitting: false,
+            deps: DepsState::default(),
         };
         app.enforce_cache(ctx);
         // `ytmini --play <url|id>` opens straight into the player.
@@ -237,19 +257,115 @@ impl App {
     fn check_tools(&mut self, ctx: &egui::Context) {
         match Tools::locate() {
             Ok(t) => {
-                if t.deno.is_none() {
-                    self.status = Some(("deno not found — YouTube may fail. Install it: brew install deno".into(), true));
+                // Switch to our own auto-updating yt-dlp (and get deno if there's
+                // none) in the background; the system copy keeps working meanwhile.
+                let mut need = Vec::new();
+                if !t.ytdlp_managed {
+                    need.push(Dep::YtDlp);
                 }
+                if t.deno.is_none() {
+                    need.push(Dep::Deno);
+                }
+                let update_due = t.ytdlp_managed && deps::check_due(Dep::YtDlp, Duration::from_secs(24 * 3600));
                 self.tools = Some(t);
+                if !need.is_empty() {
+                    self.run_deps_job(ctx, need, false);
+                } else if update_due {
+                    self.run_deps_job(ctx, vec![Dep::YtDlp], true);
+                }
+                self.refresh_versions(ctx);
+                let on_main = matches!(self.screen, Screen::Main);
                 if yt::logged_in(&self.cookies) {
                     self.screen = Screen::Main;
-                    self.load(ctx, Source::Feed, false);
+                    if !on_main {
+                        self.load(ctx, Source::Feed, false);
+                    }
                 } else {
                     self.screen = Screen::Onboarding;
                 }
             }
+            Err(m) if m.ytdlp && !m.player => {
+                // Nothing to list videos with yet: download yt-dlp (+ deno) first.
+                self.screen = Screen::Setup;
+                if !self.deps.busy {
+                    self.run_deps_job(ctx, vec![Dep::YtDlp, Dep::Deno], false);
+                }
+            }
             Err(m) => self.screen = Screen::MissingTools(m),
         }
+    }
+
+    /// Install (or, with `update`, check-and-update) deps on a worker thread.
+    fn run_deps_job(&mut self, ctx: &egui::Context, list: Vec<Dep>, update: bool) {
+        if self.deps.busy {
+            return;
+        }
+        self.deps.busy = true;
+        self.deps.error = None;
+        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        let deno_on_system = self.tools.as_ref().and_then(|t| t.deno.clone()).is_some_and(|p| Dep::Deno.managed() != Some(p));
+        std::thread::spawn(move || {
+            let report = |p: deps::Progress| {
+                let _ = tx.send(Msg::DepProgress(p));
+                ctx.request_repaint();
+            };
+            let mut msgs = Vec::new();
+            let mut result = Ok(());
+            for dep in list {
+                if dep == Dep::Deno && (deno_on_system || Dep::Deno.managed().is_some()) {
+                    continue;
+                }
+                let r = if update {
+                    deps::update_if_needed(dep, &report).map(|v| v.map(|v| format!("{} updated to {v}", dep.name())))
+                } else {
+                    deps::install(dep, &report).map(|exe| {
+                        Some(format!("{} {} installed", dep.name(), deps::version(&exe).unwrap_or_default()))
+                    })
+                };
+                match r {
+                    Ok(Some(m)) => msgs.push(m),
+                    Ok(None) => {}
+                    Err(e) => {
+                        result = Err(format!("{}: {e:#}", dep.name()));
+                        break;
+                    }
+                }
+            }
+            let msg = (!msgs.is_empty()).then(|| msgs.join(", "));
+            let _ = tx.send(Msg::DepsDone(result.map(|()| msg)));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Ask each tool for its version (spawns processes → worker thread).
+    fn refresh_versions(&self, ctx: &egui::Context) {
+        let Some(t) = self.tools.clone() else { return };
+        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let ytdlp_src = if t.ytdlp_managed { "auto-updated by ytmini" } else { "system copy" };
+            let mut v = vec![(
+                "yt-dlp".to_string(),
+                format!("{} · {ytdlp_src}", deps::version(&t.ytdlp).unwrap_or_else(|| "?".into())),
+            )];
+            v.push((
+                "deno".into(),
+                match &t.deno {
+                    Some(d) => {
+                        let src = if Dep::Deno.managed().as_ref() == Some(d) { "downloaded by ytmini" } else { "system copy" };
+                        format!("{} · {src}", deps::version(d).unwrap_or_else(|| "?".into()).trim_start_matches("deno "))
+                    }
+                    None => "not found — YouTube may fail".into(),
+                },
+            ));
+            let player = match mpv::bundled_or_system() {
+                Some(true) => "libmpv bundled in ytmini.app",
+                Some(false) => "system libmpv",
+                None => "separate window only (no libmpv)",
+            };
+            v.push(("player".into(), player.into()));
+            let _ = tx.send(Msg::Versions(v));
+            ctx.request_repaint();
+        });
     }
 
     // ---------- background work ----------
@@ -339,7 +455,16 @@ impl App {
                                 cache::write_list(name, &tab.videos);
                             }
                         }
-                        Err(e) => tab.error = Some(e),
+                        Err(e) => {
+                            let looks_stale = ["Sign in to confirm", "signature", "challenge", "HTTP Error 403", "nsig"]
+                                .iter()
+                                .any(|k| e.contains(k));
+                            tab.error = Some(e);
+                            let managed = self.tools.as_ref().is_some_and(|t| t.ytdlp_managed);
+                            if looks_stale && managed && deps::check_due(Dep::YtDlp, Duration::from_secs(3600)) {
+                                self.run_deps_job(ctx, vec![Dep::YtDlp], true);
+                            }
+                        }
                     }
                 }
                 Msg::Power(p) => {
@@ -347,6 +472,37 @@ impl App {
                     self.apply_profile_live(ctx);
                 }
                 Msg::CacheUsage(n) => self.cache_usage = Some(n),
+                Msg::DepProgress(p) => {
+                    self.deps.activity = Some(match p {
+                        deps::Progress::Downloading { dep, done, total } => match total {
+                            Some(t) => format!("Downloading {} — {:.0} / {:.0} MB", dep.name(), done as f64 / 1e6, t as f64 / 1e6),
+                            None => format!("Downloading {} — {:.0} MB", dep.name(), done as f64 / 1e6),
+                        },
+                        deps::Progress::Verifying(dep) => format!("Verifying {} checksum…", dep.name()),
+                        deps::Progress::Preparing(dep) => {
+                            format!("Preparing {} (macOS checks new apps once — about 15 s)…", dep.name())
+                        }
+                    });
+                }
+                Msg::DepsDone(r) => {
+                    self.deps.busy = false;
+                    self.deps.activity = None;
+                    match r {
+                        Ok(msg) => {
+                            if let Some(m) = msg {
+                                self.status = Some((m, false));
+                            }
+                            self.check_tools(ctx); // pick up the new copies
+                        }
+                        Err(e) => {
+                            self.deps.error = Some(e.clone());
+                            if !matches!(self.screen, Screen::Setup) {
+                                self.status = Some((format!("Couldn't update tools: {e}"), true));
+                            }
+                        }
+                    }
+                }
+                Msg::Versions(v) => self.deps.versions = v,
                 Msg::Switched(r) => {
                     if let Err(e) = r {
                         self.status = Some((format!("Couldn't switch quality: {e}"), true));
@@ -530,16 +686,51 @@ impl App {
         centered_column(ui, 520.0, |ui| {
             ui.label(RichText::new("ytmini").size(34.0).strong().color(ACCENT));
             ui.add_space(8.0);
-            ui.label(RichText::new("A couple of tools are missing").size(20.0).color(TEXT));
+            ui.label(RichText::new("No video player found").size(20.0).color(TEXT));
             ui.add_space(12.0);
-            let names: Vec<&str> =
-                [("yt-dlp", missing.ytdlp), ("mpv", missing.mpv)].iter().filter(|x| x.1).map(|x| x.0).collect();
-            ui.label(format!("ytmini needs {} to list and play videos. Install with:", names.join(" and ")));
+            let _ = missing;
+            ui.label("This build of ytmini doesn't include libmpv, and mpv isn't installed. Install it with:");
             ui.add_space(8.0);
             code_box(ui, yt::install_hint());
             ui.add_space(16.0);
             if accent_button(ui, "Check again").clicked() {
                 retry = true;
+            }
+        });
+        if retry {
+            self.check_tools(ui.ctx());
+        }
+    }
+
+    fn ui_setup(&mut self, ui: &mut egui::Ui) {
+        let mut retry = false;
+        centered_column(ui, 520.0, |ui| {
+            ui.label(RichText::new("ytmini").size(34.0).strong().color(ACCENT));
+            ui.add_space(8.0);
+            ui.label(RichText::new("Getting ready").size(20.0).color(TEXT));
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(
+                    "Downloading yt-dlp (lists videos, ~55 MB) and deno (solves YouTube's checks, ~40 MB) \
+                     from their official releases. Checksums are verified; yt-dlp keeps itself up to date.",
+                )
+                .color(TEXT_DIM),
+            );
+            ui.add_space(16.0);
+            if let Some(a) = &self.deps.activity {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(a);
+                });
+            } else if self.deps.busy {
+                ui.spinner();
+            }
+            if let Some(e) = &self.deps.error {
+                error_box(ui, e);
+                ui.add_space(8.0);
+                if accent_button(ui, "Try again").clicked() {
+                    retry = true;
+                }
             }
         });
         if retry {
@@ -998,6 +1189,7 @@ impl App {
         let mut open = true;
         let mut clear = false;
         let mut reimport = false;
+        let mut check_updates = false;
         let before_quality = self.settings.quality;
         egui::Window::new("Settings")
             .open(&mut open)
@@ -1084,6 +1276,24 @@ impl App {
                     ui.label(RichText::new("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.").small().color(TEXT_DIM));
                     ui.add_space(10.0);
                 }
+                section(ui, "Components");
+                egui::Grid::new("versions").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                    for (k, v) in &self.deps.versions {
+                        ui.label(k);
+                        ui.label(RichText::new(v).color(TEXT_DIM));
+                        ui.end_row();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let managed = self.tools.as_ref().is_some_and(|t| t.ytdlp_managed);
+                    if self.deps.busy {
+                        ui.spinner();
+                        ui.label(RichText::new(self.deps.activity.clone().unwrap_or_else(|| "Checking…".into())).small());
+                    } else if managed && ui.button("Check for yt-dlp update").clicked() {
+                        check_updates = true;
+                    }
+                });
+                ui.add_space(10.0);
                 section(ui, "Account");
                 if ui.button("Re-import cookies…").clicked() {
                     reimport = true;
@@ -1094,6 +1304,9 @@ impl App {
         }
         if self.settings.quality != before_quality {
             self.apply_profile_live(ctx);
+        }
+        if check_updates {
+            self.run_deps_job(ctx, vec![Dep::YtDlp], true);
         }
         if clear {
             cache::clear();
@@ -1161,6 +1374,9 @@ impl App {
         let pos = self.embedded.as_ref().map_or(0.0, |p| p.pos);
         if let Some(err) = self.embedded.as_ref().and_then(|p| p.error.clone()) {
             sm.log(false, &format!("player error: {err}"));
+            self.quitting = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return; // smoke stays None: stop driving
         }
         let next = |sm: &mut Smoke| {
             sm.step += 1;
@@ -1299,6 +1515,7 @@ impl eframe::App for App {
                     let m = m.clone();
                     self.ui_missing(ui, &m);
                 }
+                Screen::Setup => self.ui_setup(ui),
                 Screen::Onboarding => self.ui_onboarding(ui),
                 Screen::Main if self.embedded.is_some() => self.ui_player(ui, frame),
                 Screen::Main => self.ui_main(ui),

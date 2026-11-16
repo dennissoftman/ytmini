@@ -30,7 +30,11 @@ pub const PAGE: usize = 30;
 #[derive(Clone, Debug)]
 pub struct Tools {
     pub ytdlp: PathBuf,
-    pub mpv: PathBuf,
+    /// ytmini's own auto-updated copy (vs. one from the system / Homebrew).
+    pub ytdlp_managed: bool,
+    /// mpv executable for the separate-window player (bundled `Helpers/mpv`
+    /// first). `None` is fine as long as libmpv is available.
+    pub mpv: Option<PathBuf>,
     pub deno: Option<PathBuf>,
     path_env: OsString,
 }
@@ -38,35 +42,58 @@ pub struct Tools {
 /// What's missing, if anything.
 #[derive(Clone, Debug, Default)]
 pub struct Missing {
+    /// No yt-dlp anywhere — the app can download one.
     pub ytdlp: bool,
-    pub mpv: bool,
+    /// Neither libmpv nor an mpv executable.
+    pub player: bool,
 }
 
 impl Tools {
-    /// Find the tools. Only checks the filesystem — never runs anything — so it
-    /// is cheap enough to call from the UI thread.
+    /// Find the tools. Checks the filesystem (and loads libmpv once).
     pub fn locate() -> std::result::Result<Tools, Missing> {
         let dirs = search_dirs();
         let path_env = std::env::join_paths(&dirs).unwrap_or_default();
-        let ytdlp = find_exe("yt-dlp", &dirs);
-        let mpv = find_exe("mpv", &dirs);
-        match (ytdlp, mpv) {
-            (Some(ytdlp), Some(mpv)) => Ok(Tools {
+        let managed = crate::deps::Dep::YtDlp.managed();
+        let ytdlp_managed = managed.is_some();
+        let ytdlp = managed.or_else(|| find_exe("yt-dlp", &dirs));
+        let mpv = bundled_helper("mpv").or_else(|| find_exe("mpv", &dirs));
+        let player_ok = mpv.is_some() || crate::mpv::available().is_ok();
+        match (ytdlp, player_ok) {
+            (Some(ytdlp), true) => Ok(Tools {
                 ytdlp,
+                ytdlp_managed,
                 mpv,
-                deno: find_exe("deno", &dirs),
+                // a system deno is kept up to date by its package manager; else ours
+                deno: find_exe("deno", &dirs).or_else(|| crate::deps::Dep::Deno.managed()),
                 path_env,
             }),
-            (y, m) => Err(Missing { ytdlp: y.is_none(), mpv: m.is_none() }),
+            (y, p) => Err(Missing { ytdlp: y.is_none(), player: !p }),
         }
     }
 
     fn ytdlp_cmd(&self) -> Command {
         let mut c = Command::new(&self.ytdlp);
         c.env("PATH", &self.path_env).stdin(Stdio::null());
+        if let Some(d) = &self.deno {
+            c.arg("--js-runtimes").arg(format!("deno:{}", d.display()));
+        }
         hide_console(&mut c);
         c
     }
+
+    /// Extra yt-dlp options for mpv's ytdl hook (`ytdl-raw-options`).
+    pub fn ytdl_raw_options(&self) -> Vec<String> {
+        self.deno.iter().map(|d| format!("js-runtimes=deno:{}", d.display())).collect()
+    }
+}
+
+/// An executable shipped inside the app bundle (`ytmini.app/Contents/Helpers/<name>`)
+/// or next to the binary.
+fn bundled_helper(name: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let file = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    [dir.join("../Helpers").join(&file), dir.join(&file)].into_iter().find(|p| is_executable(p))
 }
 
 /// Put the package-manager locations on this process's PATH (call at startup,
@@ -146,11 +173,11 @@ fn hide_console(_c: &mut Command) {
 /// Shell command that installs the dependencies on this OS.
 pub fn install_hint() -> &'static str {
     if cfg!(target_os = "macos") {
-        "brew install yt-dlp mpv deno"
+        "brew install mpv"
     } else if cfg!(windows) {
-        "winget install yt-dlp.yt-dlp shinchiro.mpv DenoLand.Deno"
+        "winget install shinchiro.mpv"
     } else {
-        "install yt-dlp, mpv and deno with your package manager (or pipx install yt-dlp)"
+        "install mpv (libmpv) with your package manager"
     }
 }
 
@@ -708,9 +735,10 @@ pub fn ipc_path() -> PathBuf {
 }
 
 pub fn play(tools: &Tools, cookies: &Path, video: &Video, profile: &Profile, mark_watched: bool) -> Result<Child> {
+    let mpv = tools.mpv.as_ref().context("no mpv executable for the separate-window player")?;
     let log = config_dir()?.join("mpv.log");
     let log_file = fs::File::create(&log).context("creating mpv.log")?;
-    let mut c = Command::new(&tools.mpv);
+    let mut c = Command::new(mpv);
     c.env("PATH", &tools.path_env)
         // `-append` takes one key=value as-is, so a path with spaces/commas is safe.
         .arg(format!("--ytdl-raw-options-append=cookies={}", cookies.display()))
@@ -724,6 +752,7 @@ pub fn play(tools: &Tools, cookies: &Path, video: &Video, profile: &Profile, mar
         .arg(format!("--title={} — ytmini", video.title()))
         // yt-dlp reports the view to YouTube so it lands in the account's watch history.
         .args(mark_watched.then_some("--ytdl-raw-options-append=mark-watched="))
+        .args(tools.ytdl_raw_options().iter().map(|o| format!("--ytdl-raw-options-append={o}")))
         .args(profile.fast.then_some("--profile=fast"))
         .args(profile.audio_only.then_some("--no-video"))
         .arg(video.url())
