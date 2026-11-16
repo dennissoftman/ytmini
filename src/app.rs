@@ -3474,14 +3474,17 @@ impl App {
                     {
                         self.rate(&ctx, Like::Dislike);
                     }
-                    if pill(ui, &format!("＋ {}", t("Save")), false)
-                        .on_hover_text(t("Save to playlist…"))
-                        .clicked()
-                    {
-                        if let Some(v) = self.current_video() {
-                            self.open_save(&ctx, v);
+                    // Save sits at the right edge, under Subscribe
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if pill(ui, &format!("＋ {}", t("Save")), false)
+                            .on_hover_text(t("Save to playlist…"))
+                            .clicked()
+                        {
+                            if let Some(v) = self.current_video() {
+                                self.open_save(&ctx, v);
+                            }
                         }
-                    }
+                    });
                 });
                 let meta: Vec<&str> = [info.views.as_deref(), info.date.as_deref()]
                     .into_iter()
