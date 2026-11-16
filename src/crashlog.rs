@@ -63,7 +63,7 @@ fn write(info: &std::panic::PanicHookInfo<'_>) -> std::io::Result<()> {
 }
 
 /// Drop anything that looks like a URL (tokens, signed stream links).
-fn redact(s: &str) -> String {
+pub fn redact(s: &str) -> String {
     s.split_inclusive(char::is_whitespace)
         .map(|w| {
             if w.trim_start().starts_with("http://") || w.trim_start().starts_with("https://") {
@@ -101,7 +101,7 @@ fn parse_offset(s: &str) -> Option<i64> {
 }
 
 /// ("2026-11-17", "14:03:09", "+02:00") in local time.
-fn now() -> (String, String, String) {
+pub fn now() -> (String, String, String) {
     let off = *OFFSET.get().unwrap_or(&0);
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

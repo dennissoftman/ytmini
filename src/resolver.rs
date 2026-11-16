@@ -195,10 +195,23 @@ pub fn resolve(tools: &Tools, cookies: &Path, video: &Video, format: &str) -> Re
         }
         Err(e) => {
             if debug() {
-                eprintln!("native: {} skipped: {e:#}", video.id);
+                eprintln!("native: {} not used: {e:#}", video.id);
+            }
+            if !crate::native::is_skip(&e) {
+                // ours failed: if yt-dlp then manages, that's a bug to know about
+                let r = resolve_ytdlp(tools, cookies, video, format);
+                if r.is_ok() {
+                    crate::native::record_failure(Some(&video.id), &format!("{e:#}"));
+                }
+                return r;
             }
         }
     }
+    resolve_ytdlp(tools, cookies, video, format)
+}
+
+/// Through the yt-dlp helpers (or a one-off run when they're busy).
+fn resolve_ytdlp(tools: &Tools, cookies: &Path, video: &Video, format: &str) -> Result<Direct> {
     let t = Instant::now();
     let Some((helper, generation)) = take(cookies) else {
         if debug() {

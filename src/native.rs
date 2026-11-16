@@ -549,11 +549,92 @@ fn finish_url(
         let answer = sig.get(s).context("signature not solved")?;
         url = set_param(&url, sp, answer);
     }
-    if let Some(challenge) = query_param(&url, "n") {
+    // dev: YTMINI_NATIVE_BREAK=1 leaves n unsolved, so YouTube refuses the
+    // stream: tests the fallback and failure reporting end to end
+    let broken = std::env::var_os("YTMINI_NATIVE_BREAK").is_some();
+    if let Some(challenge) = query_param(&url, "n").filter(|_| !broken) {
         let answer = n.get(&challenge).context("n not solved")?;
         url = set_param(&url, "n", answer);
     }
     Ok(url)
+}
+
+// ---------- failures ----------
+
+/// "Not for the native lookup": yt-dlp handles it, nothing went wrong.
+#[derive(Debug)]
+pub struct Skip(pub &'static str);
+
+impl std::fmt::Display for Skip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for Skip {}
+
+pub fn is_skip(e: &anyhow::Error) -> bool {
+    e.is::<Skip>()
+}
+
+/// Failures this session, and the latest reason.
+static FAILURES: Mutex<(u32, Option<String>)> = Mutex::new((0, None));
+const LOG_NAME: &str = "native-lookup.log";
+
+/// Our lookup failed where it shouldn't have (yt-dlp then managed, or the
+/// URLs didn't play): append it to `logs/native-lookup.log` (time, versions,
+/// video, reason; no links or cookies) and count it for the app to show.
+pub fn record_failure(video_id: Option<&str>, reason: &str) {
+    let reason = crate::crashlog::redact(reason).replace('\n', " ");
+    if debug() {
+        eprintln!("native: FAILURE {}: {reason}", video_id.unwrap_or("-"));
+    }
+    {
+        let mut f = FAILURES.lock().unwrap_or_else(|e| e.into_inner());
+        f.0 += 1;
+        f.1 = Some(reason.clone());
+    }
+    let Some(dir) = crate::crashlog::dir() else {
+        return;
+    };
+    let path = dir.join(LOG_NAME);
+    // keep it small: start over past 256 KB (the old one stays as .old)
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 256 * 1024) {
+        let _ = std::fs::rename(&path, path.with_extension("log.old"));
+    }
+    let (date, time, zone) = crate::crashlog::now();
+    let line = format!(
+        "{date} {time} {zone}  ytmini {}  video {}  {reason}\n",
+        env!("CARGO_PKG_VERSION"),
+        video_id.unwrap_or("-"),
+    );
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// (failures this session, latest reason).
+pub fn failures() -> (u32, Option<String>) {
+    FAILURES.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// (failures logged so far, the latest line's reason), from the log file.
+pub fn logged_failures() -> (usize, Option<String>) {
+    let Some(text) = crate::crashlog::dir()
+        .and_then(|d| std::fs::read_to_string(d.join(LOG_NAME)).ok())
+    else {
+        return (0, None);
+    };
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let last = lines
+        .last()
+        .and_then(|l| l.split("  ").last())
+        .map(str::to_string);
+    (lines.len(), last)
 }
 
 // ---------- strikes ----------
@@ -576,9 +657,19 @@ pub fn report_failure(video_id: &str) {
     let mut h = HEALTH.lock().unwrap_or_else(|e| e.into_inner());
     if h.ours.remove(video_id) {
         h.strikes += 1;
-        if debug() {
-            eprintln!("native: URLs for {video_id} failed to play (strike {})", h.strikes);
-        }
+        let strikes = h.strikes;
+        drop(h);
+        record_failure(
+            Some(video_id),
+            &format!(
+                "its stream links didn't play (strike {strikes} of {MAX_STRIKES}{})",
+                if strikes >= MAX_STRIKES {
+                    "; yt-dlp only for the rest of this session"
+                } else {
+                    ""
+                }
+            ),
+        );
     }
 }
 
@@ -590,20 +681,41 @@ fn enabled() -> bool {
 // ---------- lookup ----------
 
 /// Resolve `video`'s streams for one of our format strings (blocking).
+/// Errors that are a `Skip` mean "not for us" (live, audio only, turned
+/// off); any other error is our lookup failing.
 pub fn resolve(tools: &Tools, cookies: &Path, video: &Video, format: &str) -> Result<Direct> {
     if !enabled() {
-        bail!("off for this session");
+        return Err(Skip("off for this session").into());
     }
-    let (max_h, fps30) = parse_format(format).context("format not handled natively")?;
+    let Some((max_h, fps30)) = parse_format(format) else {
+        return Err(Skip("format not handled natively").into());
+    };
     if tools.deno.is_none() || ejs_dir(tools).is_none() {
-        bail!("no challenge solver");
+        return Err(Skip("no challenge solver (system yt-dlp or no deno)").into());
     }
-    let (player_id, code, sts) = player()?;
     let spec = if crate::innertube::premium() == Some(true) {
         &WEB_CREATOR
     } else {
         &TV_SAMSUNG
     };
+    lookup(tools, cookies, video, max_h, fps30, spec).map_err(|e| {
+        if e.is::<Skip>() {
+            e
+        } else {
+            e.context(spec.name)
+        }
+    })
+}
+
+fn lookup(
+    tools: &Tools,
+    cookies: &Path,
+    video: &Video,
+    max_h: u32,
+    fps30: bool,
+    spec: &Spec,
+) -> Result<Direct> {
+    let (player_id, code, sts) = player().context("player script")?;
     let client = Client::new(cookies)?;
     let r = client.post_as(
         "player",
@@ -630,7 +742,7 @@ pub fn resolve(tools: &Tools, cookies: &Path, video: &Video, format: &str) -> Re
     if r.pointer("/videoDetails/isLive").and_then(Value::as_bool) == Some(true)
         || r.pointer("/videoDetails/isPostLiveDvr").and_then(Value::as_bool) == Some(true)
     {
-        bail!("live stream");
+        return Err(Skip("live stream").into());
     }
     let formats: Vec<Fmt> = r
         .pointer("/streamingData/adaptiveFormats")
@@ -713,11 +825,12 @@ pub fn warm_up(tools: &Tools) {
         );
         Ok(())
     })();
-    if debug() {
-        match r {
-            Ok(()) => eprintln!("native: warmed up in {:.2}s", t.elapsed().as_secs_f32()),
-            Err(e) => eprintln!("native: warm-up failed: {e:#}"),
+    match r {
+        Ok(()) if debug() => {
+            eprintln!("native: warmed up in {:.2}s", t.elapsed().as_secs_f32())
         }
+        Ok(()) => {}
+        Err(e) => record_failure(None, &format!("warm-up: {e:#}")),
     }
 }
 

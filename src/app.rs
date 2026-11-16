@@ -410,6 +410,8 @@ pub struct App {
     /// dev (`YTMINI_PLAY_SEQ=id,id,…`): videos to play one after another,
     /// each once the current one has played 4 s (start-up timing).
     play_seq: Vec<String>,
+    /// Native lookup failures already told about (see `native::failures`).
+    native_seen: u32,
     /// DeArrow branding per video id (None while being fetched).
     dearrow: HashMap<String, Option<crate::dearrow::Branding>>,
     dearrow_tx: Option<Sender<String>>,
@@ -547,6 +549,7 @@ impl App {
             resolve_wait: None,
             net_route: yt::route_fingerprint(),
             net_checked: std::time::Instant::now(),
+            native_seen: 0,
             play_seq: std::env::var("YTMINI_PLAY_SEQ")
                 .map(|v| v.split(',').rev().map(str::to_string).collect())
                 .unwrap_or_default(),
@@ -4476,6 +4479,31 @@ impl App {
                                     .small()
                                     .color(text_dim()),
                             );
+
+                            ui.add_space(10.0);
+                            section(ui, t("Fast video lookup"));
+                            let (n, last) = crate::native::logged_failures();
+                            ui.label(
+                                RichText::new(if n == 0 {
+                                    t("No failures so far").to_string()
+                                } else {
+                                    tn("{} failure logged", "{} failures logged", n as u64)
+                                })
+                                .color(text_dim()),
+                            );
+                            if let Some(last) = last {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(tf("Latest: {}", &[&last])).small().color(text_dim()),
+                                    )
+                                    .wrap(),
+                                );
+                            }
+                            ui.label(
+                                RichText::new(t("ytmini looks up videos itself, which is much faster than yt-dlp. When that fails and yt-dlp has to step in, the time and reason are saved to native-lookup.log in the logs folder above (no cookies or links)."))
+                                    .small()
+                                    .color(text_dim()),
+                            );
                         }
                         SettingsTab::Account => {
                             section(ui, t("YouTube account"));
@@ -5106,6 +5134,22 @@ impl eframe::App for App {
         self.watch_session(ctx);
         self.sync_now_playing();
         self.watch_network();
+        // our own stream lookup failed and yt-dlp stepped in: say so once a session
+        let (fails, last) = crate::native::failures();
+        if fails > self.native_seen {
+            if self.native_seen == 0 {
+                let why = last.unwrap_or_default();
+                let why: String = why.chars().take(140).collect();
+                self.status = Some((
+                    tf(
+                        "Fast video lookup failed ({}). yt-dlp took over; details are in Settings → Storage.",
+                        &[&why],
+                    ),
+                    true,
+                ));
+            }
+            self.native_seen = fails;
+        }
         if let Some(e) = &mut self.embedded {
             e.poll_events();
             if std::mem::take(&mut e.resolved_failed) {
