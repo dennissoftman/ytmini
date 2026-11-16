@@ -5,6 +5,8 @@ use crate::cache::{self, Limits};
 use crate::deps::{self, Dep};
 use crate::mpv;
 use crate::player::{self, Embedded, Surface};
+use crate::positions::Positions;
+use crate::signin::{self, Session};
 use crate::settings::{PlayerMode, Settings, ThumbQuality};
 use crate::thumbs::{Thumbs, Variant};
 use crate::tray::{self, Tray, TrayEvent};
@@ -42,7 +44,8 @@ const TITLE_SIZE: f32 = 15.0;
 const META_SIZE: f32 = 13.0;
 const RADIUS: u8 = 12;
 
-const BASE_TABS: [Source; 4] = [Source::Feed, Source::Subscriptions, Source::WatchLater, Source::History];
+const BASE_TABS: [Source; 5] =
+    [Source::Feed, Source::Subscriptions, Source::WatchLater, Source::History, Source::Playlists];
 
 // ---------- state ----------
 
@@ -75,6 +78,10 @@ enum Msg {
     /// A deps job finished: Ok(message for the status bar) / Err.
     DepsDone(Result<Option<String>, String>),
     Versions(Vec<(String, String)>),
+    /// Progress of the separate-window player: (video id, pos, dur).
+    ExternalProgress(String, f64, f64),
+    /// Is the sign-in browser profile signed in to Google yet?
+    SignInCheck(Result<bool, String>),
 }
 
 #[derive(Default)]
@@ -99,8 +106,32 @@ fn list_name(s: &Source) -> Option<&'static str> {
         Source::Subscriptions => Some("subscriptions"),
         Source::WatchLater => Some("watchlater"),
         Source::History => Some("history"),
-        Source::Search(_) => None,
+        Source::Playlists => Some("playlists"),
+        Source::Search(_) | Source::Channel { .. } | Source::ChannelPlaylists { .. } | Source::Playlist { .. } => None,
     }
+}
+
+/// A Google sign-in in progress in the user's own browser profile.
+struct SignIn {
+    session: Session,
+    /// Google's sign-in page has been opened in the browser.
+    opened: bool,
+    /// A cookie check is running on a worker.
+    checking: bool,
+    last_check: std::time::Instant,
+    started: std::time::Instant,
+}
+
+/// Check the browser this often while waiting for the sign-in.
+const SIGNIN_POLL: Duration = Duration::from_secs(3);
+/// Give up waiting after this long.
+const SIGNIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// What a click on a card means.
+enum CardAction {
+    None,
+    Open,
+    Channel,
 }
 
 struct Player {
@@ -123,6 +154,11 @@ pub struct App {
 
     // onboarding
     browsers: Vec<Browser>,
+    /// Browser profiles for "Sign in with Google", most recent first.
+    sessions: Vec<Session>,
+    session_pick: usize,
+    /// Where the import in flight comes from, saved on success for "Refresh session".
+    import_source: Option<(String, std::path::PathBuf)>,
     custom_spec: String,
     importing: Option<String>,
     import_error: Option<String>,
@@ -160,6 +196,12 @@ pub struct App {
     hidden: bool,
     quitting: bool,
     deps: DepsState,
+
+    positions: Positions,
+    /// Pages to go back to (channel → playlist → …); top tabs clear it.
+    nav_back: Vec<Source>,
+    signin: Option<SignIn>,
+    last_ext_poll: std::time::Instant,
 }
 
 /// `--smoke-test <id>`: drives the embedded player through play → seek → back →
@@ -199,6 +241,9 @@ impl App {
             tx,
             rx,
             browsers: yt::detect_browsers(),
+            sessions: signin::sessions(),
+            session_pick: 0,
+            import_source: None,
             custom_spec: String::new(),
             importing: None,
             import_error: None,
@@ -227,6 +272,10 @@ impl App {
             hidden: false,
             quitting: false,
             deps: DepsState::default(),
+            positions: Positions::load(),
+            nav_back: Vec::new(),
+            signin: None,
+            last_ext_poll: std::time::Instant::now(),
         };
         app.enforce_cache(ctx);
         // `ytmini --play <url|id>` opens straight into the player.
@@ -416,6 +465,7 @@ impl App {
     fn start_import(&mut self, ctx: &egui::Context, spec: String) {
         let Some(tools) = self.tools.clone() else { return };
         self.import_error = None;
+        self.import_source = None;
         self.importing = Some(spec.clone());
         let (tx, ctx, cookies) = (self.tx.clone(), ctx.clone(), self.cookies.clone());
         std::thread::spawn(move || {
@@ -503,6 +553,7 @@ impl App {
                     }
                 }
                 Msg::Versions(v) => self.deps.versions = v,
+                Msg::ExternalProgress(id, pos, dur) => self.positions.update(&id, pos, dur),
                 Msg::Switched(r) => {
                     if let Err(e) = r {
                         self.status = Some((format!("Couldn't switch quality: {e}"), true));
@@ -513,6 +564,10 @@ impl App {
                     match r {
                         Ok(()) => {
                             self.import_error = None;
+                            if let Some((id, profile)) = self.import_source.take() {
+                                self.settings.signin_source = Some(crate::settings::SignInSource { id, profile });
+                                self.settings.save();
+                            }
                             self.screen = Screen::Main;
                             self.tabs.clear(); // new account/cookies: drop everything cached
                             self.status = Some(("Signed in — cookies imported.".into(), false));
@@ -521,6 +576,7 @@ impl App {
                         Err(e) => self.import_error = Some(e),
                     }
                 }
+                Msg::SignInCheck(r) => self.on_signin_check(ctx, r),
             }
         }
     }
@@ -560,7 +616,8 @@ impl App {
         }
         self.power = yt::power_state();
         let profile = yt::profile(self.settings.quality, self.power, self.screen_cap);
-        match Embedded::start(&tools, &self.cookies, &video, &profile, &self.settings, gpa, ctx) {
+        let resume = self.positions.resume_at(&video.id);
+        match Embedded::start(&tools, &self.cookies, &video, &profile, &self.settings, resume, gpa, ctx) {
             Ok(p) => {
                 self.status = None;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{} — ytmini", video.title())));
@@ -577,6 +634,10 @@ impl App {
     fn close_embedded(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         if let Some(p) = self.embedded.take() {
             self.settings.volume = p.volume;
+            if p.started {
+                self.positions.update(&p.id, p.pos, p.duration);
+            }
+            self.positions.save();
             drop(p); // frees the render context here (GL current), core shuts down in background
         }
         if let (Some(s), Some(gl)) = (&mut self.surface, frame.gl()) {
@@ -592,7 +653,8 @@ impl App {
         let Some(tools) = &self.tools else { return };
         self.power = yt::power_state();
         let profile = yt::profile(self.settings.quality, self.power, self.screen_cap);
-        match yt::play(tools, &self.cookies, video, &profile, self.settings.mark_watched) {
+        let resume = self.positions.resume_at(&video.id);
+        match yt::play(tools, &self.cookies, video, &profile, self.settings.mark_watched, resume) {
             Ok(child) => {
                 self.status = None;
                 self.player = Some(Player {
@@ -744,21 +806,19 @@ impl App {
         let can_cancel = yt::logged_in(&self.cookies) && self.importing.is_none();
         let busy = self.importing.is_some();
         let browsers = self.browsers.clone();
+        let mut google = GoogleAction::None;
 
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             centered_column(ui, 560.0, |ui| {
                 ui.label(RichText::new("ytmini").size(34.0).strong().color(ACCENT));
                 ui.add_space(4.0);
-                ui.label(RichText::new("Sign in with your browser").size(20.0).color(TEXT));
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new(
-                        "ytmini borrows your YouTube login from a browser you're already signed in to. \
-                         Cookies are stored only on this computer.",
-                    )
-                    .color(TEXT_DIM),
-                );
-                ui.add_space(18.0);
+                ui.label(RichText::new("Sign in to YouTube").size(20.0).color(TEXT));
+                ui.add_space(14.0);
+                google = self.ui_google_signin(ui, busy);
+                ui.add_space(22.0);
+                ui.label(RichText::new("Or use a browser you're already signed in to").strong().color(TEXT));
+                ui.label(RichText::new("Cookies are stored only on this computer.").small().color(TEXT_DIM));
+                ui.add_space(10.0);
 
                 if browsers.is_empty() {
                     ui.label(RichText::new("No browsers detected — type a yt-dlp spec below.").color(TEXT_DIM));
@@ -838,6 +898,20 @@ impl App {
         if let Some(spec) = chosen {
             self.start_import(ui.ctx(), spec);
         }
+        match google {
+            GoogleAction::Start => {
+                if let Some(s) = self.sessions.get(self.session_pick).cloned() {
+                    self.start_signin(ui.ctx(), s);
+                }
+            }
+            GoogleAction::CheckNow => {
+                if let Some(s) = &mut self.signin {
+                    s.last_check = std::time::Instant::now() - SIGNIN_POLL;
+                }
+            }
+            GoogleAction::Cancel => self.signin = None,
+            GoogleAction::None => {}
+        }
         if cancel {
             self.import_error = None;
             self.screen = Screen::Main;
@@ -875,7 +949,8 @@ impl App {
                         tabs.push(s.clone());
                     }
                     for t in tabs {
-                        if tab_button(ui, t.label(), t == self.active).clicked() {
+                        let selected = t == self.active || (self.active.is_page() && self.nav_back.first() == Some(&t));
+                        if tab_button(ui, &t.label(), selected).clicked() {
                             switch_to = Some(t);
                         }
                     }
@@ -966,13 +1041,16 @@ impl App {
         }
 
         // ----- grid -----
+        self.ui_page_header(ui);
         let mut clicked: Option<Video> = None;
+        let mut open_channel: Option<Video> = None;
         let mut more = false;
         let mut reimport_from_empty = false;
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let source = self.active.clone();
             let playing_id = self.player.as_ref().map(|p| p.id.clone());
             let thumbs = &mut self.thumbs;
+            let positions = &self.positions;
             let Some(tab) = self.tabs.get_mut(&source) else { return };
             let avail_w = ui.available_width() - 2.0 * GAP;
 
@@ -1044,8 +1122,12 @@ impl App {
                         if row < video_rows {
                             for v in tab.videos.iter().skip(row * cols).take(cols) {
                                 let playing = playing_id.as_deref() == Some(v.id.as_str());
-                                if video_card(ui, thumbs, variant, v, Vec2::new(card_w, card_h), thumb_h, playing).clicked() {
-                                    clicked = Some(v.clone());
+                                let progress = (!v.is_playlist).then(|| positions.get(&v.id)).flatten().copied();
+                                let card = CardInfo { size: Vec2::new(card_w, card_h), thumb_h, playing, progress };
+                                match video_card(ui, thumbs, variant, v, card) {
+                                    CardAction::Open => clicked = Some(v.clone()),
+                                    CardAction::Channel => open_channel = Some(v.clone()),
+                                    CardAction::None => {}
                                 }
                             }
                         } else {
@@ -1074,7 +1156,16 @@ impl App {
 
         // ----- apply actions -----
         if let Some(v) = clicked {
-            self.play(&v);
+            if v.is_playlist {
+                self.open_page(&ctx, Source::Playlist { id: v.id.clone(), title: v.title().to_string() });
+            } else {
+                self.play(&v);
+            }
+        }
+        if let Some(v) = open_channel {
+            if let Some(url) = v.channel_url.clone() {
+                self.open_page(&ctx, Source::Channel { url, name: v.channel().to_string() });
+            }
         }
         if more {
             self.load_more(&ctx, self.active.clone());
@@ -1087,10 +1178,12 @@ impl App {
                     self.tabs.remove(&old);
                 }
             }
+            self.nav_back.clear();
             self.active = s.clone();
             self.load(&ctx, s, true);
         }
         if let Some(t) = switch_to {
+            self.nav_back.clear();
             self.active = t.clone();
             self.load(&ctx, t, false);
         }
@@ -1100,12 +1193,256 @@ impl App {
         if reimport || reimport_from_empty {
             self.import_error = None;
             self.browsers = yt::detect_browsers();
+            self.sessions = signin::sessions();
+            self.session_pick = 0;
             self.screen = Screen::Onboarding;
         }
     }
 }
 
+#[derive(PartialEq)]
+enum GoogleAction {
+    None,
+    Start,
+    CheckNow,
+    Cancel,
+}
+
 impl App {
+    /// Go to a channel/playlist page, remembering where we came from.
+    fn open_page(&mut self, ctx: &egui::Context, page: Source) {
+        if self.active == page {
+            return;
+        }
+        self.nav_back.push(std::mem::replace(&mut self.active, page.clone()));
+        self.load(ctx, page, false);
+    }
+
+    /// Back / title / Videos-Playlists switch for channel and playlist pages.
+    fn ui_page_header(&mut self, ui: &mut egui::Ui) {
+        if !self.active.is_page() {
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        let mut back = false;
+        let mut switch: Option<Source> = None;
+        egui::Panel::top("page")
+            .frame(egui::Frame::new().fill(BG).inner_margin(Margin { left: 16, right: 16, top: 12, bottom: 4 }))
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(RichText::new("←  Back").size(15.0)).frame(false)).clicked() {
+                        back = true;
+                    }
+                    ui.add_space(10.0);
+                    let (kind, title) = match &self.active {
+                        Source::Playlist { title, .. } => ("Playlist", title.clone()),
+                        other => ("Channel", other.label()),
+                    };
+                    ui.label(RichText::new(kind).small().color(ACCENT));
+                    ui.add(egui::Label::new(RichText::new(title).size(20.0).strong().color(TEXT)).truncate());
+                    if let Source::Channel { url, name } | Source::ChannelPlaylists { url, name } = &self.active {
+                        let (url, name) = (url.clone(), name.clone());
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let on_lists = matches!(self.active, Source::ChannelPlaylists { .. });
+                            if tab_button(ui, "Playlists", on_lists).clicked() && !on_lists {
+                                switch = Some(Source::ChannelPlaylists { url: url.clone(), name: name.clone() });
+                            }
+                            if tab_button(ui, "Videos", !on_lists).clicked() && on_lists {
+                                switch = Some(Source::Channel { url, name });
+                            }
+                        });
+                    }
+                });
+            });
+        // Esc / mouse back button also go back
+        let key_back = !ctx.egui_wants_keyboard_input()
+            && ctx.input(|i| i.key_pressed(Key::Escape) || i.pointer.button_clicked(egui::PointerButton::Extra1));
+        if back || key_back {
+            if let Some(prev) = self.nav_back.pop() {
+                self.active = prev;
+            }
+        }
+        if let Some(s) = switch {
+            self.active = s.clone(); // sibling view: replace, don't stack
+            self.load(&ctx, s, false);
+        }
+    }
+
+    /// Record playback progress (embedded: every frame, cheap; external: poll
+    /// mpv over IPC every 5 s on a worker) and persist it periodically.
+    fn track_positions(&mut self, ctx: &egui::Context) {
+        if let Some(p) = self.embedded.as_ref().filter(|p| p.started) {
+            self.positions.update(&p.id, p.pos, p.duration);
+        }
+        if let Some(p) = &self.player {
+            if self.last_ext_poll.elapsed() >= Duration::from_secs(5) {
+                self.last_ext_poll = std::time::Instant::now();
+                let (tx, ctx, id) = (self.tx.clone(), ctx.clone(), p.id.clone());
+                std::thread::spawn(move || {
+                    if let Some((pos, dur)) = yt::ipc_progress() {
+                        let _ = tx.send(Msg::ExternalProgress(id, pos, dur));
+                        ctx.request_repaint();
+                    }
+                });
+            }
+        }
+        self.positions.maybe_save();
+    }
+
+    // ---------- Google sign-in ----------
+
+    fn ui_google_signin(&mut self, ui: &mut egui::Ui, busy: bool) -> GoogleAction {
+        let mut act = GoogleAction::None;
+        egui::Frame::new().fill(CARD).corner_radius(RADIUS).inner_margin(Margin::same(16)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if self.sessions.is_empty() {
+                ui.label(RichText::new("Sign in with Google").size(16.0).strong().color(TEXT));
+                ui.label(RichText::new("Needs Firefox or a Chromium-based browser (Chrome, Brave, Edge…).").color(TEXT_DIM));
+                return;
+            }
+            if let Some(s) = &self.signin {
+                let b = s.session.browser;
+                if !s.opened {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(RichText::new(format!("Checking {}…", s.session.label())).color(TEXT));
+                    });
+                    return;
+                }
+                ui.label(RichText::new(format!("Sign in to Google in {b}")).size(16.0).strong().color(TEXT));
+                ui.label(
+                    RichText::new(format!(
+                        "We opened Google's sign-in page in {b}. Once you're signed in, ytmini picks the \
+                         session up by itself — leave {b} open."
+                    ))
+                    .color(TEXT_DIM),
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new("Waiting for sign-in…").color(TEXT_DIM));
+                    ui.add_space(8.0);
+                    if accent_button(ui, "I've signed in").clicked() {
+                        act = GoogleAction::CheckNow;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        act = GoogleAction::Cancel;
+                    }
+                });
+                return;
+            }
+            let pick = self.session_pick.min(self.sessions.len() - 1);
+            let chosen = &self.sessions[pick];
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("Sign in with Google").size(16.0).strong().color(TEXT));
+                    let mut note = format!(
+                        "Uses your {} session. If you're not signed in there yet, Google's sign-in page opens in it.",
+                        chosen.browser
+                    );
+                    if !chosen.firefox && cfg!(target_os = "macos") {
+                        note.push_str(" macOS asks for Keychain access once — click Allow.");
+                    }
+                    ui.add(egui::Label::new(RichText::new(note).size(12.5).color(TEXT_DIM)).wrap());
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add_enabled(!busy, accent_btn("Sign in")).clicked() {
+                        act = GoogleAction::Start;
+                    }
+                });
+            });
+            if self.sessions.len() > 1 {
+                ui.add_space(6.0);
+                let labels: Vec<String> = self.sessions.iter().map(|s| s.label()).collect();
+                egui::ComboBox::from_id_salt("signin_profile")
+                    .selected_text(labels[pick].clone())
+                    .show_ui(ui, |ui| {
+                        for (i, l) in labels.iter().enumerate() {
+                            ui.selectable_value(&mut self.session_pick, i, l);
+                        }
+                    });
+            }
+        });
+        act
+    }
+
+    /// Step 1: is that profile already signed in? (worker; names only, no prompts)
+    fn start_signin(&mut self, ctx: &egui::Context, session: Session) {
+        self.import_error = None;
+        let now = std::time::Instant::now();
+        self.signin = Some(SignIn { session, opened: false, checking: false, last_check: now, started: now });
+        self.spawn_signin_check(ctx);
+    }
+
+    fn spawn_signin_check(&mut self, ctx: &egui::Context) {
+        let Some(s) = &mut self.signin else { return };
+        s.checking = true;
+        s.last_check = std::time::Instant::now();
+        let (tx, ctx, session) = (self.tx.clone(), ctx.clone(), s.session.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::SignInCheck(session.has_login().map_err(|e| format!("{e:#}"))));
+            ctx.request_repaint();
+        });
+    }
+
+    fn on_signin_check(&mut self, ctx: &egui::Context, r: Result<bool, String>) {
+        let Some(s) = &mut self.signin else { return };
+        s.checking = false;
+        match r {
+            Ok(true) => self.finish_signin(ctx),
+            Ok(false) if !s.opened => match s.session.open_signin() {
+                Ok(()) => s.opened = true,
+                Err(e) => {
+                    self.import_error = Some(format!("{e:#}"));
+                    self.signin = None;
+                }
+            },
+            Err(e) if !s.opened => {
+                self.import_error = Some(e);
+                self.signin = None;
+            }
+            _ => {} // still waiting; transient read errors are fine
+        }
+    }
+
+    /// While the user signs in, re-check the browser's cookies every few seconds.
+    fn poll_signin(&mut self, ctx: &egui::Context) {
+        let Some(s) = &self.signin else { return };
+        if !s.opened || s.checking {
+            return;
+        }
+        if s.started.elapsed() > SIGNIN_TIMEOUT {
+            self.signin = None;
+            self.import_error = Some("Stopped waiting for the Google sign-in. Click Sign in to try again.".into());
+            return;
+        }
+        if s.last_check.elapsed() >= SIGNIN_POLL {
+            self.spawn_signin_check(ctx);
+        }
+        ctx.request_repaint_after(Duration::from_millis(500));
+    }
+
+    /// Step 2: the profile is signed in → import a snapshot of its cookies.
+    fn finish_signin(&mut self, ctx: &egui::Context) {
+        let Some(s) = self.signin.take() else { return };
+        let Some(tools) = self.tools.clone() else { return };
+        self.importing = Some(s.session.label());
+        self.import_error = None;
+        self.import_source = Some((s.session.id.to_string(), s.session.profile.clone()));
+        let (tx, ctx, cookies) = (self.tx.clone(), ctx.clone(), self.cookies.clone());
+        std::thread::spawn(move || {
+            let r = s
+                .session
+                .snapshot_spec()
+                .and_then(|spec| yt::import_cookies(&tools, &spec, &cookies))
+                .map_err(|e| format!("{e:#}"));
+            signin::clear_snapshot();
+            let _ = tx.send(Msg::Imported(r));
+            ctx.request_repaint();
+        });
+    }
+
     fn ui_player(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
@@ -1160,13 +1497,7 @@ impl App {
             toggle_fs |= act.toggle_fullscreen;
             quality = act.quality;
             if act.open_in_window {
-                open_in_window = Some(Video {
-                    id: p.id.clone(),
-                    title: Some(p.title.clone()),
-                    channel: None,
-                    uploader: None,
-                    duration: None,
-                });
+                open_in_window = Some(Video { id: p.id.clone(), title: Some(p.title.clone()), ..Default::default() });
             }
         }
 
@@ -1189,6 +1520,7 @@ impl App {
         let mut open = true;
         let mut clear = false;
         let mut reimport = false;
+        let mut refresh_session = false;
         let mut check_updates = false;
         let before_quality = self.settings.quality;
         egui::Window::new("Settings")
@@ -1295,12 +1627,33 @@ impl App {
                 });
                 ui.add_space(10.0);
                 section(ui, "Account");
-                if ui.button("Re-import cookies…").clicked() {
-                    reimport = true;
-                }
+                ui.horizontal(|ui| {
+                    if let Some(src) = &self.settings.signin_source {
+                        let label = signin::find(&src.id, &src.profile).map(|s| s.label());
+                        if let Some(label) = label {
+                            if ui.button("Refresh session").on_hover_text(format!("Re-import from {label}")).clicked() {
+                                refresh_session = true;
+                            }
+                        }
+                    }
+                    if ui.button("Sign in again…").clicked() {
+                        reimport = true;
+                    }
+                });
             });
-        if !open || reimport {
+        if !open || reimport || refresh_session {
             self.show_settings = false;
+        }
+        if refresh_session {
+            let src = self.settings.signin_source.clone();
+            if let Some(s) = src.and_then(|src| signin::find(&src.id, &src.profile)) {
+                self.import_error = None;
+                self.browsers = yt::detect_browsers();
+                self.sessions = signin::sessions();
+                self.session_pick = self.sessions.iter().position(|x| x == &s).unwrap_or(0);
+                self.screen = Screen::Onboarding;
+                self.start_signin(ctx, s);
+            }
         }
         if self.settings.quality != before_quality {
             self.apply_profile_live(ctx);
@@ -1316,6 +1669,8 @@ impl App {
         if reimport {
             self.import_error = None;
             self.browsers = yt::detect_browsers();
+            self.sessions = signin::sessions();
+            self.session_pick = 0;
             self.screen = Screen::Onboarding;
         }
     }
@@ -1404,7 +1759,7 @@ impl App {
                 next(&mut sm);
             }
             3 if started && t > 3.0 => {
-                sm.log(true, "second playback started");
+                sm.log(pos > 50.0, &format!("second playback resumed where we left off ({pos:.1}s)"));
                 self.settings.quality = yt::Quality::Max(480);
                 self.apply_profile_live(ctx);
                 next(&mut sm);
@@ -1471,6 +1826,8 @@ impl eframe::App for App {
         self.poll_player();
         self.update_screen_cap(ctx);
         self.handle_tray(ctx);
+        self.track_positions(ctx);
+        self.poll_signin(ctx);
         if let Some(e) = &mut self.embedded {
             e.poll_events();
             if std::mem::take(&mut e.title_changed) {
@@ -1529,12 +1886,16 @@ impl eframe::App for App {
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
         if let Some(p) = self.embedded.take() {
             self.settings.volume = p.volume;
+            if p.started {
+                self.positions.update(&p.id, p.pos, p.duration);
+            }
             p.close_now(); // GL still current here; nothing outlives the context
         }
         if let (Some(s), Some(gl)) = (&self.surface, gl) {
             s.destroy(gl);
         }
         self.stop_player();
+        self.positions.save();
         if self.smoke.is_none() && self.settings != self.saved_settings {
             self.settings.save();
         }
@@ -1543,10 +1904,18 @@ impl eframe::App for App {
 
 // ---------- widgets ----------
 
-fn video_card(ui: &mut egui::Ui, thumbs: &mut Thumbs, variant: Variant, v: &Video, size: Vec2, thumb_h: f32, playing: bool) -> egui::Response {
+struct CardInfo {
+    size: Vec2,
+    thumb_h: f32,
+    playing: bool,
+    progress: Option<crate::positions::Entry>,
+}
+
+fn video_card(ui: &mut egui::Ui, thumbs: &mut Thumbs, variant: Variant, v: &Video, info: CardInfo) -> CardAction {
+    let CardInfo { size, thumb_h, playing, progress } = info;
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if !ui.is_rect_visible(rect) {
-        return resp;
+        return CardAction::None;
     }
     let hover = ui.ctx().animate_bool(resp.id, resp.hovered());
     let painter = ui.painter_at(rect.expand(2.0));
@@ -1557,14 +1926,31 @@ fn video_card(ui: &mut egui::Ui, thumbs: &mut Thumbs, variant: Variant, v: &Vide
     let thumb = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width(), thumb_h));
     let tr = CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 };
     painter.rect_filled(thumb, tr, Color32::from_rgb(0x24, 0x24, 0x2D));
-    if let Some(tex) = thumbs.get(&v.id, variant) {
+    let thumb_video = if v.is_playlist { v.thumb_id.as_deref() } else { Some(v.id.as_str()) };
+    let watched = progress.is_some_and(|p| p.watched());
+    if let Some(tex) = thumb_video.and_then(|id| thumbs.get(id, variant)) {
         egui::Image::from_texture(egui::load::SizedTexture::from_handle(tex))
             .corner_radius(tr)
+            .tint(if watched { Color32::from_gray(150) } else { Color32::WHITE })
             .paint_at(ui, thumb);
     }
 
-    // duration badge
-    let dur = v.duration_label();
+    // watch progress: thin accent bar along the bottom of the thumbnail
+    if let Some(f) = progress.and_then(|p| p.fraction()).filter(|f| *f > 0.01) {
+        let track = egui::Rect::from_min_max(egui::pos2(thumb.left(), thumb.bottom() - 4.0), thumb.right_bottom());
+        painter.rect_filled(track, 0, Color32::from_white_alpha(60));
+        let done = egui::Rect::from_min_max(track.min, egui::pos2(track.left() + track.width() * f, track.bottom()));
+        painter.rect_filled(done, 0, ACCENT);
+    }
+
+    // duration / playlist badge
+    let dur = if v.is_playlist {
+        "PLAYLIST".to_string()
+    } else if watched {
+        format!("✓ {}", v.duration_label())
+    } else {
+        v.duration_label()
+    };
     let live = dur == "LIVE";
     let g = painter.layout_no_wrap(dur, FontId::proportional(12.0), Color32::WHITE);
     let badge = egui::Rect::from_min_size(
@@ -1596,7 +1982,15 @@ fn video_card(ui: &mut egui::Ui, thumbs: &mut Thumbs, variant: Variant, v: &Vide
     cjob.wrap.max_rows = 1;
     cjob.wrap.overflow_character = Some('…');
     let chan = painter.layout_job(cjob);
-    painter.galley(egui::pos2(title_pos.x, rect.max.y - CARD_PAD - chan.size().y), chan, TEXT_DIM);
+    let chan_rect = egui::Rect::from_min_size(egui::pos2(title_pos.x, rect.max.y - CARD_PAD - chan.size().y), chan.size());
+    // The channel name is its own link (when we know the channel's URL).
+    let chan_resp = (v.channel_url.is_some() && !v.channel().is_empty())
+        .then(|| ui.interact(chan_rect.expand(2.0), resp.id.with("channel"), Sense::click()));
+    let chan_hover = chan_resp.as_ref().is_some_and(|r| r.hovered());
+    painter.galley(chan_rect.min, chan, if chan_hover { TEXT } else { TEXT_DIM });
+    if chan_hover {
+        painter.line_segment([chan_rect.left_bottom(), chan_rect.right_bottom()], Stroke::new(1.0, TEXT_DIM));
+    }
 
     // outline: accent when playing, faint accent on hover
     if playing {
@@ -1605,7 +1999,19 @@ fn video_card(ui: &mut egui::Ui, thumbs: &mut Thumbs, variant: Variant, v: &Vide
         painter.rect_stroke(rect, r, Stroke::new(1.0, ACCENT.gamma_multiply(0.5 * hover)), StrokeKind::Outside);
     }
 
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    if let Some(cr) = chan_resp {
+        if cr.clicked() {
+            return CardAction::Channel;
+        }
+        if cr.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+    }
+    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        CardAction::Open
+    } else {
+        CardAction::None
+    }
 }
 
 fn tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {

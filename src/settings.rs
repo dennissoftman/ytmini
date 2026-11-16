@@ -25,6 +25,14 @@ pub enum ThumbQuality {
     High,
 }
 
+/// The browser profile "Sign in with Google" last imported from.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SignInSource {
+    /// yt-dlp browser id
+    pub id: String,
+    pub profile: std::path::PathBuf,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -41,6 +49,8 @@ pub struct Settings {
     pub mark_watched: bool,
     /// Closing the window keeps ytmini in the menu bar / tray.
     pub close_to_tray: bool,
+    /// For one-click "Refresh session".
+    pub signin_source: Option<SignInSource>,
 }
 
 pub const DEFAULT_CACHE_MB: u64 = 256;
@@ -57,6 +67,7 @@ impl Default for Settings {
             volume: 80.0,
             mark_watched: true,
             close_to_tray: true,
+            signin_source: None,
         }
     }
 }

@@ -142,6 +142,8 @@ pub struct Embedded {
     last_log_error: Option<String>,
     /// Set when `title` was learned from mpv; the app updates the window title.
     pub title_changed: bool,
+    /// Shown as "Resumed at 12:34 · Start over" for a few seconds.
+    resumed_from: Option<(f64, Instant)>,
     title_from_mpv: bool,
 
     // UI state
@@ -164,12 +166,15 @@ const OBSERVED: &[(&str, std::ffi::c_int)] = &[
 
 impl Embedded {
     /// Start playback. Must be called with the GL context current (from `ui`).
+    // A plain constructor; a params struct would only move the list elsewhere.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         tools: &Tools,
         cookies: &Path,
         video: &Video,
         profile: &Profile,
         settings: &crate::settings::Settings,
+        resume: Option<f64>,
         gpa: mpv::GetProcAddress,
         ctx: &egui::Context,
     ) -> Result<Embedded, String> {
@@ -218,7 +223,10 @@ impl Embedded {
             mpv.set_wakeup_callback(on_wakeup, data);
             render.set_update_callback(on_frame, data);
         }
-        mpv.command(&["loadfile", &video.url()])?;
+        match resume {
+            Some(t) => mpv.command(&["loadfile", &video.url(), "replace", "-1", &format!("start={t:.1}")])?,
+            None => mpv.command(&["loadfile", &video.url()])?,
+        }
 
         Ok(Embedded {
             render: Some(render),
@@ -241,6 +249,7 @@ impl Embedded {
             error: None,
             last_log_error: None,
             title_changed: false,
+            resumed_from: resume.map(|t| (t, Instant::now())),
             title_from_mpv: video.title.is_none(),
             scrub: None,
             last_scrub_seek: Instant::now(),
@@ -536,6 +545,22 @@ impl Embedded {
             if ui.put(r, egui::Button::new(egui::RichText::new("↻  Replay").size(16.0))).clicked() {
                 self.replay();
             }
+        }
+        // "Resumed at …" pill, top-left, for the first seconds of a resumed video
+        if let Some((t, _)) = self.resumed_from.filter(|(_, since)| since.elapsed() < Duration::from_secs(8)) {
+            let r = Rect::from_min_size(area.left_top() + Vec2::new(16.0, 16.0), Vec2::new(250.0, 34.0));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
+                egui::Frame::new().fill(Color32::from_black_alpha(190)).corner_radius(8).inner_margin(egui::Margin::symmetric(10, 5)).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("Resumed at {}", fmt_time(t))).color(Color32::WHITE));
+                        if ui.link("Start over").clicked() {
+                            self.seek_absolute(0.0, true);
+                            self.resumed_from = None;
+                        }
+                    });
+                });
+            });
+            ctx.request_repaint_after(Duration::from_millis(500));
         }
 
         // Controls

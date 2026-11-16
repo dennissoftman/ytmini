@@ -216,7 +216,7 @@ pub struct Browser {
     pub family: Family,
 }
 
-const ALL_BROWSERS: &[Browser] = &[
+pub const ALL_BROWSERS: &[Browser] = &[
     Browser { name: "Safari", id: "safari", family: Family::Safari },
     Browser { name: "Chrome", id: "chrome", family: Family::Chromium },
     Browser { name: "Firefox", id: "firefox", family: Family::Firefox },
@@ -233,7 +233,7 @@ pub fn detect_browsers() -> Vec<Browser> {
     ALL_BROWSERS.iter().copied().filter(|b| profile_dirs(b.id).iter().any(|p| p.exists())).collect()
 }
 
-fn profile_dirs(id: &str) -> Vec<PathBuf> {
+pub fn profile_dirs(id: &str) -> Vec<PathBuf> {
     let home = dirs::home_dir().unwrap_or_default();
     #[cfg(target_os = "macos")]
     {
@@ -347,7 +347,7 @@ pub fn import_cookies(tools: &Tools, spec: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn restrict_perms(_p: &Path) -> Result<()> {
+pub fn restrict_perms(_p: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -366,18 +366,32 @@ pub enum Source {
     Subscriptions,
     WatchLater,
     History,
+    /// Your playlists (Liked videos, Watch later, your own).
+    Playlists,
     Search(String),
+    /// A channel's uploads. `url` is the channel's base URL.
+    Channel { url: String, name: String },
+    ChannelPlaylists { url: String, name: String },
+    Playlist { id: String, title: String },
 }
 
 impl Source {
-    pub fn label(&self) -> &str {
+    pub fn label(&self) -> String {
         match self {
-            Source::Feed => "Feed",
-            Source::Subscriptions => "Subscriptions",
-            Source::WatchLater => "Watch later",
-            Source::History => "History",
-            Source::Search(_) => "Search",
+            Source::Feed => "Feed".into(),
+            Source::Subscriptions => "Subscriptions".into(),
+            Source::WatchLater => "Watch later".into(),
+            Source::History => "History".into(),
+            Source::Playlists => "Playlists".into(),
+            Source::Search(_) => "Search".into(),
+            Source::Channel { name, .. } | Source::ChannelPlaylists { name, .. } => name.clone(),
+            Source::Playlist { title, .. } => title.clone(),
         }
+    }
+
+    /// Pages reached by navigating (channel/playlist), as opposed to top tabs.
+    pub fn is_page(&self) -> bool {
+        matches!(self, Source::Channel { .. } | Source::ChannelPlaylists { .. } | Source::Playlist { .. })
     }
 
     /// yt-dlp URL; `end` is the last (1-based) item we'll ask for.
@@ -387,18 +401,86 @@ impl Source {
             Source::Subscriptions => ":ytsubs".into(),
             Source::WatchLater => ":ytwatchlater".into(),
             Source::History => ":ythistory".into(),
+            Source::Playlists => "https://www.youtube.com/feed/playlists".into(),
             Source::Search(q) => format!("ytsearch{end}:{q}"),
+            Source::Channel { url, .. } => format!("{}/videos", url.trim_end_matches('/')),
+            Source::ChannelPlaylists { url, .. } => format!("{}/playlists", url.trim_end_matches('/')),
+            Source::Playlist { id, .. } => format!("https://www.youtube.com/playlist?list={id}"),
         }
     }
 }
 
-#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+/// One line of `yt-dlp --flat-playlist -j` output.
+#[derive(Deserialize)]
+struct RawEntry {
+    id: String,
+    title: Option<String>,
+    channel: Option<String>,
+    uploader: Option<String>,
+    duration: Option<f64>,
+    channel_id: Option<String>,
+    channel_url: Option<String>,
+    uploader_url: Option<String>,
+    ie_key: Option<String>,
+    url: Option<String>,
+    #[serde(default)]
+    thumbnails: Vec<RawThumb>,
+}
+
+#[derive(Deserialize)]
+struct RawThumb {
+    url: String,
+}
+
+impl RawEntry {
+    fn into_video(self) -> Option<Video> {
+        let is_playlist = self.ie_key.as_deref() == Some("YoutubeTab")
+            && self.url.as_deref().is_some_and(|u| u.contains("list="));
+        if self.id.len() != 11 && !is_playlist {
+            return None; // channels and other non-video results
+        }
+        // playlist thumbnails are a video's: ".../vi/<video id>/hqdefault.jpg"
+        let thumb_id = is_playlist
+            .then(|| {
+                self.thumbnails.iter().find_map(|t| {
+                    let rest = t.url.split("/vi/").nth(1)?;
+                    let id: String = rest.chars().take_while(|&c| c != '/').collect();
+                    (id.len() == 11).then_some(id)
+                })
+            })
+            .flatten();
+        let channel_url = self
+            .channel_url
+            .or_else(|| self.channel_id.as_ref().map(|c| format!("https://www.youtube.com/channel/{c}")))
+            .or(self.uploader_url);
+        Some(Video {
+            id: self.id,
+            title: self.title,
+            channel: self.channel,
+            uploader: self.uploader,
+            duration: self.duration,
+            channel_url,
+            is_playlist,
+            thumb_id,
+        })
+    }
+}
+
+/// A video — or, on playlist listings, a playlist (`is_playlist`).
+#[derive(Clone, Debug, Default, Deserialize, serde::Serialize)]
 pub struct Video {
     pub id: String,
     pub title: Option<String>,
     pub channel: Option<String>,
     pub uploader: Option<String>,
     pub duration: Option<f64>,
+    #[serde(default)]
+    pub channel_url: Option<String>,
+    #[serde(default)]
+    pub is_playlist: bool,
+    /// For playlists: the video whose thumbnail represents it.
+    #[serde(default)]
+    pub thumb_id: Option<String>,
 }
 
 impl Video {
@@ -414,7 +496,7 @@ impl Video {
             s[i..].chars().take(11).collect()
         };
         let ok = id.len() == 11 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-        ok.then_some(Video { id, title: None, channel: None, uploader: None, duration: None })
+        ok.then_some(Video { id, ..Default::default() })
     }
 
     pub fn title(&self) -> &str {
@@ -460,8 +542,8 @@ pub fn fetch(tools: &Tools, cookies: &Path, source: &Source, start: usize, count
 
     let vids: Vec<Video> = String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .filter(|v: &Video| v.id.len() == 11) // drop channels/playlists in results
+        .filter_map(|l| serde_json::from_str::<RawEntry>(l).ok())
+        .filter_map(RawEntry::into_video)
         .collect();
 
     if vids.is_empty() && !out.status.success() {
@@ -734,7 +816,14 @@ pub fn ipc_path() -> PathBuf {
     }
 }
 
-pub fn play(tools: &Tools, cookies: &Path, video: &Video, profile: &Profile, mark_watched: bool) -> Result<Child> {
+pub fn play(
+    tools: &Tools,
+    cookies: &Path,
+    video: &Video,
+    profile: &Profile,
+    mark_watched: bool,
+    resume: Option<f64>,
+) -> Result<Child> {
     let mpv = tools.mpv.as_ref().context("no mpv executable for the separate-window player")?;
     let log = config_dir()?.join("mpv.log");
     let log_file = fs::File::create(&log).context("creating mpv.log")?;
@@ -753,6 +842,7 @@ pub fn play(tools: &Tools, cookies: &Path, video: &Video, profile: &Profile, mar
         // yt-dlp reports the view to YouTube so it lands in the account's watch history.
         .args(mark_watched.then_some("--ytdl-raw-options-append=mark-watched="))
         .args(tools.ytdl_raw_options().iter().map(|o| format!("--ytdl-raw-options-append={o}")))
+        .args(resume.map(|t| format!("--start={t:.1}")))
         .args(profile.fast.then_some("--profile=fast"))
         .args(profile.audio_only.then_some("--no-video"))
         .arg(video.url())
@@ -775,6 +865,14 @@ pub fn switch_profile(url: &str, profile: &Profile) -> Result<()> {
     // mpv ≥ 0.38: loadfile <url> <flags> <index> <options>
     ipc.request(serde_json::json!(["loadfile", url, "replace", -1, opts]))?;
     Ok(())
+}
+
+/// Position and duration of the separate-window mpv (for saving progress).
+pub fn ipc_progress() -> Option<(f64, f64)> {
+    let mut ipc = Ipc::connect(&ipc_path()).ok()?;
+    let pos = ipc.request(serde_json::json!(["get_property", "time-pos"])).ok()?.as_f64()?;
+    let dur = ipc.request(serde_json::json!(["get_property", "duration"])).ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
+    Some((pos, dur))
 }
 
 /// Minimal mpv JSON IPC client: one request at a time, events are skipped.
@@ -843,7 +941,7 @@ mod tests {
     use super::*;
 
     fn v(d: Option<f64>) -> Video {
-        Video { id: "abcdefghijk".into(), title: None, channel: None, uploader: None, duration: d }
+        Video { id: "abcdefghijk".into(), duration: d, ..Default::default() }
     }
 
     #[test]
@@ -918,6 +1016,32 @@ mod live {
 
     #[test]
     #[ignore]
+    fn channel_and_playlists() {
+        let (t, c) = setup();
+        let feed = fetch(&t, &c, &Source::Feed, 0, 5).unwrap();
+        let v = feed.iter().find(|v| v.channel_url.is_some()).expect("feed entry with channel url");
+        let (url, name) = (v.channel_url.clone().unwrap(), v.channel().to_string());
+        let vids = fetch(&t, &c, &Source::Channel { url: url.clone(), name: name.clone() }, 0, 5).unwrap();
+        eprintln!("channel {name}: {} videos, first: {}", vids.len(), vids[0].title());
+        assert!(!vids.is_empty() && vids.iter().all(|v| !v.is_playlist));
+
+        let blender = "https://www.youtube.com/@BlenderOfficial".to_string();
+        let lists = fetch(&t, &c, &Source::ChannelPlaylists { url: blender, name: "Blender".into() }, 0, 5).unwrap();
+        assert!(lists.iter().all(|l| l.is_playlist), "all playlists");
+        assert!(lists.iter().all(|l| l.thumb_id.as_ref().is_some_and(|i| i.len() == 11)), "thumbs");
+        let first = &lists[0];
+        eprintln!("playlist: {} ({})", first.title(), first.id);
+        let inside = fetch(&t, &c, &Source::Playlist { id: first.id.clone(), title: first.title().into() }, 0, 5).unwrap();
+        eprintln!("  {} videos, first: {}", inside.len(), inside[0].title());
+        assert!(!inside.is_empty() && inside.iter().all(|v| !v.is_playlist));
+
+        let mine = fetch(&t, &c, &Source::Playlists, 0, 10).unwrap();
+        eprintln!("my playlists: {:?}", mine.iter().map(|p| p.title()).collect::<Vec<_>>());
+        assert!(mine.iter().any(|p| p.id == "LL"), "Liked videos present");
+    }
+
+    #[test]
+    #[ignore]
     fn personal_tabs() {
         let (t, c) = setup();
         for s in [Source::Feed, Source::Subscriptions, Source::WatchLater, Source::History] {
@@ -933,7 +1057,7 @@ mod live {
     fn mpv_starts_and_dies() {
         let (t, c) = setup();
         let v = fetch(&t, &c, &Source::Search("big buck bunny".into()), 0, 1).unwrap().remove(0);
-        let mut child = play(&t, &c, &v, &profile(Quality::Auto, power_state(), 1080), false).unwrap();
+        let mut child = play(&t, &c, &v, &profile(Quality::Auto, power_state(), 1080), false, None).unwrap();
         std::thread::sleep(std::time::Duration::from_secs(8));
         assert!(child.try_wait().unwrap().is_none(), "mpv exited early: {:?}", last_player_error());
         child.kill().unwrap();
@@ -946,7 +1070,7 @@ mod live {
         use std::time::Duration;
         let (t, c) = setup();
         let v = fetch(&t, &c, &Source::Search("big buck bunny 1080p".into()), 0, 1).unwrap().remove(0);
-        let mut child = play(&t, &c, &v, &profile(Quality::Max(1080), Power::default(), 2160), false).unwrap();
+        let mut child = play(&t, &c, &v, &profile(Quality::Max(1080), Power::default(), 2160), false, None).unwrap();
         std::thread::sleep(Duration::from_secs(12));
         let get = |prop: &str| Ipc::connect(&ipc_path()).unwrap().request(serde_json::json!(["get_property", prop]));
         let before = get("time-pos").unwrap().as_f64().unwrap();
