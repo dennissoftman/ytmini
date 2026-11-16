@@ -529,18 +529,59 @@ mod locale_live {
 }
 
 #[cfg(test)]
+mod chip_tests {
+    #[test]
+    fn related_chip_kind() {
+        // tails of real tokens: …"\x18\x04\"\x07Related(\x05j\x0fwatch-next-feed"
+        let enc = |b: &[u8]| {
+            const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            let mut s = String::new();
+            for ch in b.chunks(3) {
+                let n = ch
+                    .iter()
+                    .enumerate()
+                    .fold(0u32, |n, (i, &x)| n | (x as u32) << (16 - 8 * i));
+                for i in 0..=ch.len() {
+                    s.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
+                }
+            }
+            s
+        };
+        let rel = enc(b"\x12\x0d\x12\x0bjNQXAC9IVRw\x18\x04\"\x07Related(\x05j\x0fwatch-next-feed");
+        let fy = enc(b"\x12\x0d\x12\x0bjNQXAC9IVRw\x18\x05\"\x07For you(\x06j\x0fwatch-next-feed");
+        assert_eq!(super::chip_kind(&rel), Some(4));
+        assert_eq!(super::chip_kind(&fy), Some(5));
+        assert_eq!(super::b64url_decode("aGVsbG8"), Some(b"hello".to_vec()));
+    }
+}
+
+#[cfg(test)]
 mod related_live {
+    /// Dumps `next` for YTMINI_NEXT_ID to YTMINI_DUMP_FEED (signed in, read-only).
+    #[test]
+    #[ignore]
+    fn dump_next() {
+        let cookies = crate::yt::config_dir().unwrap().join("cookies.txt");
+        let id = std::env::var("YTMINI_NEXT_ID").unwrap();
+        let v = super::Client::new(&cookies)
+            .unwrap()
+            .post("next", serde_json::json!({ "videoId": id }))
+            .unwrap();
+        std::fs::write(std::env::var("YTMINI_DUMP_FEED").unwrap(), v.to_string()).unwrap();
+    }
+
     /// `cargo test -- --ignored related_videos --nocapture`
     #[test]
     #[ignore]
     fn related_videos() {
         let cookies = crate::yt::config_dir().unwrap().join("cookies.txt");
-        let r = super::related(&cookies, "aqz-KE-bpKQ").unwrap();
+        let id = std::env::var("YTMINI_NEXT_ID").unwrap_or_else(|_| "aqz-KE-bpKQ".into());
+        let r = super::related(&cookies, &id).unwrap();
         eprintln!(
             "{} suggestions; first: {:?}",
             r.len(),
             r.iter()
-                .take(3)
+                .take(6)
                 .map(|v| (v.title(), v.channel(), v.views_label()))
                 .collect::<Vec<_>>()
         );
@@ -645,14 +686,90 @@ pub fn player_extras(cookies: &Path, video_id: &str) -> Result<Extras> {
 /// YouTube's suggestions for a video (the column beside the player on the
 /// website), personalised like there. Reads only; nothing is recorded.
 pub fn related(cookies: &Path, video_id: &str) -> Result<Vec<Video>> {
-    let r = Client::new(cookies)?.post("next", json!({ "videoId": video_id }))?;
+    let c = Client::new(cookies)?;
+    let r = c.post("next", json!({ "videoId": video_id }))?;
     let results = r
         .pointer("/contents/twoColumnWatchNextResults/secondaryResults/secondaryResults/results")
         .context("no suggestions in the reply")?;
+    let tidy = |mut out: Vec<Video>| {
+        out.retain(|v| v.id != video_id && !v.is_short);
+        out
+    };
+    // Signed in, the default "All" list is mostly your home feed (nearly the
+    // same whatever plays); the "Related" chip is what's actually related.
+    if std::env::var_os("YTMINI_DEBUG").is_some() {
+        eprintln!("related chip: {:?}", related_chip(results).map(|t| t.len()));
+    }
+    if let Some(token) = related_chip(results) {
+        if let Ok(rel) = c.post("next", json!({ "continuation": token })) {
+            let mut out = Vec::new();
+            collect(&rel, &mut out, &mut None);
+            let out = tidy(out);
+            if std::env::var_os("YTMINI_DEBUG").is_some() {
+                eprintln!("related list: {}", out.len());
+            }
+            if out.len() >= 5 {
+                return Ok(out);
+            }
+        }
+    }
     let mut out = Vec::new();
     collect(results, &mut out, &mut None);
-    out.retain(|v| v.id != video_id && !v.is_short);
-    Ok(out)
+    Ok(tidy(out))
+}
+
+/// The continuation token of the watch page's "Related" chip. Found by the
+/// chip kind inside the token (field 3 = 4; "For you" is 5), not by its
+/// label, which is in your language.
+fn related_chip(results: &Value) -> Option<String> {
+    results
+        .as_array()?
+        .iter()
+        .find_map(|r| r.pointer("/relatedChipCloudRenderer/content/chipCloudRenderer/chips"))?
+        .as_array()?
+        .iter()
+        .filter_map(|c| {
+            c.pointer("/chipCloudChipRenderer/navigationEndpoint/continuationCommand/token")?
+                .as_str()
+        })
+        .find(|t| chip_kind(t) == Some(4))
+        .map(str::to_string)
+}
+
+/// Field 3 of the chip's protobuf continuation token: the chip kind.
+fn chip_kind(token: &str) -> Option<u64> {
+    let raw = b64url_decode(&token.replace("%3D", "=").replace("%3d", "="))?;
+    // the chip part sits at the end: … 0x18 <kind> 0x22 <len> <label> 0x28 …
+    raw.windows(3)
+        .rev()
+        .find(|w| w[0] == 0x18 && w[2] == 0x22 && w[1] < 0x80)
+        .map(|w| u64::from(w[1]))
+}
+
+/// Base64 (URL-safe or standard alphabet, padding optional).
+fn b64url_decode(s: &str) -> Option<Vec<u8>> {
+    let val = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for &c in s.as_bytes().iter().filter(|&&c| c != b'=') {
+        acc = (acc << 6) | val(c)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
 }
 
 /// The chapters YouTube shows on the seek bar (the uploader's, else its
