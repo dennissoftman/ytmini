@@ -12,7 +12,9 @@
 set -eu
 cd "$(dirname "$0")/.."
 target=x86_64-pc-windows-msvc
-RUSTFLAGS="-C target-feature=+crt-static" cargo xwin build --release --target $target
+# -A linker-messages: lld-link lists every MSVC runtime object without its
+# .pdb (LNK4099), harmless
+RUSTFLAGS="-C target-feature=+crt-static -A linker-messages" cargo xwin build --release --target $target
 
 cache=target/win-libmpv
 if [ ! -f $cache/libmpv-2.dll ]; then
