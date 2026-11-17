@@ -263,3 +263,31 @@ fn add_fonts(ctx: &egui::Context) {
         }
     }
 }
+
+/// Two beamed eighth notes (♫), YouTube's mark for songs. `c` is the centre;
+/// `s` scales the ~16 pt design.
+pub fn paint_note(p: &egui::Painter, c: egui::Pos2, s: f32, color: Color32) {
+    let v = |x: f32, y: f32| c + Vec2::new(x, y) * s;
+    let w = 1.6 * s;
+    for (x, y) in [(-4.2, 4.6), (4.2, 3.0)] {
+        p.add(egui::Shape::ellipse_filled(
+            v(x, y),
+            Vec2::new(2.9, 2.2) * s,
+            color,
+        ));
+        p.line_segment(
+            [v(x + 2.6, y - 0.4), v(x + 2.6, y - 10.6)],
+            Stroke::new(w, color),
+        );
+    }
+    p.add(egui::Shape::convex_polygon(
+        vec![
+            v(-1.6 - 0.8, -6.0),
+            v(6.8 + 0.8, -7.6),
+            v(6.8 + 0.8, -5.0),
+            v(-1.6 - 0.8, -3.4),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+}

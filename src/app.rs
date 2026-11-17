@@ -72,9 +72,10 @@ const NET_CHECK: Duration = Duration::from_secs(15);
 /// How long a click waits for a running resolve before starting its own.
 const RESOLVE_WAIT_MAX: Duration = Duration::from_secs(8);
 
-const BASE_TABS: [Source; 6] = [
+const BASE_TABS: [Source; 7] = [
     Source::Feed,
     Source::Subscriptions,
+    Source::Music,
     Source::WatchLater,
     Source::History,
     Source::Playlists,
@@ -104,6 +105,8 @@ struct DepsState {
 
 enum Msg {
     Related(String, Vec<Video>),
+    /// YouTube Music says this video is a song.
+    Song(String),
     /// Rating, channel, subscription and comments token of a video.
     Watch(String, crate::innertube::WatchInfo),
     /// A page of comments for a video (`append`: a later page).
@@ -191,6 +194,7 @@ fn list_name(s: &Source) -> Option<&'static str> {
     match s {
         Source::Feed => Some("feed"),
         Source::Subscriptions => Some("subscriptions"),
+        Source::Music => Some("music"),
         Source::WatchLater => Some("watchlater"),
         Source::History => Some("history"),
         Source::Playlists => Some("playlists"),
@@ -372,6 +376,11 @@ pub struct App {
     feed_all: bool,
     /// The Up next overlay on the right side of the video.
     up_next_open: bool,
+    /// Videos known to be songs (marked in a list, or by YouTube Music).
+    songs: std::collections::HashSet<String>,
+    /// Back on a song: the player shrinks to a bar under the pages and the
+    /// song plays on (audio only) instead of stopping.
+    mini: bool,
     /// The player's controls are showing (the overlay follows them).
     controls_visible: bool,
     /// Where the overlay was drawn last frame (for "pointer is over it").
@@ -408,7 +417,8 @@ pub struct App {
     net_route: Option<std::net::IpAddr>,
     net_checked: std::time::Instant,
     /// dev (`YTMINI_PLAY_SEQ=id,id,…`): videos to play one after another,
-    /// each once the current one has played 4 s (start-up timing).
+    /// each once the current one has played 4 s (start-up timing). Steps
+    /// `back` (as if Back were clicked) and `shot:<png path>` too.
     play_seq: Vec<String>,
     /// Native lookup failures already told about (see `native::failures`).
     native_seen: u32,
@@ -527,6 +537,8 @@ impl App {
             topic_loading: std::collections::HashSet::new(),
             feed_all: false,
             up_next_open: false,
+            songs: std::collections::HashSet::new(),
+            mini: false,
             queue_drag: None,
             controls_visible: true,
             overlay_rect: None,
@@ -1227,6 +1239,9 @@ impl App {
                         d.list = Some(r);
                     }
                 }
+                Msg::Song(id) => {
+                    self.songs.insert(id);
+                }
                 Msg::Related(id, vids) => {
                     if self.playing_id() == Some(id.as_str()) {
                         self.related = (id, vids);
@@ -1305,6 +1320,7 @@ impl App {
     /// whose order means something are passed (a playlist, Watch later, the
     /// Shorts row); from a feed, Next follows YouTube's suggestions instead.
     fn play_from(&mut self, list: Vec<Video>, v: &Video) {
+        self.mini = false;
         self.queue_pos = list.iter().position(|x| x.id == v.id);
         self.queue_ctx = if self.queue_pos.is_some() {
             list
@@ -1337,10 +1353,16 @@ impl App {
         if self.related.0 != cur {
             return None;
         }
-        self.related
-            .1
-            .iter()
-            .find(|v| !v.is_playlist && !self.played.iter().any(|p| p.id == v.id))
+        let song = self.playing_song();
+        self.related.1.iter().find(|v| {
+            !v.is_playlist && (!song || v.is_music) && !self.played.iter().any(|p| p.id == v.id)
+        })
+    }
+
+    /// Is the playing video a song? (Then suggestions are songs too, and
+    /// Back keeps it playing in the bar.)
+    fn playing_song(&self) -> bool {
+        self.playing_id().is_some_and(|id| self.songs.contains(id))
     }
 
     fn go_next(&mut self) {
@@ -1582,8 +1604,22 @@ impl App {
             direct,
             wait,
         ) {
-            Ok(p) => {
+            Ok(mut p) => {
                 self.status = None;
+                if self.mini {
+                    p.set_background(true); // the bar plays on: audio only
+                }
+                if video.is_music {
+                    self.songs.insert(video.id.clone());
+                } else if !self.songs.contains(&video.id) {
+                    let (tx, id, ctx2) = (self.tx.clone(), video.id.clone(), ctx.clone());
+                    std::thread::spawn(move || {
+                        if let Ok(true) = crate::innertube::is_song(&id) {
+                            let _ = tx.send(Msg::Song(id));
+                            ctx2.request_repaint();
+                        }
+                    });
+                }
                 {
                     let (tx, id, cookies, ctx2) = (
                         self.tx.clone(),
@@ -1651,6 +1687,7 @@ impl App {
 
     /// Leave the player view: tear mpv down, give back VRAM, restore the window.
     fn close_embedded(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        self.mini = false;
         if let Some(p) = self.embedded.take() {
             self.settings.volume = p.volume;
             if p.started {
@@ -2256,7 +2293,11 @@ impl App {
             // and search (channel/playlist pages keep them in the grid).
             let shelf_src = matches!(
                 source,
-                Source::Feed | Source::Subscriptions | Source::Topic { .. } | Source::Search(_)
+                Source::Feed
+                    | Source::Subscriptions
+                    | Source::Music
+                    | Source::Topic { .. }
+                    | Source::Search(_)
             );
             // Home: each of YouTube's categories as its own row
             // Home: For you (3 rows), Shorts, then the categories; the page ends
@@ -2902,7 +2943,7 @@ impl App {
     fn ui_filter_bar(&mut self, ui: &mut egui::Ui) {
         let feed = matches!(
             self.active,
-            Source::Feed | Source::Subscriptions | Source::Topic { .. }
+            Source::Feed | Source::Subscriptions | Source::Music | Source::Topic { .. }
         );
         if !(feed || matches!(self.active, Source::Search(_))) {
             return;
@@ -3838,6 +3879,8 @@ impl App {
         let now_v = self
             .current_video()
             .filter(|v| self.now.as_ref().is_some_and(|n| n.id == v.id));
+        // a song plays: suggest songs only
+        let song_now = self.playing_song();
         let thumbs = &mut self.thumbs;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 4.0;
@@ -3954,7 +3997,7 @@ impl App {
                     ui.add_space(10.0);
                     ui.label(RichText::new(t("Suggestions")).size(15.0).strong().color(text()));
                     let suggestions: Vec<&Video> = if cur.as_deref() == Some(self.related.0.as_str()) {
-                        self.related.1.iter().filter(|v| !v.is_playlist).collect()
+                        self.related.1.iter().filter(|v| !v.is_playlist && (!song_now || v.is_music)).collect()
                     } else {
                         Vec::new()
                     };
@@ -4146,6 +4189,7 @@ impl App {
         }
         let mut jump: Option<Video> = None;
         let mut video_rect = egui::Rect::NOTHING;
+        let song_now = self.playing_song();
         if let (Some(p), Some(surface), Some(gl)) =
             (&mut self.embedded, &mut self.surface, frame.gl())
         {
@@ -4160,6 +4204,7 @@ impl App {
                 next: q_next,
                 autoplay_in,
                 panel_open: Some(self.up_next_open),
+                song: song_now,
             };
             let act = p.ui(ui, view);
             go_next |= act.next;
@@ -4204,11 +4249,280 @@ impl App {
         } else if go_prev && !back {
             self.go_prev();
         }
-        if back || open_in_window.is_some() {
+        if back && open_in_window.is_none() && self.playing_song() {
+            self.collapse_player(&ctx);
+        } else if back || open_in_window.is_some() {
             self.close_embedded(&ctx, frame);
         }
         if let Some(v) = open_in_window {
             self.play_in_window(&v);
+        }
+    }
+
+    /// Back on a song: keep it playing (audio only) in the bar under the pages.
+    fn collapse_player(&mut self, ctx: &egui::Context) {
+        self.mini = true;
+        if let Some(p) = &mut self.embedded {
+            p.set_background(true);
+        }
+        if ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+    }
+
+    /// The music bar: what's playing, prev / play-pause / next, a seek line,
+    /// open the player again, stop. Plays on into the next song.
+    fn ui_mini_bar(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
+        const H: f32 = 64.0;
+        let ctx = ui.ctx().clone();
+        let mut expand = false;
+        let mut close = false;
+        let (mut go_next, mut go_prev) = (false, false);
+
+        // the next song starts by itself (no countdown: it's music)
+        let next_title = self.peek_next().map(|v| v.title().to_string());
+        let prev_any = !self.played.is_empty();
+        if let Some(p) = &self.embedded {
+            if p.eof && p.started {
+                let since = *self.eof_at.get_or_insert_with(std::time::Instant::now);
+                if self.settings.autoplay && !self.autoplay_cancelled && next_title.is_some() {
+                    if since.elapsed() >= Duration::from_millis(800) {
+                        go_next = true;
+                    } else {
+                        ctx.request_repaint_after(Duration::from_millis(100));
+                    }
+                }
+            } else {
+                self.eof_at = None;
+            }
+        }
+
+        egui::Panel::bottom("music_bar")
+            .resizable(false)
+            .exact_size(H)
+            .frame(egui::Frame::new().fill(sidebar()))
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                let Some(p) = &mut self.embedded else { return };
+                let full = ui.max_rect();
+                let painter = ui.painter().clone();
+
+                // seek line along the top edge (click or drag to seek)
+                let line = egui::Rect::from_min_size(full.min, Vec2::new(full.width(), 6.0));
+                let r = ui.interact(
+                    line,
+                    ui.scope_id().with("music_seek"),
+                    Sense::click_and_drag(),
+                );
+                if p.duration > 0.0 {
+                    if let Some(pos) = r
+                        .interact_pointer_pos()
+                        .filter(|_| r.clicked() || r.dragged())
+                    {
+                        let f = ((pos.x - line.left()) / line.width()).clamp(0.0, 1.0) as f64;
+                        p.seek_absolute(f * p.duration, true);
+                    }
+                    let thick = if r.hovered() || r.dragged() { 4.0 } else { 2.0 };
+                    let track = egui::Rect::from_min_size(full.min, Vec2::new(full.width(), thick));
+                    painter.rect_filled(track, 0, Color32::from_gray(128).gamma_multiply(0.35));
+                    let f = (p.pos / p.duration).clamp(0.0, 1.0) as f32;
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(track.min, Vec2::new(track.width() * f, thick)),
+                        0,
+                        accent(),
+                    );
+                    if r.hovered() {
+                        r.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    }
+                }
+
+                let row = full
+                    .shrink2(Vec2::new(16.0, 0.0))
+                    .translate(Vec2::new(0.0, 2.0));
+                let cy = row.center().y;
+                let btn = |ui: &mut egui::Ui, rect: egui::Rect, id: &str, enabled: bool| {
+                    let r = ui.interact(rect, ui.scope_id().with(id), Sense::click());
+                    if enabled && r.hovered() {
+                        ui.painter().rect_filled(rect, 8, card_hover());
+                    }
+                    if enabled {
+                        r.on_hover_cursor(egui::CursorIcon::PointingHand)
+                    } else {
+                        r
+                    }
+                };
+
+                // left: thumbnail, ♫ title, channel (click: back to the player)
+                let thumb = egui::Rect::from_min_size(
+                    egui::pos2(row.left(), cy - 22.0),
+                    Vec2::new(78.0, 44.0),
+                );
+                painter.rect_filled(thumb, 6, thumb_bg());
+                if let Some(tex) = self.thumbs.get(&p.id, Variant::Standard) {
+                    egui::Image::from_texture(egui::load::SizedTexture::from_handle(tex))
+                        .corner_radius(6)
+                        .paint_at(ui, thumb);
+                }
+                // centre: transport; right: open / stop
+                let sq = Vec2::splat(40.0);
+                let mid = egui::pos2(full.center().x, cy);
+                let prev_r = egui::Rect::from_center_size(mid - Vec2::new(46.0, 0.0), sq);
+                let pp_r = egui::Rect::from_center_size(mid, sq);
+                let next_r = egui::Rect::from_center_size(mid + Vec2::new(46.0, 0.0), sq);
+                let close_r = egui::Rect::from_center_size(
+                    egui::pos2(row.right() - 18.0, cy),
+                    Vec2::splat(34.0),
+                );
+                let open_r = egui::Rect::from_center_size(
+                    close_r.center() - Vec2::new(40.0, 0.0),
+                    Vec2::splat(34.0),
+                );
+                let time = if p.duration > 0.0 {
+                    format!(
+                        "{} / {}",
+                        player::fmt_time(p.pos),
+                        player::fmt_time(p.duration)
+                    )
+                } else {
+                    player::fmt_time(p.pos)
+                };
+                let tg = painter.layout_no_wrap(time, FontId::proportional(12.0), text_dim());
+                let time_x = open_r.left() - 12.0 - tg.size().x;
+                let show_time = time_x > next_r.right() + 16.0;
+                if show_time {
+                    painter.galley(egui::pos2(time_x, cy - tg.size().y / 2.0), tg, text_dim());
+                }
+
+                let text_left = thumb.right() + 12.0;
+                let text_right = prev_r.left() - 16.0;
+                let info = egui::Rect::from_min_max(
+                    egui::pos2(row.left(), cy - 24.0),
+                    egui::pos2(text_right.max(thumb.right()), cy + 24.0),
+                );
+                if btn(ui, info, "music_info", true)
+                    .on_hover_text(t("Show the player"))
+                    .clicked()
+                {
+                    expand = true;
+                }
+                if text_right - text_left > 40.0 {
+                    crate::theme::paint_note(
+                        &painter,
+                        egui::pos2(text_left + 6.0, cy - 9.0),
+                        0.62,
+                        accent(),
+                    );
+                    let title_left = text_left + 16.0;
+                    let one = |s: &str, size: f32, col: Color32, width: f32| {
+                        let mut job = LayoutJob::single_section(
+                            s.to_string(),
+                            TextFormat {
+                                font_id: FontId::proportional(size),
+                                color: col,
+                                ..Default::default()
+                            },
+                        );
+                        job.wrap.max_width = width.max(10.0);
+                        job.wrap.max_rows = 1;
+                        job.wrap.break_anywhere = true;
+                        job.wrap.overflow_character = Some('…');
+                        painter.layout_job(job)
+                    };
+                    let tg = one(&p.title, 13.5, text(), text_right - title_left);
+                    painter.galley(
+                        egui::pos2(title_left, cy - 9.0 - tg.size().y / 2.0),
+                        tg,
+                        text(),
+                    );
+                    let channel = match &self.watch {
+                        Some((id, w)) if self.np_artist.is_empty() && *id == p.id => {
+                            w.channel.clone().unwrap_or_default()
+                        }
+                        _ => self.np_artist.clone(),
+                    };
+                    let cg = one(&channel, 12.0, text_dim(), text_right - text_left);
+                    painter.galley(egui::pos2(text_left, cy + 2.0), cg, text_dim());
+                }
+
+                let dim = text_dim().gamma_multiply(0.45);
+                let r = btn(ui, prev_r, "music_prev", prev_any || p.pos > 3.0);
+                if r.on_hover_text(t("Previous")).clicked() {
+                    go_prev = true;
+                }
+                player::skip_icon(&painter, prev_r.center(), false, text());
+                if btn(ui, pp_r, "music_pp", true)
+                    .on_hover_text(t("Play / pause"))
+                    .clicked()
+                {
+                    if p.eof {
+                        p.seek_absolute(0.0, true);
+                    }
+                    p.toggle_pause();
+                }
+                player::play_pause_icon(&painter, pp_r.center(), p.paused || p.eof, text());
+                let has_next = next_title.is_some();
+                let r = btn(ui, next_r, "music_next", has_next);
+                let r = match &next_title {
+                    Some(tn) => r.on_hover_text(format!("{}: {tn}", t("Next"))),
+                    None => r,
+                };
+                if r.clicked() && has_next {
+                    go_next = true;
+                }
+                player::skip_icon(
+                    &painter,
+                    next_r.center(),
+                    true,
+                    if has_next { text() } else { dim },
+                );
+
+                // ⌃ open the player
+                if btn(ui, open_r, "music_open", true)
+                    .on_hover_text(t("Show the player"))
+                    .clicked()
+                {
+                    expand = true;
+                }
+                let c = open_r.center();
+                painter.line(
+                    vec![
+                        c + Vec2::new(-6.0, 3.0),
+                        c + Vec2::new(0.0, -3.0),
+                        c + Vec2::new(6.0, 3.0),
+                    ],
+                    Stroke::new(1.8, text()),
+                );
+                // ✕ stop
+                if btn(ui, close_r, "music_close", true)
+                    .on_hover_text(t("Stop"))
+                    .clicked()
+                {
+                    close = true;
+                }
+                let c = close_r.center();
+                for (a, b) in [
+                    (Vec2::new(-5.0, -5.0), Vec2::new(5.0, 5.0)),
+                    (Vec2::new(-5.0, 5.0), Vec2::new(5.0, -5.0)),
+                ] {
+                    painter.line_segment([c + a, c + b], Stroke::new(1.8, text()));
+                }
+                // keep the time and seek line moving
+                if !p.paused {
+                    ctx.request_repaint_after(Duration::from_millis(250));
+                }
+            });
+
+        if close {
+            self.close_embedded(&ctx, frame);
+        } else if expand {
+            self.mini = false;
+            if let Some(p) = &mut self.embedded {
+                p.set_background(false);
+            }
+        } else if go_next {
+            self.go_next();
+        } else if go_prev {
+            self.go_prev();
         }
     }
 
@@ -4982,7 +5296,7 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         if let Some(p) = &mut self.embedded {
-            p.set_background(false);
+            p.set_background(self.mini);
         }
     }
 
@@ -5161,7 +5475,7 @@ impl eframe::App for App {
         self.sync_now_playing();
         crate::awake::set(match &self.embedded {
             Some(p) if p.started && !p.paused && !p.eof => {
-                if !self.hidden && p.has_video() {
+                if !self.hidden && !self.mini && p.has_video() {
                     crate::awake::Need::Display
                 } else {
                     crate::awake::Need::System
@@ -5275,17 +5589,32 @@ impl eframe::App for App {
         if !self.play_seq.is_empty()
             && self.tools.is_some()
             && ctx.input(|i| i.time) > 6.0
+            && self.pending_play.is_none()
             && self
                 .embedded
                 .as_ref()
                 .is_none_or(|p| p.started && p.pos > 4.0)
         {
-            if let Some(v) = self
-                .play_seq
-                .pop()
-                .as_deref()
-                .and_then(Video::from_url_or_id)
-            {
+            let step = self.play_seq.pop().unwrap_or_default();
+            if step == "back" {
+                // as if Back were clicked
+                if self.playing_song() {
+                    self.collapse_player(&ctx);
+                } else {
+                    self.close_embedded(&ctx, frame);
+                }
+            } else if let Some(path) = step.strip_prefix("shot:") {
+                let path = std::path::PathBuf::from(path);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                    egui::ScreenshotCallback::new(move |img| {
+                        let [w, h] = img.size;
+                        let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+                        if let Some(buf) = image::RgbaImage::from_raw(w as u32, h as u32, rgba) {
+                            let _ = buf.save(&path);
+                        }
+                    }),
+                ));
+            } else if let Some(v) = Video::from_url_or_id(&step) {
                 if std::env::var_os("YTMINI_DEBUG").is_some() {
                     eprintln!("play_seq: {}", v.id);
                 }
@@ -5296,8 +5625,8 @@ impl eframe::App for App {
         if !self.play_seq.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
-        let grid_in =
-            ctx.animate_bool_with_time(egui::Id::unique("grid_in"), self.embedded.is_none(), 0.25);
+        let show_player = self.embedded.is_some() && !self.mini;
+        let grid_in = ctx.animate_bool_with_time(egui::Id::unique("grid_in"), !show_player, 0.25);
         egui::Frame::new().fill(bg()).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
             match &self.screen {
@@ -5307,8 +5636,11 @@ impl eframe::App for App {
                 }
                 Screen::Setup => self.ui_setup(ui),
                 Screen::Onboarding => self.ui_onboarding(ui),
-                Screen::Main if self.embedded.is_some() => self.ui_player(ui, frame),
+                Screen::Main if show_player => self.ui_player(ui, frame),
                 Screen::Main => {
+                    if self.mini && self.embedded.is_some() {
+                        self.ui_mini_bar(ui, frame);
+                    }
                     // back from the player: the grid fades in
                     ui.multiply_opacity(player::ease(grid_in));
                     self.ui_main(ui);
@@ -5705,12 +6037,21 @@ fn up_next_row(ui: &mut egui::Ui, thumbs: &mut Thumbs, v: &Video, current: bool)
     let dur = v.duration_label();
     if !dur.is_empty() && dur != "LIVE" {
         let g = painter.layout_no_wrap(dur, FontId::proportional(10.5), Color32::WHITE);
+        let note = if v.is_music { 11.0 } else { 0.0 };
         let b = egui::Rect::from_min_size(
-            thumb.right_bottom() - g.size() - Vec2::new(7.0, 5.0),
-            g.size() + Vec2::new(4.0, 2.0),
+            thumb.right_bottom() - g.size() - Vec2::new(7.0 + note, 5.0),
+            g.size() + Vec2::new(4.0 + note, 2.0),
         );
         painter.rect_filled(b, 3, Color32::from_black_alpha(190));
-        painter.galley(b.min + Vec2::new(2.0, 1.0), g, Color32::WHITE);
+        if note > 0.0 {
+            crate::theme::paint_note(
+                &painter,
+                egui::pos2(b.left() + 7.0, b.center().y + 0.5),
+                0.45,
+                Color32::WHITE,
+            );
+        }
+        painter.galley(b.min + Vec2::new(2.0 + note, 1.0), g, Color32::WHITE);
     }
     let tx = thumb.right() + 8.0;
     let tw = rect.right() - tx - 4.0;
@@ -5853,9 +6194,15 @@ fn video_card(
     let no_badge = dur.trim_start_matches("✓ ").is_empty();
     let shown_dur = if live { t("LIVE").to_string() } else { dur };
     let g = painter.layout_no_wrap(shown_dur, FontId::proportional(11.5), Color32::WHITE);
+    // songs: a ♫ before the duration, as on YouTube
+    let note = if v.is_music && !live && !v.is_playlist {
+        14.0
+    } else {
+        0.0
+    };
     let badge = egui::Rect::from_min_size(
-        thumb.right_bottom() - g.size() - Vec2::new(12.0, 10.0),
-        g.size() + Vec2::new(8.0, 4.0),
+        thumb.right_bottom() - g.size() - Vec2::new(12.0 + note, 10.0),
+        g.size() + Vec2::new(8.0 + note, 4.0),
     );
     if (!portrait || live) && !no_badge {
         painter.rect_filled(
@@ -5867,7 +6214,15 @@ fn video_card(
                 Color32::from_black_alpha(190)
             },
         );
-        painter.galley(badge.min + Vec2::new(4.0, 2.0), g, Color32::WHITE);
+        if note > 0.0 {
+            crate::theme::paint_note(
+                &painter,
+                egui::pos2(badge.left() + 10.0, badge.center().y + 0.5),
+                0.55,
+                Color32::WHITE,
+            );
+        }
+        painter.galley(badge.min + Vec2::new(4.0 + note, 2.0), g, Color32::WHITE);
     }
 
     // title (max 2 lines)
@@ -6237,6 +6592,7 @@ fn tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response 
 #[derive(Clone, Copy)]
 enum Icon {
     Download,
+    Music,
     Home,
     Subs,
     Later,
@@ -6252,6 +6608,7 @@ fn nav_icon(s: &Source) -> Icon {
     match s {
         Source::Feed => Icon::Home,
         Source::Subscriptions => Icon::Subs,
+        Source::Music => Icon::Music,
         Source::WatchLater => Icon::Later,
         Source::History => Icon::History,
         Source::Playlists => Icon::Lists,
@@ -6266,6 +6623,7 @@ fn paint_icon(p: &egui::Painter, icon: Icon, c: egui::Pos2, color: Color32) {
     let st = Stroke::new(1.5, color);
     let v = |x: f32, y: f32| c + Vec2::new(x, y);
     match icon {
+        Icon::Music => crate::theme::paint_note(p, c, 1.0, color),
         Icon::Home => {
             p.line(vec![v(-7.0, -0.5), v(0.0, -7.0), v(7.0, -0.5)], st);
             p.line(

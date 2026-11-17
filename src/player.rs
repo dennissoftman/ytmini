@@ -1159,6 +1159,8 @@ pub struct ViewCtx<'a> {
     pub autoplay_in: Option<f32>,
     /// The Up next overlay's state for its toggle (`None`: no toggle).
     pub panel_open: Option<bool>,
+    /// A song: ♫ before the title, and Back keeps it playing in the music bar.
+    pub song: bool,
 }
 
 pub const CONTROLS_H: f32 = 64.0;
@@ -1178,10 +1180,19 @@ impl Embedded {
                 egui::Layout::top_down(egui::Align::Center),
                 |ui| {
                     ui.set_max_width((w - 96.0).max(100.0));
-                    ui.add(
+                    let r = ui.add(
                         egui::Label::new(egui::RichText::new(&self.title).size(16.0).strong())
                             .truncate(),
                     );
+                    if v.song {
+                        let col = ui.visuals().text_color();
+                        crate::theme::paint_note(
+                            ui.painter(),
+                            Pos2::new(r.rect.left() - 13.0, r.rect.center().y),
+                            0.75,
+                            col,
+                        );
+                    }
                 },
             );
             ui.add_space(6.0);
@@ -2018,8 +2029,32 @@ impl Embedded {
     }
 }
 
+/// ▶ or ❚❚ (also for the music bar).
+pub fn play_pause_icon(p: &egui::Painter, c: Pos2, show_play: bool, col: Color32) {
+    if show_play {
+        let s = 9.0;
+        p.add(egui::Shape::convex_polygon(
+            vec![
+                Pos2::new(c.x - s * 0.7, c.y - s),
+                Pos2::new(c.x - s * 0.7, c.y + s),
+                Pos2::new(c.x + s, c.y),
+            ],
+            col,
+            Stroke::NONE,
+        ));
+    } else {
+        for dx in [-4.5, 4.5] {
+            p.rect_filled(
+                Rect::from_center_size(Pos2::new(c.x + dx, c.y), Vec2::new(4.0, 16.0)),
+                1,
+                col,
+            );
+        }
+    }
+}
+
 /// ⏮ / ⏭: a triangle and a bar.
-fn skip_icon(p: &egui::Painter, c: Pos2, fwd: bool, col: Color32) {
+pub fn skip_icon(p: &egui::Painter, c: Pos2, fwd: bool, col: Color32) {
     let d = if fwd { 1.0 } else { -1.0 };
     p.add(egui::Shape::convex_polygon(
         vec![

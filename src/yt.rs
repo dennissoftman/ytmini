@@ -484,6 +484,8 @@ pub fn restrict_perms(_p: &Path) -> Result<()> {
 pub enum Source {
     Feed,
     Subscriptions,
+    /// Home's "Music" category (YouTube's chip, personalised), as its own tab.
+    Music,
     WatchLater,
     History,
     /// Your playlists (Liked videos, Watch later, your own).
@@ -517,6 +519,7 @@ impl Source {
         match self {
             Source::Feed => t("Feed").into(),
             Source::Subscriptions => t("Subscriptions").into(),
+            Source::Music => t("Music").into(),
             Source::WatchLater => t("Watch later").into(),
             Source::History => t("History").into(),
             Source::Playlists => t("Playlists").into(),
@@ -557,6 +560,8 @@ impl Source {
             Source::Playlist { id, .. } => format!("https://www.youtube.com/playlist?list={id}"),
             Source::Downloads => String::new(), // local; never fetched
             Source::Topic { .. } => ":ytrec".into(), // native only; yt-dlp has no categories
+            // native only too; YouTube's own Music channel instead
+            Source::Music => "https://www.youtube.com/channel/UC-9-kyTW8ZkZNDHQJ6FgpwQ".into(),
         }
     }
 }
@@ -626,6 +631,7 @@ impl RawEntry {
             age: None,
             is_short: false,
             is_live: false,
+            is_music: false,
         })
     }
 }
@@ -662,6 +668,9 @@ pub struct Video {
     /// Live now, or an upcoming stream/premiere (only known from the native API).
     #[serde(default)]
     pub is_live: bool,
+    /// A song: YouTube marks it with a music note (only known from the native API).
+    #[serde(default)]
+    pub is_music: bool,
 }
 
 impl Video {

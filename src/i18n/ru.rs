@@ -305,4 +305,6 @@ pub const T: &[(&str, &str)] = &[
     ("Auto never exceeds what this screen can show ({}p). On battery and in Battery Saver it plays 1080p30. Sharp VP9 is preferred: most current PCs decode it in hardware, so it costs no more battery than blurry H.264.", "Авто никогда не превышает то, что может показать этот экран ({}p). От батареи и в режиме экономии заряда воспроизводит 1080p30. Предпочитается четкий VP9: большинство современных ПК декодируют его аппаратно, так что он расходует не больше батареи, чем размытый H.264."),
     ("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (high-DPI) screens.", "Стандартное ≈ 14 КБ, высокое ≈ 60 КБ на диске за каждую. Авто выбирает высокое на четких экранах (высокий DPI)."),
     ("Preparing {}…", "Подготовка {}…"),
+    ("Music", "Музыка"),
+    ("Show the player", "Показать плеер"),
 ];

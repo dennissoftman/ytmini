@@ -1323,6 +1323,78 @@ fn home_chips(r: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Home's "Music" chip token. Chips are named in the interface language, but
+/// the Music one always carries the same filter (`EgIIDx…`: category 15).
+/// YouTube leaves it out of some replies, so ask a few times and keep it.
+fn music_chip(client: &Client) -> Option<String> {
+    static FOUND: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let mut found = FOUND.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(t) = found.clone() {
+        return Some(t);
+    }
+    let pick = |chips: &[(String, String)]| {
+        chips
+            .iter()
+            .find(|(_, token)| is_music_chip(token))
+            .map(|(_, token)| token.clone())
+    };
+    let mut t = pick(&HOME_CHIPS.lock().unwrap_or_else(|e| e.into_inner()));
+    for _ in 0..3 {
+        if t.is_some() {
+            break;
+        }
+        let Ok(r) = client.post("browse", json!({ "browseId": "FEwhat_to_watch" })) else {
+            break;
+        };
+        let chips = home_chips(&r);
+        t = pick(&chips);
+        if std::env::var_os("YTMINI_DEBUG").is_some() {
+            eprintln!(
+                "home chips: {:?}",
+                chips.iter().map(|c| &c.0).collect::<Vec<_>>()
+            );
+        }
+    }
+    found.clone_from(&t);
+    t
+}
+
+/// YouTube's own Music channel: the Music tab when home has no Music chip.
+const MUSIC_CHANNEL: &str = "UC-9-kyTW8ZkZNDHQJ6FgpwQ";
+
+/// The chip token wraps base64 runs, one of which holds the chip's filter.
+fn is_music_chip(token: &str) -> bool {
+    let unpad = |t: &str| t.replace("%3D", "=").replace("%3d", "=");
+    let Some(raw) = b64url_decode(&unpad(token)) else {
+        return false;
+    };
+    raw.split(|b| !(b.is_ascii_alphanumeric() || b"-_%=".contains(b)))
+        .filter(|run| run.len() >= 16)
+        .filter_map(|run| b64url_decode(&unpad(std::str::from_utf8(run).ok()?)))
+        .any(|inner| inner.windows(6).any(|w| w == b"EgIIDx"))
+}
+
+/// Whether a video is a song, as YouTube Music classifies it (official
+/// video, art track or a user upload of a song). Asked signed out: it only
+/// reads the classification, nothing is recorded.
+pub fn is_song(video_id: &str) -> Result<bool> {
+    let r = Client::anonymous().post_as(
+        "player",
+        json!({ "videoId": video_id }),
+        json!({ "clientName": "WEB_REMIX", "clientVersion": "1.20251101.01.00" }),
+        67,
+        None,
+    )?;
+    Ok(r.pointer("/videoDetails/musicVideoType")
+        .and_then(Value::as_str)
+        .is_some_and(|t| {
+            matches!(
+                t,
+                "MUSIC_VIDEO_TYPE_OMV" | "MUSIC_VIDEO_TYPE_ATV" | "MUSIC_VIDEO_TYPE_UGC"
+            )
+        }))
+}
+
 pub struct Pager {
     is_feed: bool,
     client: Client,
@@ -1346,6 +1418,10 @@ impl Pager {
             Source::History => browse("FEhistory"),
             Source::Playlists => browse("FEplaylist_aggregation"),
             Source::Downloads => bail!("downloads are local"),
+            Source::Music => match music_chip(&client) {
+                Some(t) => ("browse", json!({ "continuation": t })),
+                None => browse(MUSIC_CHANNEL),
+            },
             Source::Topic { token, .. } => ("browse", json!({ "continuation": token })),
             Source::Playlist { id, .. } => browse(&format!("VL{id}")),
             // "EgIQAQ==": videos only (no channels, shorts shelves, …)
@@ -1635,6 +1711,12 @@ fn lockup(x: &Value) -> Option<Video> {
                 .is_some_and(|s| s.contains("LIVE"))
         });
         v.is_live = v.duration.is_none() && (styled_live || texts.iter().any(|t| is_live_badge(t)));
+        // songs: YouTube draws a music note on the duration badge
+        v.is_music = badges.iter().any(|b| {
+            b.pointer("/icon/sources/0/clientResource/imageName")
+                .and_then(Value::as_str)
+                == Some("MUSIC")
+        });
     }
     Some(v)
 }
@@ -1693,6 +1775,16 @@ fn renderer(x: &Value) -> Option<Video> {
                 let s = o.to_string();
                 s.contains("\"LIVE\"") || s.contains("\"UPCOMING\"")
             }));
+    v.is_music = x
+        .get("thumbnailOverlays")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|o| {
+            o.pointer("/thumbnailOverlayTimeStatusRenderer/icon/iconType")
+                .and_then(Value::as_str)
+                == Some("MUSIC")
+        });
     v.description = x
         .pointer("/detailedMetadataSnippets/0/snippetText")
         .or_else(|| x.get("descriptionSnippet"))
@@ -1850,5 +1942,46 @@ mod explore {
                 Err(e) => eprintln!("{name}: {e:#}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod music_live {
+    /// The Music tab, song badges and YouTube Music's classification (reads
+    /// only). `cargo test -- --ignored music_live --nocapture`
+    #[test]
+    #[ignore]
+    fn music_tab_and_songs() {
+        let cookies = crate::yt::config_dir().unwrap().join("cookies.txt");
+        let mut p = super::Pager::new(&cookies, &crate::yt::Source::Music).unwrap();
+        let a = p.next_page().unwrap().unwrap_or_default();
+        let songs = a.iter().filter(|v| v.is_music).count();
+        eprintln!(
+            "Music tab: {} items, {songs} songs; first: {:?}",
+            a.len(),
+            a.iter()
+                .take(4)
+                .map(|v| (v.title(), v.is_music))
+                .collect::<Vec<_>>()
+        );
+        assert!(!a.is_empty());
+        let r = super::related(&cookies, "dQw4w9WgXcQ").unwrap();
+        eprintln!(
+            "related to a song: {} items, {} songs",
+            r.len(),
+            r.iter().filter(|v| v.is_music).count()
+        );
+        let mut c = super::Pager {
+            first: Some(serde_json::json!({ "browseId": super::MUSIC_CHANNEL })),
+            ..super::Pager::new(&cookies, &crate::yt::Source::Feed).unwrap()
+        };
+        let f = c.next_page().unwrap().unwrap_or_default();
+        eprintln!(
+            "Music channel: {} items, {} songs",
+            f.len(),
+            f.iter().filter(|v| v.is_music).count()
+        );
+        assert!(super::is_song("dQw4w9WgXcQ").unwrap());
+        assert!(!super::is_song("aqz-KE-bpKQ").unwrap());
     }
 }
