@@ -4,7 +4,7 @@
 # (llvm-rc, for the exe icon), bsdtar (7z), gh, makensis (brew install makensis).
 # (makensis crashes on macOS without a UTF-8 locale, hence LC_ALL.)
 # Output:
-#   dist/ytmini-setup.exe   per-user installer (installer/ytmini.nsi)
+#   dist/ytmini-<version>-setup.exe   per-user installer (installer/ytmini.nsi)
 #   dist/ytmini-win64.zip   the same files, portable
 # Both hold ytmini.exe (static C runtime), libmpv-2.dll (shinchiro's
 # mpv-winbuild, baseline x86-64) and the license files.
@@ -26,17 +26,18 @@ if [ ! -f $cache/libmpv-2.dll ]; then
     rm $cache/mpv.7z
 fi
 
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+setup=dist/ytmini-$version-setup.exe
 stage=target/win-pkg/ytmini
 rm -rf target/win-pkg && mkdir -p $stage dist
 cp target/$target/release/ytmini.exe $cache/libmpv-2.dll LICENSE.md NOTICE.md \
     licenses/GPL-3.0.txt $stage/
-rm -f dist/ytmini-win64.zip dist/ytmini-setup.exe
+rm -f dist/ytmini-win64.zip dist/ytmini-*setup.exe
 (cd target/win-pkg && zip -qr -9 ../../dist/ytmini-win64.zip ytmini)
 
-version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 build=$(git rev-parse --short HEAD)$(git diff --quiet HEAD -- || echo +)
 LC_ALL=en_US.UTF-8 makensis -V2 -INPUTCHARSET UTF8 \
     -DVERSION="$version" -DBUILD="$build" -DROOT="$PWD" \
-    -DSTAGE="$PWD/$stage" -DOUTFILE="$PWD/dist/ytmini-setup.exe" \
+    -DSTAGE="$PWD/$stage" -DOUTFILE="$PWD/$setup" \
     installer/ytmini.nsi
-ls -la dist/ytmini-win64.zip dist/ytmini-setup.exe
+ls -la dist/ytmini-win64.zip "$setup"
