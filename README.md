@@ -34,9 +34,9 @@ re-scans those files each time — 13 s per call, measured, vs 0.26 s unpacked.
 Building the bundle needs `brew install mpv` on the build machine; running it
 doesn't need Homebrew at all.
 
-**Licensing:** ytmini's code is MIT ([LICENSE](LICENSE)). The built
+**Licensing:** ytmini's code is MIT ([LICENSE.md](LICENSE.md)). The built
 `ytmini.app` also contains GPL-3.0 FFmpeg and GPL/LGPL mpv, so the bundle as a
-whole is distributed under GPLv3 — see [NOTICE](NOTICE). `bundle.sh` puts every
+whole is distributed under GPLv3 — see [NOTICE.md](NOTICE.md). `bundle.sh` puts every
 bundled package's license files and exact versions in
 `Contents/Resources/licenses/`.
 
@@ -80,5 +80,5 @@ cargo test -- --ignored --test-threads 1           # live: hits YouTube with you
 
 ## License
 
-MIT for ytmini's own code — see [LICENSE](LICENSE). Bundled third-party
-components and what that means for `ytmini.app`: [NOTICE](NOTICE).
+MIT for ytmini's own code — see [LICENSE.md](LICENSE.md). Bundled third-party
+components and what that means for `ytmini.app`: [NOTICE.md](NOTICE.md).

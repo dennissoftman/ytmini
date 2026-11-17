@@ -73,7 +73,7 @@ PLIST
 python3 scripts/bundle_dylibs.py "$APP" --prefix "$(brew --prefix)"
 
 # Our own license + notice, and the full GPLv3 text (the bundle as a whole is GPLv3).
-cp LICENSE NOTICE "$APP/Contents/Resources/licenses/"
+cp LICENSE.md NOTICE.md "$APP/Contents/Resources/licenses/"
 cp licenses/GPL-3.0.txt "$APP/Contents/Resources/licenses/"
 
 # Ad-hoc signature so Gatekeeper/TCC treat it as one consistent app.
