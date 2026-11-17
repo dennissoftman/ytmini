@@ -1067,6 +1067,9 @@ impl Embedded {
         } else {
             "auto"
         };
+        if std::env::var_os("YTMINI_DEBUG").is_some() {
+            eprintln!("player: video {vid}");
+        }
         let _ = self.mpv().set_str("vid", vid);
     }
 

@@ -418,7 +418,8 @@ pub struct App {
     net_checked: std::time::Instant,
     /// dev (`YTMINI_PLAY_SEQ=id,id,…`): videos to play one after another,
     /// each once the current one has played 4 s (start-up timing). Steps
-    /// `back` (as if Back were clicked) and `shot:<png path>` too.
+    /// `back` (as if Back were clicked), `tray`, `minimize`, `end` (seek to the last
+    /// 2 s) and `shot:<png path>` too.
     play_seq: Vec<String>,
     /// Native lookup failures already told about (see `native::failures`).
     native_seen: u32,
@@ -1606,8 +1607,8 @@ impl App {
         ) {
             Ok(mut p) => {
                 self.status = None;
-                if self.mini {
-                    p.set_background(true); // the bar plays on: audio only
+                if self.mini || self.hidden {
+                    p.set_background(true); // the bar / the tray plays on: audio only
                 }
                 if video.is_music {
                     self.songs.insert(video.id.clone());
@@ -5473,6 +5474,23 @@ impl eframe::App for App {
         self.poll_links(ctx);
         self.watch_session(ctx);
         self.sync_now_playing();
+        // Minimized or in the tray, eframe runs no ui pass, but autoplay and
+        // starting the next video happen there (the player needs GL): ask
+        // for passes while something is due.
+        let due = self.pending_play.is_some()
+            || self.resolve_wait.is_some()
+            || !self.play_seq.is_empty()
+            || self.embedded.as_ref().is_some_and(|p| {
+                p.eof && p.started && self.settings.autoplay && !self.autoplay_cancelled
+            });
+        if due
+            && ctx.input(|i| {
+                !i.viewport().visible().unwrap_or(true) || i.viewport().minimized == Some(true)
+            })
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
         crate::awake::set(match &self.embedded {
             Some(p) if p.started && !p.paused && !p.eof => {
                 if !self.hidden && !self.mini && p.has_video() {
@@ -5602,6 +5620,14 @@ impl eframe::App for App {
                     self.collapse_player(&ctx);
                 } else {
                     self.close_embedded(&ctx, frame);
+                }
+            } else if step == "tray" {
+                self.hide_to_tray(&ctx);
+            } else if step == "minimize" {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            } else if step == "end" {
+                if let Some(p) = self.embedded.as_mut().filter(|p| p.duration > 5.0) {
+                    p.seek_absolute(p.duration - 2.0, true);
                 }
             } else if let Some(path) = step.strip_prefix("shot:") {
                 let path = std::path::PathBuf::from(path);
