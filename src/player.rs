@@ -267,13 +267,27 @@ pub fn shortcuts() -> [(&'static str, &'static str); 15] {
         ("↑ / ↓", t("Volume")),
         ("M", t("Mute")),
         ("F", t("Fullscreen")),
-        ("⇧N / ⇧P", t("Next / previous video")),
+        (
+            if cfg!(target_os = "macos") {
+                "⇧N / ⇧P"
+            } else {
+                "Shift+N / Shift+P"
+            },
+            t("Next / previous video"),
+        ),
         ("< / >", t("Slower / faster")),
         (", / .", t("Frame back / forward (paused)")),
         ("0 – 9", t("Jump to 0 % – 90 %")),
         ("Home / End", t("Start / end")),
         ("C", t("Next chapter")),
-        ("⇧C", t("Previous chapter")),
+        (
+            if cfg!(target_os = "macos") {
+                "⇧C"
+            } else {
+                "Shift+C"
+            },
+            t("Previous chapter"),
+        ),
         ("?", t("These shortcuts")),
         ("Esc", t("Exit fullscreen / back")),
     ]
@@ -1643,7 +1657,12 @@ impl Embedded {
                         } else {
                             crate::i18n::t("Previous")
                         },
-                        if fwd { "⇧N" } else { "⇧P" }
+                        match (fwd, cfg!(target_os = "macos")) {
+                            (true, true) => "⇧N",
+                            (false, true) => "⇧P",
+                            (true, false) => "Shift+N",
+                            (false, false) => "Shift+P",
+                        }
                     ));
                 if resp.clicked() {
                     if fwd {

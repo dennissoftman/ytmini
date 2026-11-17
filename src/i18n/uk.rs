@@ -297,4 +297,12 @@ pub const T: &[(&str, &str)] = &[
     ("Description", "Опис"),
     ("Show less", "Згорнути"),
     ("Show more", "Ще"),
+    ("Same as Windows ({})", "Як у Windows ({})"),
+    ("Closing the window keeps ytmini in the system tray", "Після закриття вікна ytmini лишається в області сповіщень"),
+    ("A playing video continues as audio only. Quit from the tray icon.", "Відео, що відтворюється, продовжить грати як аудіо. Щоб вийти, скористайтеся значком в області сповіщень."),
+    ("Refresh (Ctrl+R)", "Оновити (Ctrl+R)"),
+    ("Show in Explorer", "Показати у Провіднику"),
+    ("Auto never exceeds what this screen can show ({}p). On battery and in Battery Saver it plays 1080p30. Sharp VP9 is preferred: most current PCs decode it in hardware, so it costs no more battery than blurry H.264.", "Авто ніколи не перевищує те, що може показати цей екран ({}p). Від батареї та в режимі економії заряду відтворює 1080p30. Перевага за чітким VP9: більшість сучасних ПК декодують його апаратно, тож він витрачає не більше батареї, ніж розмитий H.264."),
+    ("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (high-DPI) screens.", "Стандартна ≈ 14 КБ, висока ≈ 60 КБ кожна на диску. Авто вибирає високу на чітких екранах (високий DPI)."),
+    ("Preparing {}…", "Підготовка {}…"),
 ];

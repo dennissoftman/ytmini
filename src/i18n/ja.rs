@@ -297,4 +297,12 @@ pub const T: &[(&str, &str)] = &[
     ("Description", "説明"),
     ("Show less", "一部を表示"),
     ("Show more", "もっと見る"),
+    ("Same as Windows ({})", "Windows と同じ ({})"),
+    ("Closing the window keeps ytmini in the system tray", "ウインドウを閉じても ytmini を通知領域に残す"),
+    ("A playing video continues as audio only. Quit from the tray icon.", "再生中のビデオはオーディオのみで再生を続けます。通知領域のアイコンから終了します。"),
+    ("Refresh (Ctrl+R)", "更新 (Ctrl+R)"),
+    ("Show in Explorer", "エクスプローラーで表示"),
+    ("Auto never exceeds what this screen can show ({}p). On battery and in Battery Saver it plays 1080p30. Sharp VP9 is preferred: most current PCs decode it in hardware, so it costs no more battery than blurry H.264.", "自動では、この画面で表示できる解像度 ({}p) を超えません。バッテリー駆動中とバッテリー節約機能がオンのときは 1080p30 で再生します。鮮明な VP9 を優先します。最近の PC の多くはハードウェアでデコードするため、ぼやけた H.264 よりバッテリーを消費しません。"),
+    ("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (high-DPI) screens.", "標準 ≈ 14 KB、高画質 ≈ 60 KB(1 枚あたり、ディスク上)。自動では高精細 (高 DPI) 画面で高画質を選びます。"),
+    ("Preparing {}…", "{} を準備中…"),
 ];

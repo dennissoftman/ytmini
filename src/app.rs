@@ -1068,10 +1068,16 @@ impl App {
                         deps::Progress::Verifying(dep) => {
                             tf("Verifying {} checksum…", &[&dep.name()])
                         }
-                        deps::Progress::Preparing(dep) => tf(
-                            "Preparing {} (macOS checks new apps once — about 15 s)…",
-                            &[&dep.name()],
-                        ),
+                        deps::Progress::Preparing(dep) => {
+                            if cfg!(target_os = "macos") {
+                                tf(
+                                    "Preparing {} (macOS checks new apps once — about 15 s)…",
+                                    &[&dep.name()],
+                                )
+                            } else {
+                                tf("Preparing {}…", &[&dep.name()])
+                            }
+                        }
                     });
                 }
                 Msg::DepsDone(r) => {
@@ -2059,7 +2065,15 @@ impl App {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let b = egui::Button::new(RichText::new("↻").size(18.0).color(text_dim()))
                             .frame(false);
-                        if ui.add(b).on_hover_text(t("Refresh (⌘R)")).clicked() {
+                        if ui
+                            .add(b)
+                            .on_hover_text(if cfg!(target_os = "macos") {
+                                t("Refresh (⌘R)")
+                            } else {
+                                t("Refresh (Ctrl+R)")
+                            })
+                            .clicked()
+                        {
                             refresh = true;
                         }
                         if let Some(link) = self.clip_link.clone() {
@@ -4258,10 +4272,17 @@ impl App {
                             ui.checkbox(&mut s.prepare_on_hover, t("Start videos faster (prepare the one you're pointing at)"));
                                 ui.checkbox(&mut s.autoplay, t("Autoplay the next video in the queue"));
                             ui.label(
-                                RichText::new(tf(
-                                    "Auto never exceeds what this screen can show ({}p). On battery and in Low Power Mode it plays 1080p30. Sharp VP9 is preferred everywhere: this Mac decodes it in hardware, so it costs no more battery than blurry H.264.",
-                                    &[&self.screen_cap],
-                                ))
+                                RichText::new(if cfg!(target_os = "macos") {
+                                    tf(
+                                        "Auto never exceeds what this screen can show ({}p). On battery and in Low Power Mode it plays 1080p30. Sharp VP9 is preferred everywhere: this Mac decodes it in hardware, so it costs no more battery than blurry H.264.",
+                                        &[&self.screen_cap],
+                                    )
+                                } else {
+                                    tf(
+                                        "Auto never exceeds what this screen can show ({}p). On battery and in Battery Saver it plays 1080p30. Sharp VP9 is preferred: most current PCs decode it in hardware, so it costs no more battery than blurry H.264.",
+                                        &[&self.screen_cap],
+                                    )
+                                })
                                 .small()
                                 .color(text_dim()),
                             );
@@ -4354,20 +4375,25 @@ impl App {
                                 ui.selectable_value(&mut s.thumbs, ThumbQuality::Standard, t("Standard · 320p"));
                                 ui.selectable_value(&mut s.thumbs, ThumbQuality::High, t("High · 640p"));
                             });
-                            ui.label(RichText::new(t("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (Retina) screens.")).small().color(text_dim()));
+                            ui.label(RichText::new(if cfg!(target_os = "macos") { t("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (Retina) screens.") } else { t("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (high-DPI) screens.") }).small().color(text_dim()));
 
                             ui.add_space(10.0);
                             if self.tray.is_some() {
                                 section(ui, t("Window"));
-                                ui.checkbox(&mut s.close_to_tray, t("Closing the window keeps ytmini in the menu bar"));
-                                ui.label(RichText::new(t("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.")).small().color(text_dim()));
+                                if cfg!(target_os = "macos") {
+                                    ui.checkbox(&mut s.close_to_tray, t("Closing the window keeps ytmini in the menu bar"));
+                                    ui.label(RichText::new(t("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.")).small().color(text_dim()));
+                                } else {
+                                    ui.checkbox(&mut s.close_to_tray, t("Closing the window keeps ytmini in the system tray"));
+                                    ui.label(RichText::new(t("A playing video continues as audio only. Quit from the tray icon.")).small().color(text_dim()));
+                                }
                                 ui.add_space(10.0);
                             }
                         }
                         SettingsTab::Language => {
                             section(ui, t("Language"));
                             let sys = crate::i18n::system();
-                            let auto = tf("Same as macOS ({})", &[&sys.native_name()]);
+                            let auto = if cfg!(windows) { tf("Same as Windows ({})", &[&sys.native_name()]) } else { tf("Same as macOS ({})", &[&sys.native_name()]) };
                             let shown = s.language.map_or(auto.clone(), |l| l.native_name().to_string());
                             egui::ComboBox::from_id_salt("lang").selected_text(shown).width(240.0).show_ui(ui, |ui| {
                                 ui.selectable_value(&mut s.language, None, auto);
@@ -4379,7 +4405,7 @@ impl App {
                             ui.add_space(10.0);
                             section(ui, t("Region"));
                             let sysr = crate::i18n::system_region();
-                            let auto = tf("Same as macOS ({})", &[&crate::i18n::regions::name(&sysr)]);
+                            let auto = if cfg!(windows) { tf("Same as Windows ({})", &[&crate::i18n::regions::name(&sysr)]) } else { tf("Same as macOS ({})", &[&crate::i18n::regions::name(&sysr)]) };
                             let shown = s.region.as_deref().map_or(auto.clone(), |r| format!("{} ({r})", crate::i18n::regions::name(r)));
                             egui::ComboBox::from_id_salt("region").selected_text(shown).width(240.0).height(360.0).show_ui(ui, |ui| {
                                 ui.selectable_value(&mut s.region, None, auto);
@@ -4411,7 +4437,7 @@ impl App {
                                     ))
                                     .color(text_dim()),
                                 );
-                                if ui.button(t("Show in Finder")).clicked() {
+                                if ui.button(if cfg!(windows) { t("Show in Explorer") } else { t("Show in Finder") }).clicked() {
                                     if let Ok(d) = crate::downloads::dir() {
                                         let _ = open_url(&d.display().to_string());
                                     }

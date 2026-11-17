@@ -297,4 +297,12 @@ pub const T: &[(&str, &str)] = &[
     ("Description", "Description"),
     ("Show less", "Moins"),
     ("Show more", "Plus"),
+    ("Same as Windows ({})", "Comme Windows ({})"),
+    ("Closing the window keeps ytmini in the system tray", "La fermeture de la fenêtre laisse ytmini dans la zone de notification"),
+    ("A playing video continues as audio only. Quit from the tray icon.", "Une vidéo en cours de lecture continue en audio seul. Quittez depuis l’icône de la zone de notification."),
+    ("Refresh (Ctrl+R)", "Actualiser (Ctrl+R)"),
+    ("Show in Explorer", "Afficher dans l’Explorateur"),
+    ("Auto never exceeds what this screen can show ({}p). On battery and in Battery Saver it plays 1080p30. Sharp VP9 is preferred: most current PCs decode it in hardware, so it costs no more battery than blurry H.264.", "Auto ne dépasse jamais ce que cet écran peut afficher ({}p). Sur batterie et en mode Économiseur de batterie, il lit en 1080p30. Le VP9, plus net, est préféré : la plupart des PC récents le décodent matériellement, il ne coûte donc pas plus de batterie que le H.264 flou."),
+    ("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (high-DPI) screens.", "Standard ≈ 14 Ko, haute ≈ 60 Ko chacune sur le disque. Auto choisit haute sur les écrans nets (haute densité)."),
+    ("Preparing {}…", "Préparation de {}…"),
 ];
