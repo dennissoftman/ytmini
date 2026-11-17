@@ -196,9 +196,12 @@ fn note_premium(v: &Value) {
     let Some(logo) = v.pointer("/topbar/desktopTopbarRenderer/logo/topbarLogoRenderer") else {
         return;
     };
-    let yes = logo.pointer("/iconImage/iconType").and_then(Value::as_str)
-        == Some("YOUTUBE_PREMIUM_LOGO");
-    PREMIUM.store(if yes { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+    let yes =
+        logo.pointer("/iconImage/iconType").and_then(Value::as_str) == Some("YOUTUBE_PREMIUM_LOGO");
+    PREMIUM.store(
+        if yes { 2 } else { 1 },
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// `Some(true)` once a reply showed the Premium logo; `None` until known.

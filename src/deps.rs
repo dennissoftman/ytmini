@@ -140,13 +140,29 @@ fn expected_sha(agent: &ureq::Agent, asset: &Asset) -> Result<String> {
         .body_mut()
         .read_to_string()
         .context("reading checksums")?;
+    parse_sha(&text, &asset.sums_name)
+        .with_context(|| format!("{} not listed in checksums", asset.sums_name))
+}
+
+/// The hash for `name` in a sums file: `<hash>  <name>` lines, or the
+/// PowerShell `Hash : <HASH>` form deno uses for its Windows builds.
+fn parse_sha(text: &str, name: &str) -> Option<String> {
+    let is_sha = |h: &str| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit());
     text.lines()
         .find_map(|l| {
             let mut it = l.split_whitespace();
-            let (hash, name) = (it.next()?, it.next()?);
-            (name.trim_start_matches('*') == asset.sums_name).then(|| hash.to_ascii_lowercase())
+            let (hash, file) = (it.next()?, it.next()?);
+            (file.trim_start_matches('*') == name).then(|| hash.to_ascii_lowercase())
         })
-        .with_context(|| format!("{} not listed in checksums", asset.sums_name))
+        // deno's Windows builds publish PowerShell's Get-FileHash output for
+        // that one file instead: "Hash : CBA84B…"
+        .or_else(|| {
+            text.lines().find_map(|l| {
+                let (key, val) = l.split_once(':')?;
+                (key.trim() == "Hash" && is_sha(val.trim()))
+                    .then(|| val.trim().to_ascii_lowercase())
+            })
+        })
 }
 
 /// Is a newer build published than the one installed? (Compares checksums.)
@@ -370,5 +386,25 @@ mod live_install {
         let v = version(&exe).unwrap();
         eprintln!("installed {v}");
         assert!(v.starts_with("deno "), "{v}");
+    }
+}
+
+#[cfg(test)]
+mod sums_tests {
+    use super::parse_sha;
+
+    #[test]
+    fn reads_both_sums_formats() {
+        let unix = "9f0bf660393da2eaff044cdc7444cb08c73f235849b61d224d825a194ce7c98e  deno-aarch64-apple-darwin.zip\n";
+        assert_eq!(
+            parse_sha(unix, "deno-aarch64-apple-darwin.zip").as_deref(),
+            Some("9f0bf660393da2eaff044cdc7444cb08c73f235849b61d224d825a194ce7c98e")
+        );
+        let ps = "\r\nAlgorithm : SHA256\r\nHash      : CBA84B26E0DF5AE7F74FC66B86A95B866872A86292EBD84FA1E959927EDD93BF\r\nPath      : C:\\a\\deno\\deno-x86_64-pc-windows-msvc.zip\r\n\r\n";
+        assert_eq!(
+            parse_sha(ps, "deno-x86_64-pc-windows-msvc.zip").as_deref(),
+            Some("cba84b26e0df5ae7f74fc66b86a95b866872a86292ebd84fa1e959927edd93bf")
+        );
+        assert_eq!(parse_sha("nothing here", "x.zip"), None);
     }
 }

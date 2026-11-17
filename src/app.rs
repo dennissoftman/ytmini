@@ -5239,9 +5239,17 @@ impl eframe::App for App {
         if !self.play_seq.is_empty()
             && self.tools.is_some()
             && ctx.input(|i| i.time) > 6.0
-            && self.embedded.as_ref().is_none_or(|p| p.started && p.pos > 4.0)
+            && self
+                .embedded
+                .as_ref()
+                .is_none_or(|p| p.started && p.pos > 4.0)
         {
-            if let Some(v) = self.play_seq.pop().as_deref().and_then(Video::from_url_or_id) {
+            if let Some(v) = self
+                .play_seq
+                .pop()
+                .as_deref()
+                .and_then(Video::from_url_or_id)
+            {
                 if std::env::var_os("YTMINI_DEBUG").is_some() {
                     eprintln!("play_seq: {}", v.id);
                 }

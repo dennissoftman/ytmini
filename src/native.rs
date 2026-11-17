@@ -92,7 +92,10 @@ fn agent() -> ureq::Agent {
 fn get_text(agent: &ureq::Agent, url: &str) -> Result<String> {
     let mut r = agent.get(url).call().context("contacting YouTube")?;
     anyhow::ensure!(r.status() == 200, "HTTP {} for {url}", r.status());
-    Ok(r.body_mut().with_config().limit(16 << 20).read_to_string()?)
+    Ok(r.body_mut()
+        .with_config()
+        .limit(16 << 20)
+        .read_to_string()?)
 }
 
 /// The current player script (id, code, signature timestamp). Public and
@@ -183,10 +186,7 @@ static SOLVER: Mutex<Option<Solver>> = Mutex::new(None);
 
 /// yt-dlp's bundled challenge solver scripts (lib, core).
 fn ejs_dir(tools: &Tools) -> Option<PathBuf> {
-    let dir = tools
-        .ytdlp
-        .parent()?
-        .join("_internal/yt_dlp_ejs/yt/solver");
+    let dir = tools.ytdlp.parent()?.join("_internal/yt_dlp_ejs/yt/solver");
     (dir.join("lib.min.js").is_file() && dir.join("core.min.js").is_file()).then_some(dir)
 }
 
@@ -195,8 +195,7 @@ fn solver_script(tools: &Tools) -> Result<PathBuf> {
     let dir = ejs_dir(tools).context("yt-dlp's challenge solver isn't available")?;
     let lib = std::fs::read_to_string(dir.join("lib.min.js"))?;
     let core = std::fs::read_to_string(dir.join("core.min.js"))?;
-    let script =
-        format!("{lib}\nObject.assign(globalThis, lib);\n{core}\n{SOLVER_HOST}");
+    let script = format!("{lib}\nObject.assign(globalThis, lib);\n{core}\n{SOLVER_HOST}");
     let file = yt::config_dir()?.join("plugins").join("ytmini_solver.js");
     if std::fs::read_to_string(&file).ok().as_deref() != Some(script.as_str()) {
         std::fs::create_dir_all(file.parent().context("plugins dir")?)?;
@@ -300,7 +299,9 @@ fn solve(
     if out.get("type").and_then(Value::as_str) != Some("result") {
         bail!(
             "challenge solver: {}",
-            out.get("error").and_then(Value::as_str).unwrap_or("no result")
+            out.get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("no result")
         );
     }
     let responses = out
@@ -316,7 +317,10 @@ fn solve(
         if r.get("type").and_then(Value::as_str) != Some("result") {
             bail!("challenge solver couldn't solve {kind}");
         }
-        let data = r.get("data").and_then(Value::as_object).context("solver data")?;
+        let data = r
+            .get("data")
+            .and_then(Value::as_object)
+            .context("solver data")?;
         let m: HashMap<String, String> = data
             .iter()
             .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
@@ -376,7 +380,10 @@ fn parse_fmt(f: &Value) -> Option<Fmt> {
             let sc = f.get("signatureCipher").and_then(Value::as_str)?;
             let q = parse_query(sc);
             let get = |k: &str| q.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-            (get("url")?, Some((get("s")?, get("sp").unwrap_or("signature".into()))))
+            (
+                get("url")?,
+                Some((get("s")?, get("sp").unwrap_or("signature".into()))),
+            )
         }
     };
     let num = |k: &str| f.get(k).and_then(Value::as_u64).unwrap_or(0);
@@ -396,7 +403,9 @@ fn parse_fmt(f: &Value) -> Option<Fmt> {
         },
         channels: num("audioChannels") as u32,
         default_track: track.is_none_or(|t| {
-            t.get("audioIsDefault").and_then(Value::as_bool).unwrap_or(false)
+            t.get("audioIsDefault")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
         }),
         altered: f.get("isDrc").and_then(Value::as_bool).unwrap_or(false)
             || f.get("xtags").is_some(),
@@ -512,7 +521,10 @@ fn parse_query(q: &str) -> Vec<(String, String)> {
 /// A query parameter of `url`, decoded.
 fn query_param(url: &str, key: &str) -> Option<String> {
     let q = url.split_once('?')?.1;
-    parse_query(q).into_iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    parse_query(q)
+        .into_iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v)
 }
 
 /// `url` with `key` set to `value` (replaced, or appended).
@@ -624,8 +636,8 @@ pub fn failures() -> (u32, Option<String>) {
 
 /// (failures logged so far, the latest line's reason), from the log file.
 pub fn logged_failures() -> (usize, Option<String>) {
-    let Some(text) = crate::crashlog::dir()
-        .and_then(|d| std::fs::read_to_string(d.join(LOG_NAME)).ok())
+    let Some(text) =
+        crate::crashlog::dir().and_then(|d| std::fs::read_to_string(d.join(LOG_NAME)).ok())
     else {
         return (0, None);
     };
@@ -740,7 +752,9 @@ fn lookup(
         bail!("{} says {status}", spec.name);
     }
     if r.pointer("/videoDetails/isLive").and_then(Value::as_bool) == Some(true)
-        || r.pointer("/videoDetails/isPostLiveDvr").and_then(Value::as_bool) == Some(true)
+        || r.pointer("/videoDetails/isPostLiveDvr")
+            .and_then(Value::as_bool)
+            == Some(true)
     {
         return Err(Skip("live stream").into());
     }
@@ -849,16 +863,24 @@ mod tests {
     #[test]
     fn finds_player_id() {
         assert_eq!(
-            player_id(r#"var x="https:\/\/www.youtube.com\/s\/player\/ad8d59ae\/www-widgetapi.vflset";"#),
+            player_id(
+                r#"var x="https:\/\/www.youtube.com\/s\/player\/ad8d59ae\/www-widgetapi.vflset";"#
+            ),
             Some("ad8d59ae".into())
         );
-        assert_eq!(player_id("/s/player/0123abcd/player_ias.vflset"), Some("0123abcd".into()));
+        assert_eq!(
+            player_id("/s/player/0123abcd/player_ias.vflset"),
+            Some("0123abcd".into())
+        );
         assert_eq!(player_id("player/xyz"), None);
     }
 
     #[test]
     fn finds_sts() {
-        assert_eq!(signature_timestamp("a,signatureTimestamp:20768,b"), Some(20768));
+        assert_eq!(
+            signature_timestamp("a,signatureTimestamp:20768,b"),
+            Some(20768)
+        );
         assert_eq!(signature_timestamp("{sts: 20123}"), Some(20123));
         assert_eq!(signature_timestamp("nothing"), None);
     }
@@ -930,11 +952,18 @@ mod tests {
         // Big Buck Bunny on battery: yt-dlp picked 247 (vp9 720p30) + 258
         let (v, au) = pick(&fs, 1080, true).unwrap();
         assert_eq!((v.codec.as_str(), v.height, v.fps), ("vp9", 720, 30));
-        assert_eq!((au.codec.as_str(), au.channels, au.bitrate), ("mp4a.40.2", 6, 390_000));
+        assert_eq!(
+            (au.codec.as_str(), au.channels, au.bitrate),
+            ("mp4a.40.2", 6, 390_000)
+        );
         let (v, _) = pick(&fs, 1080, false).unwrap();
         assert_eq!((v.height, v.fps), (1080, 60));
         // no VP9: anything but AV1
-        let fs2: Vec<Fmt> = fs.iter().filter(|f| !f.codec.starts_with("vp")).cloned().collect();
+        let fs2: Vec<Fmt> = fs
+            .iter()
+            .filter(|f| !f.codec.starts_with("vp"))
+            .cloned()
+            .collect();
         let (v, _) = pick(&fs2, 1080, true).unwrap();
         assert!(v.codec.starts_with("avc1"));
     }

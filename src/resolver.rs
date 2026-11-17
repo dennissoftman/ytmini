@@ -215,7 +215,10 @@ fn resolve_ytdlp(tools: &Tools, cookies: &Path, video: &Video, format: &str) -> 
     let t = Instant::now();
     let Some((helper, generation)) = take(cookies) else {
         if debug() {
-            eprintln!("resolver: all helpers busy, one-off yt-dlp for {}", video.id);
+            eprintln!(
+                "resolver: all helpers busy, one-off yt-dlp for {}",
+                video.id
+            );
         }
         return yt::resolve(tools, cookies, video, format);
     };
