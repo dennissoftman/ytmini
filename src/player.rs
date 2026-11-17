@@ -1070,6 +1070,11 @@ impl Embedded {
         let _ = self.mpv().set_str("vid", vid);
     }
 
+    /// Showing moving pictures (not an audio-only format)?
+    pub fn has_video(&self) -> bool {
+        self.format != "ba/b"
+    }
+
     /// Current video height (for the smoke test).
     pub fn height(&self) -> Option<f64> {
         self.mpv.as_ref().and_then(|m| m.get_f64("height"))

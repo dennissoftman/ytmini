@@ -5159,6 +5159,16 @@ impl eframe::App for App {
         self.poll_links(ctx);
         self.watch_session(ctx);
         self.sync_now_playing();
+        crate::awake::set(match &self.embedded {
+            Some(p) if p.started && !p.paused && !p.eof => {
+                if !self.hidden && p.has_video() {
+                    crate::awake::Need::Display
+                } else {
+                    crate::awake::Need::System
+                }
+            }
+            _ => crate::awake::Need::Nothing,
+        });
         self.watch_network();
         // our own stream lookup failed and yt-dlp stepped in: say so once a session
         let (fails, last) = crate::native::failures();
