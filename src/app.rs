@@ -4351,53 +4351,49 @@ impl App {
             }
         }
 
-        egui::Panel::bottom("music_bar")
-            .resizable(false)
-            .exact_size(H)
-            .frame(egui::Frame::new().fill(sidebar()))
-            .show_separator_line(false)
-            .show(ui, |ui| {
-                let Some(p) = &mut self.embedded else { return };
-                let full = ui.max_rect();
+        // a floating card, centred under the pages (right of the sidebar)
+        let win = ctx.content_rect();
+        let narrow = win.width() < 760.0;
+        let side = if self.settings.sidebar_collapsed || narrow {
+            60.0
+        } else {
+            208.0
+        };
+        let lane = egui::Rect::from_min_max(egui::pos2(win.left() + side, win.top()), win.max);
+        let w = (lane.width() - 32.0).min(620.0);
+        let card = egui::Rect::from_center_size(
+            egui::pos2(lane.center().x, lane.bottom() - 16.0 - H / 2.0),
+            Vec2::new(w, H),
+        );
+        let Some(p) = &mut self.embedded else { return };
+        egui::Area::new(egui::Id::unique("music_card"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(card.min)
+            .show(&ctx, |ui| {
+                let (card, _) = ui.allocate_exact_size(card.size(), Sense::hover());
                 let painter = ui.painter().clone();
-
-                // seek line along the top edge (click or drag to seek)
-                let line = egui::Rect::from_min_size(full.min, Vec2::new(full.width(), 6.0));
-                let r = ui.interact(
-                    line,
-                    ui.scope_id().with("music_seek"),
-                    Sense::click_and_drag(),
+                painter.add(
+                    egui::epaint::Shadow {
+                        offset: [0, 6],
+                        blur: 24,
+                        spread: 0,
+                        color: Color32::from_black_alpha(90),
+                    }
+                    .as_shape(card, 16),
                 );
-                if p.duration > 0.0 {
-                    if let Some(pos) = r
-                        .interact_pointer_pos()
-                        .filter(|_| r.clicked() || r.dragged())
-                    {
-                        let f = ((pos.x - line.left()) / line.width()).clamp(0.0, 1.0) as f64;
-                        p.seek_absolute(f * p.duration, true);
-                    }
-                    let thick = if r.hovered() || r.dragged() { 4.0 } else { 2.0 };
-                    let track = egui::Rect::from_min_size(full.min, Vec2::new(full.width(), thick));
-                    painter.rect_filled(track, 0, Color32::from_gray(128).gamma_multiply(0.35));
-                    let f = (p.pos / p.duration).clamp(0.0, 1.0) as f32;
-                    painter.rect_filled(
-                        egui::Rect::from_min_size(track.min, Vec2::new(track.width() * f, thick)),
-                        0,
-                        accent(),
-                    );
-                    if r.hovered() {
-                        r.on_hover_cursor(egui::CursorIcon::PointingHand);
-                    }
-                }
-
-                let row = full
-                    .shrink2(Vec2::new(16.0, 0.0))
-                    .translate(Vec2::new(0.0, 2.0));
-                let cy = row.center().y;
+                painter.rect(
+                    card,
+                    16,
+                    panel(),
+                    Stroke::new(1.0, card_hover()),
+                    StrokeKind::Inside,
+                );
+                let cy = card.center().y - 2.0;
                 let btn = |ui: &mut egui::Ui, rect: egui::Rect, id: &str, enabled: bool| {
                     let r = ui.interact(rect, ui.scope_id().with(id), Sense::click());
                     if enabled && r.hovered() {
-                        ui.painter().rect_filled(rect, 8, card_hover());
+                        ui.painter()
+                            .circle_filled(rect.center(), rect.width() / 2.0, card_hover());
                     }
                     if enabled {
                         r.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -4406,67 +4402,47 @@ impl App {
                     }
                 };
 
-                // left: thumbnail, ♫ title, channel (click: back to the player)
+                // right to left: ✕ stop, ⌃ open, ⏭ ⏯ ⏮
+                let r = |x: f32, d: f32| {
+                    egui::Rect::from_center_size(egui::pos2(x, cy), Vec2::splat(d))
+                };
+                let close_r = r(card.right() - 26.0, 32.0);
+                let open_r = r(close_r.center().x - 34.0, 32.0);
+                let next_r = r(open_r.center().x - 46.0, 38.0);
+                let pp_r = r(next_r.center().x - 42.0, 42.0);
+                let prev_r = r(pp_r.center().x - 42.0, 38.0);
+
+                // left: square cover, ♫ title, channel (click: back to the player)
                 let thumb = egui::Rect::from_min_size(
-                    egui::pos2(row.left(), cy - 22.0),
-                    Vec2::new(78.0, 44.0),
+                    egui::pos2(card.left() + 10.0, cy - 22.0),
+                    Vec2::splat(44.0),
                 );
-                painter.rect_filled(thumb, 6, thumb_bg());
+                painter.rect_filled(thumb, 10, thumb_bg());
                 if let Some(tex) = self.thumbs.get(&p.id, Variant::Standard) {
+                    // the middle square of the 16:9 frame
                     egui::Image::from_texture(egui::load::SizedTexture::from_handle(tex))
-                        .corner_radius(6)
+                        .uv(egui::Rect::from_min_max(
+                            egui::pos2(0.21875, 0.0),
+                            egui::pos2(0.78125, 1.0),
+                        ))
+                        .corner_radius(10)
                         .paint_at(ui, thumb);
                 }
-                // centre: transport; right: open / stop
-                let sq = Vec2::splat(40.0);
-                let mid = egui::pos2(full.center().x, cy);
-                let prev_r = egui::Rect::from_center_size(mid - Vec2::new(46.0, 0.0), sq);
-                let pp_r = egui::Rect::from_center_size(mid, sq);
-                let next_r = egui::Rect::from_center_size(mid + Vec2::new(46.0, 0.0), sq);
-                let close_r = egui::Rect::from_center_size(
-                    egui::pos2(row.right() - 18.0, cy),
-                    Vec2::splat(34.0),
-                );
-                let open_r = egui::Rect::from_center_size(
-                    close_r.center() - Vec2::new(40.0, 0.0),
-                    Vec2::splat(34.0),
-                );
-                let time = if p.duration > 0.0 {
-                    format!(
-                        "{} / {}",
-                        player::fmt_time(p.pos),
-                        player::fmt_time(p.duration)
-                    )
-                } else {
-                    player::fmt_time(p.pos)
-                };
-                let tg = painter.layout_no_wrap(time, FontId::proportional(12.0), text_dim());
-                let time_x = open_r.left() - 12.0 - tg.size().x;
-                let show_time = time_x > next_r.right() + 16.0;
-                if show_time {
-                    painter.galley(egui::pos2(time_x, cy - tg.size().y / 2.0), tg, text_dim());
-                }
-
                 let text_left = thumb.right() + 12.0;
-                let text_right = prev_r.left() - 16.0;
+                let text_right = prev_r.left() - 8.0;
                 let info = egui::Rect::from_min_max(
-                    egui::pos2(row.left(), cy - 24.0),
-                    egui::pos2(text_right.max(thumb.right()), cy + 24.0),
+                    egui::pos2(card.left() + 4.0, card.top() + 4.0),
+                    egui::pos2(text_right, card.bottom() - 8.0),
                 );
-                if btn(ui, info, "music_info", true)
+                let ir = ui.interact(info, ui.scope_id().with("music_info"), Sense::click());
+                if ir
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .on_hover_text(t("Show the player"))
                     .clicked()
                 {
                     expand = true;
                 }
-                if text_right - text_left > 40.0 {
-                    crate::theme::paint_note(
-                        &painter,
-                        egui::pos2(text_left + 6.0, cy - 9.0),
-                        0.62,
-                        accent(),
-                    );
-                    let title_left = text_left + 16.0;
+                if text_right - text_left > 30.0 {
                     let one = |s: &str, size: f32, col: Color32, width: f32| {
                         let mut job = LayoutJob::single_section(
                             s.to_string(),
@@ -4482,9 +4458,15 @@ impl App {
                         job.wrap.overflow_character = Some('…');
                         painter.layout_job(job)
                     };
-                    let tg = one(&p.title, 13.5, text(), text_right - title_left);
+                    crate::theme::paint_note(
+                        &painter,
+                        egui::pos2(text_left + 5.0, cy - 9.0),
+                        0.55,
+                        accent(),
+                    );
+                    let tg = one(&p.title, 13.5, text(), text_right - text_left - 15.0);
                     painter.galley(
-                        egui::pos2(title_left, cy - 9.0 - tg.size().y / 2.0),
+                        egui::pos2(text_left + 15.0, cy - 9.0 - tg.size().y / 2.0),
                         tg,
                         text(),
                     );
@@ -4498,12 +4480,21 @@ impl App {
                     painter.galley(egui::pos2(text_left, cy + 2.0), cg, text_dim());
                 }
 
+                // transport
                 let dim = text_dim().gamma_multiply(0.45);
-                let r = btn(ui, prev_r, "music_prev", prev_any || p.pos > 3.0);
-                if r.on_hover_text(t("Previous")).clicked() {
+                let can_prev = prev_any || p.pos > 3.0;
+                if btn(ui, prev_r, "music_prev", can_prev)
+                    .on_hover_text(t("Previous"))
+                    .clicked()
+                {
                     go_prev = true;
                 }
-                player::skip_icon(&painter, prev_r.center(), false, text());
+                player::skip_icon(
+                    &painter,
+                    prev_r.center(),
+                    false,
+                    if can_prev { text() } else { dim },
+                );
                 if btn(ui, pp_r, "music_pp", true)
                     .on_hover_text(t("Play / pause"))
                     .clicked()
@@ -4515,12 +4506,12 @@ impl App {
                 }
                 player::play_pause_icon(&painter, pp_r.center(), p.paused || p.eof, text());
                 let has_next = next_title.is_some();
-                let r = btn(ui, next_r, "music_next", has_next);
-                let r = match &next_title {
-                    Some(tn) => r.on_hover_text(format!("{}: {tn}", t("Next"))),
-                    None => r,
+                let nr = btn(ui, next_r, "music_next", has_next);
+                let nr = match &next_title {
+                    Some(tn) => nr.on_hover_text(format!("{}: {tn}", t("Next"))),
+                    None => nr,
                 };
-                if r.clicked() && has_next {
+                if nr.clicked() && has_next {
                     go_next = true;
                 }
                 player::skip_icon(
@@ -4530,7 +4521,7 @@ impl App {
                     if has_next { text() } else { dim },
                 );
 
-                // ⌃ open the player
+                // ⌃ open the player, ✕ stop
                 if btn(ui, open_r, "music_open", true)
                     .on_hover_text(t("Show the player"))
                     .clicked()
@@ -4540,13 +4531,12 @@ impl App {
                 let c = open_r.center();
                 painter.line(
                     vec![
-                        c + Vec2::new(-6.0, 3.0),
+                        c + Vec2::new(-5.5, 2.5),
                         c + Vec2::new(0.0, -3.0),
-                        c + Vec2::new(6.0, 3.0),
+                        c + Vec2::new(5.5, 2.5),
                     ],
                     Stroke::new(1.8, text()),
                 );
-                // ✕ stop
                 if btn(ui, close_r, "music_close", true)
                     .on_hover_text(t("Stop"))
                     .clicked()
@@ -4555,12 +4545,55 @@ impl App {
                 }
                 let c = close_r.center();
                 for (a, b) in [
-                    (Vec2::new(-5.0, -5.0), Vec2::new(5.0, 5.0)),
-                    (Vec2::new(-5.0, 5.0), Vec2::new(5.0, -5.0)),
+                    (Vec2::new(-4.5, -4.5), Vec2::new(4.5, 4.5)),
+                    (Vec2::new(-4.5, 4.5), Vec2::new(4.5, -4.5)),
                 ] {
                     painter.line_segment([c + a, c + b], Stroke::new(1.8, text()));
                 }
-                // keep the time and seek line moving
+
+                // progress along the bottom edge; hover shows the time, click seeks
+                if p.duration > 0.0 {
+                    let line = egui::Rect::from_min_max(
+                        egui::pos2(card.left() + 16.0, card.bottom() - 9.0),
+                        egui::pos2(card.right() - 16.0, card.bottom() - 1.0),
+                    );
+                    let sr = ui.interact(
+                        line,
+                        ui.scope_id().with("music_seek"),
+                        Sense::click_and_drag(),
+                    );
+                    if let Some(pos) = sr
+                        .interact_pointer_pos()
+                        .filter(|_| sr.clicked() || sr.dragged())
+                    {
+                        let f = ((pos.x - line.left()) / line.width()).clamp(0.0, 1.0) as f64;
+                        p.seek_absolute(f * p.duration, true);
+                    }
+                    let thick = if sr.hovered() || sr.dragged() {
+                        4.0
+                    } else {
+                        2.5
+                    };
+                    let y = line.center().y;
+                    let track = egui::Rect::from_min_max(
+                        egui::pos2(line.left(), y - thick / 2.0),
+                        egui::pos2(line.right(), y + thick / 2.0),
+                    );
+                    painter.rect_filled(track, 2, Color32::from_gray(128).gamma_multiply(0.3));
+                    let f = (p.pos / p.duration).clamp(0.0, 1.0) as f32;
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(track.min, Vec2::new(track.width() * f, thick)),
+                        2,
+                        accent(),
+                    );
+                    sr.on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(format!(
+                            "{} / {}",
+                            player::fmt_time(p.pos),
+                            player::fmt_time(p.duration)
+                        ));
+                }
+                // keep the progress moving
                 if !p.paused {
                     ctx.request_repaint_after(Duration::from_millis(250));
                 }
