@@ -4518,8 +4518,18 @@ impl App {
                 };
                 let close_r = r(card.right() - 26.0, 32.0);
                 let open_r = r(close_r.center().x - 34.0, 32.0);
-                // EQ menu (songs), left of ⌃
-                let eq_w = if eqv.is_some() { 92.0 } else { 0.0 };
+                // EQ menu (songs), left of ⌃, as wide as its label
+                let eq_w = eqv.as_ref().map_or(0.0, |v| {
+                    painter
+                        .layout_no_wrap(
+                            format!("EQ · {}", v.current.label()),
+                            FontId::proportional(13.0),
+                            text(),
+                        )
+                        .size()
+                        .x
+                        + 38.0
+                });
                 let eq_r = egui::Rect::from_min_max(
                     egui::pos2(open_r.left() - 6.0 - eq_w, cy - 14.0),
                     egui::pos2(open_r.left() - 6.0, cy + 14.0),

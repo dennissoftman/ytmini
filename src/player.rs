@@ -1441,14 +1441,15 @@ impl Embedded {
                     });
             });
         }
-        // "Resumed at …" pill, top-left, for the first seconds of a resumed video
+        // "Resumed at …" pill, under Back and the title, for the first
+        // seconds of a resumed video
         if let Some((t, _)) = self
             .resumed_from
             .filter(|(_, since)| since.elapsed() < Duration::from_secs(8))
         {
             let r = Rect::from_min_size(
-                area.left_top() + Vec2::new(16.0, 16.0),
-                Vec2::new(250.0, 34.0),
+                area.left_top() + Vec2::new(14.0, 64.0),
+                Vec2::new(area.width().min(420.0), 34.0),
             );
             ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
                 egui::Frame::new()
@@ -1926,7 +1927,7 @@ impl Embedded {
             )
             .size()
             .x;
-        let qr = take(label_w + 24.0);
+        let qr = take(label_w + 38.0);
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(qr)
@@ -1948,7 +1949,7 @@ impl Embedded {
         );
 
         // speed
-        let sr = take(52.0);
+        let sr = take(62.0);
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(sr)
@@ -1956,7 +1957,7 @@ impl Embedded {
             |ui| {
                 let mut s = self.speed;
                 crate::theme::on_dark(|| {
-                    crate::theme::dropdown(ui, &format!("{}×", trim_num(s)), 52.0, 420.0, |ui| {
+                    crate::theme::dropdown(ui, &format!("{}×", trim_num(s)), 62.0, 420.0, |ui| {
                         for x in SPEEDS {
                             ui.selectable_value(&mut s, x, format!("{}×", trim_num(x)));
                         }
@@ -1980,7 +1981,7 @@ impl Embedded {
                 )
                 .size()
                 .x;
-            let er = take(w + 24.0);
+            let er = take(w + 38.0);
             ui.scope_builder(
                 egui::UiBuilder::new()
                     .max_rect(er)

@@ -306,33 +306,42 @@ pub fn dropdown<R>(
     let p = pal();
     let font = FontId::proportional(13.0);
     let g = ui.painter().layout_no_wrap(label.to_string(), font, p.text);
-    let size = Vec2::new((g.size().x + 24.0).max(min_w), 28.0);
+    let size = Vec2::new((g.size().x + 38.0).max(min_w), 28.0);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
     let hov = ui
         .ctx()
         .animate_bool_with_time(resp.id.with("hov"), resp.hovered() || open, 0.12);
-    let (base, over) = if p.dark {
-        (Color32::from_white_alpha(22), Color32::from_white_alpha(44))
+    // reads as a button: a filled pill with an outline and a ⌄
+    let (base, over, edge) = if p.dark {
+        (
+            Color32::from_white_alpha(30),
+            Color32::from_white_alpha(58),
+            Color32::from_white_alpha(60),
+        )
     } else {
-        (p.card, p.card_hover)
+        (p.card, p.card_hover, p.text_dim.gamma_multiply(0.45))
     };
     let fill = lerp_color(base, over, hov);
     let r = CornerRadius::same((size.y / 2.0) as u8);
     ui.painter().rect_filled(rect, r, fill);
-    if open {
-        ui.painter().rect_stroke(
-            rect,
-            r,
-            Stroke::new(1.0, p.accent),
-            egui::StrokeKind::Inside,
-        );
-    }
-    // centred when the pill is wider than its text
-    let x = rect.left() + ((rect.width() - g.size().x) / 2.0).max(12.0);
+    let edge = if open { p.accent } else { edge };
+    ui.painter()
+        .rect_stroke(rect, r, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
+    let x = rect.left() + 12.0;
     ui.painter()
         .galley(egui::pos2(x, rect.center().y - g.size().y / 2.0), g, p.text);
+    let d = if open { -1.0 } else { 1.0 };
+    let c = egui::pos2(rect.right() - 15.0, rect.center().y + d);
+    ui.painter().line(
+        vec![
+            c + Vec2::new(-4.0, -2.0 * d),
+            c + Vec2::new(0.0, 2.0 * d),
+            c + Vec2::new(4.0, -2.0 * d),
+        ],
+        Stroke::new(1.6, lerp_color(p.text_dim, p.text, hov)),
+    );
 
     let shadow = egui::epaint::Shadow {
         offset: [0, 6],
