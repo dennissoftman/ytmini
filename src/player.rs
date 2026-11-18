@@ -169,6 +169,10 @@ pub struct Embedded {
     from_resolved: bool,
     /// Set when that happened, so the app drops its other stored URLs.
     pub resolved_failed: bool,
+    /// Pause state last frame, to notice it change (however it was toggled).
+    seen_paused: Option<bool>,
+    /// ▶ / ❚❚ fading out over the video since then (`true`: just paused).
+    flash: Option<(bool, Instant)>,
 
     pub pos: f64,
     pub duration: f64,
@@ -449,6 +453,8 @@ impl Embedded {
             waiting: wait.then_some(resume),
             from_resolved: direct.as_ref().is_some_and(|d| !d.offline),
             resolved_failed: false,
+            seen_paused: None,
+            flash: None,
             render: Some(render),
             mpv: Some(mpv),
             shared: Some(shared),
@@ -1174,33 +1180,6 @@ impl Embedded {
         let mut act = Actions::default();
         let ctx = ui.ctx().clone();
 
-        // Header (hidden in fullscreen)
-        if !v.fullscreen {
-            // just the title, centered (Back is the ← over the video)
-            let w = ui.available_width();
-            ui.allocate_ui_with_layout(
-                Vec2::new(w, 26.0),
-                egui::Layout::top_down(egui::Align::Center),
-                |ui| {
-                    ui.set_max_width((w - 96.0).max(100.0));
-                    let r = ui.add(
-                        egui::Label::new(egui::RichText::new(&self.title).size(16.0).strong())
-                            .truncate(),
-                    );
-                    if v.song {
-                        let col = ui.visuals().text_color();
-                        crate::theme::paint_note(
-                            ui.painter(),
-                            Pos2::new(r.rect.left() - 13.0, r.rect.center().y),
-                            0.75,
-                            col,
-                        );
-                    }
-                },
-            );
-            ui.add_space(6.0);
-        }
-
         let area = ui.available_rect_before_wrap();
         act.video_rect = Some(area);
         let resp = ui.allocate_rect(area, Sense::click());
@@ -1261,6 +1240,31 @@ impl Embedded {
 
         // Overlays: loading, error, end
         let center = area.center();
+
+        // played / paused: the new state's icon swells and fades, as on YouTube
+        if self.started && !self.eof && self.seen_paused.is_some_and(|was| was != self.paused) {
+            self.flash = Some((self.paused, Instant::now()));
+        }
+        self.seen_paused = Some(self.paused);
+        if let Some((paused, at)) = self.flash {
+            const FLASH: f32 = 0.55;
+            let t = at.elapsed().as_secs_f32() / FLASH;
+            if t >= 1.0 || self.eof {
+                self.flash = None;
+            } else {
+                let a = 1.0 - ease(t);
+                let r = 34.0 + 16.0 * ease(t);
+                painter.circle_filled(center, r, Color32::from_black_alpha((140.0 * a) as u8));
+                play_pause_icon_scaled(
+                    &painter,
+                    center,
+                    !paused,
+                    Color32::from_white_alpha((255.0 * a) as u8),
+                    1.6 + 0.4 * t,
+                );
+                ctx.request_repaint();
+            }
+        }
         if let Some(err) = self.error.clone() {
             let r = Rect::from_center_size(center, Vec2::new(area.width().min(560.0), 150.0));
             ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
@@ -1491,6 +1495,62 @@ impl Embedded {
             );
             ui.multiply_opacity(ca);
             let painter = ui.painter_at(area);
+            // top: a soft shade for the title and Back, as on YouTube
+            let shade = Rect::from_min_size(area.left_top(), Vec2::new(area.width(), 96.0));
+            let mut mesh = egui::Mesh::default();
+            let (dark, clear) = (Color32::from_black_alpha(150), Color32::TRANSPARENT);
+            mesh.colored_vertex(shade.left_top(), dark);
+            mesh.colored_vertex(shade.right_top(), dark);
+            mesh.colored_vertex(shade.right_bottom(), clear);
+            mesh.colored_vertex(shade.left_bottom(), clear);
+            mesh.add_triangle(0, 1, 2);
+            mesh.add_triangle(0, 2, 3);
+            painter.add(egui::Shape::mesh(mesh));
+            // the title, top left (after Back), ♫ first for songs
+            let back_c = area.left_top() + Vec2::splat(14.0 + 19.0);
+            let mut x = if v.fullscreen {
+                area.left() + 20.0
+            } else {
+                back_c.x + 19.0 + 14.0
+            };
+            let right = area.right()
+                - if v.panel_open == Some(true) {
+                    384.0
+                } else {
+                    20.0
+                };
+            if v.song {
+                crate::theme::paint_note(
+                    &painter,
+                    Pos2::new(x + 7.0, back_c.y),
+                    0.8,
+                    Color32::WHITE,
+                );
+                x += 20.0;
+            }
+            if right - x > 40.0 {
+                let mut job = egui::text::LayoutJob::single_section(
+                    self.title.clone(),
+                    egui::TextFormat {
+                        font_id: egui::FontId::proportional(18.0),
+                        color: Color32::WHITE,
+                        ..Default::default()
+                    },
+                );
+                job.wrap.max_width = right - x;
+                job.wrap.max_rows = 1;
+                job.wrap.break_anywhere = true;
+                job.wrap.overflow_character = Some('…');
+                let g = painter.layout_job(job);
+                let pos = Pos2::new(x, back_c.y - g.size().y / 2.0);
+                // a faint shadow keeps it legible on bright frames
+                painter.galley_with_override_text_color(
+                    pos + Vec2::new(0.0, 1.0),
+                    g.clone(),
+                    Color32::from_black_alpha(160),
+                );
+                painter.galley(pos, g, Color32::WHITE);
+            }
             // Back: a round ← in the top-left corner (Esc and the mouse's
             // back button do the same)
             if !v.fullscreen {
@@ -2034,8 +2094,12 @@ impl Embedded {
 
 /// ▶ or ❚❚ (also for the music bar).
 pub fn play_pause_icon(p: &egui::Painter, c: Pos2, show_play: bool, col: Color32) {
+    play_pause_icon_scaled(p, c, show_play, col, 1.0);
+}
+
+fn play_pause_icon_scaled(p: &egui::Painter, c: Pos2, show_play: bool, col: Color32, k: f32) {
     if show_play {
-        let s = 9.0;
+        let s = 9.0 * k;
         p.add(egui::Shape::convex_polygon(
             vec![
                 Pos2::new(c.x - s * 0.7, c.y - s),
@@ -2048,7 +2112,7 @@ pub fn play_pause_icon(p: &egui::Painter, c: Pos2, show_play: bool, col: Color32
     } else {
         for dx in [-4.5, 4.5] {
             p.rect_filled(
-                Rect::from_center_size(Pos2::new(c.x + dx, c.y), Vec2::new(4.0, 16.0)),
+                Rect::from_center_size(Pos2::new(c.x + dx * k, c.y), Vec2::new(4.0, 16.0) * k),
                 1,
                 col,
             );

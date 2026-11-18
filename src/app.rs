@@ -418,7 +418,7 @@ pub struct App {
     net_checked: std::time::Instant,
     /// dev (`YTMINI_PLAY_SEQ=id,id,…`): videos to play one after another,
     /// each once the current one has played 4 s (start-up timing). Steps
-    /// `back` (as if Back were clicked), `tray`, `minimize`, `end` (seek to the last
+    /// `back` (as if Back were clicked), `pause`, `seek:<s>`, `tray`, `minimize`, `end` (seek to the last
     /// 2 s) and `shot:<png path>` too.
     play_seq: Vec<String>,
     /// Native lookup failures already told about (see `native::failures`).
@@ -439,6 +439,9 @@ pub struct App {
     deps: DepsState,
 
     positions: Positions,
+    /// The video you last stopped partway through: first on Home, to
+    /// continue (`continue.json`; songs aren't kept).
+    last_stopped: Option<Video>,
     /// Pages to go back to (channel → playlist → …); top tabs clear it.
     nav_back: Vec<Source>,
     signin: Option<SignIn>,
@@ -574,6 +577,10 @@ impl App {
             quitting: false,
             deps: DepsState::default(),
             positions: Positions::load(),
+            last_stopped: yt::config_dir()
+                .ok()
+                .and_then(|d| std::fs::read(d.join("continue.json")).ok())
+                .and_then(|b| serde_json::from_slice(&b).ok()),
             nav_back: Vec::new(),
             signin: None,
             last_ext_poll: std::time::Instant::now(),
@@ -1454,8 +1461,45 @@ impl App {
         }
     }
 
+    /// The embedded video is being stopped: if it's unfinished (and not a
+    /// song), it becomes Home's first card; finished, it stops being one.
+    fn remember_stopped(&mut self) {
+        let Some(p) = self.embedded.as_ref().filter(|p| p.started) else {
+            return;
+        };
+        let (id, pos, dur) = (p.id.clone(), p.pos, p.duration);
+        self.positions.update(&id, pos, dur);
+        let before = self.last_stopped.as_ref().map(|v| v.id.clone());
+        if self.positions.resume_at(&id).is_some() && !self.songs.contains(&id) {
+            if let Some(mut v) = self.current_video() {
+                if v.duration.is_none() && dur > 0.0 {
+                    v.duration = Some(dur);
+                }
+                self.last_stopped = Some(v);
+            }
+        } else if before.as_deref() == Some(id.as_str()) {
+            self.last_stopped = None;
+        } else {
+            return;
+        }
+        if let Ok(d) = yt::config_dir() {
+            let path = d.join("continue.json");
+            match &self.last_stopped {
+                Some(v) => {
+                    if let Ok(b) = serde_json::to_vec(v) {
+                        let _ = std::fs::write(path, b);
+                    }
+                }
+                None => {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+    }
+
     /// Replace the playing video, keeping fullscreen and the player view.
     fn switch_to(&mut self, v: &Video) {
+        self.remember_stopped();
         if let Some(p) = self.embedded.take() {
             self.settings.volume = p.volume;
             if p.started {
@@ -1689,6 +1733,7 @@ impl App {
     /// Leave the player view: tear mpv down, give back VRAM, restore the window.
     fn close_embedded(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         self.mini = false;
+        self.remember_stopped();
         if let Some(p) = self.embedded.take() {
             self.settings.volume = p.volume;
             if p.started {
@@ -2224,6 +2269,11 @@ impl App {
             let (downloads, dl_active) = (&self.downloads, &self.dl_active);
             let topic_shelves = &self.topic_shelves;
             let feed_all = self.feed_all;
+            // Home: the video you stopped partway through comes first
+            let resume_card = self
+                .last_stopped
+                .as_ref()
+                .filter(|v| source == Source::Feed && self.positions.resume_at(&v.id).is_some());
             let dearrow = settings.dearrow.then_some(&self.dearrow);
             let Some(tab) = self.tabs.get_mut(&source) else {
                 return;
@@ -2333,9 +2383,12 @@ impl App {
                     Some((title, token, vids))
                 })
                 .collect();
-            let mut shown: Vec<&Video> = Vec::new();
+            let mut shown: Vec<&Video> = resume_card.into_iter().collect();
             let mut shorts: Vec<&Video> = Vec::new();
             for v in &tab.videos {
+                if resume_card.is_some_and(|c| c.id == v.id) {
+                    continue;
+                }
                 let watched = positions.get(&v.id).is_some_and(|e| e.watched());
                 if settings.hides(&source, v, watched) {
                     continue;
@@ -5623,6 +5676,14 @@ impl eframe::App for App {
                 }
             } else if step == "tray" {
                 self.hide_to_tray(&ctx);
+            } else if step == "pause" {
+                if let Some(p) = &mut self.embedded {
+                    p.toggle_pause();
+                }
+            } else if let Some(t) = step.strip_prefix("seek:").and_then(|t| t.parse().ok()) {
+                if let Some(p) = &mut self.embedded {
+                    p.seek_absolute(t, true);
+                }
             } else if step == "minimize" {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             } else if step == "end" {
@@ -5680,6 +5741,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        self.remember_stopped();
         if let Some(p) = self.embedded.take() {
             self.settings.volume = p.volume;
             if p.started {
