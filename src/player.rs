@@ -1926,22 +1926,21 @@ impl Embedded {
             )
             .size()
             .x;
-        let combo_w = (label_w + 34.0).clamp(80.0, 280.0);
-        let qr = take(combo_w + 10.0);
+        let qr = take(label_w + 24.0);
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(qr)
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
             |ui| {
                 let mut q = v.quality;
-                egui::ComboBox::from_id_salt("quality")
-                    .selected_text(egui::RichText::new(&self.profile_label).size(13.0))
-                    .width(combo_w)
-                    .show_ui(ui, |ui| {
+                let label = self.profile_label.clone();
+                crate::theme::on_dark(|| {
+                    crate::theme::dropdown(ui, &label, 0.0, 420.0, |ui| {
                         for choice in yt::Quality::choices(v.screen_cap) {
                             ui.selectable_value(&mut q, choice, choice.label());
                         }
-                    });
+                    })
+                });
                 if q != v.quality {
                     act.quality = Some(q);
                 }
@@ -1949,21 +1948,20 @@ impl Embedded {
         );
 
         // speed
-        let sr = take(70.0);
+        let sr = take(52.0);
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(sr)
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
             |ui| {
                 let mut s = self.speed;
-                egui::ComboBox::from_id_salt("speed")
-                    .selected_text(egui::RichText::new(format!("{}×", trim_num(s))).size(13.0))
-                    .width(60.0)
-                    .show_ui(ui, |ui| {
+                crate::theme::on_dark(|| {
+                    crate::theme::dropdown(ui, &format!("{}×", trim_num(s)), 52.0, 420.0, |ui| {
                         for x in SPEEDS {
                             ui.selectable_value(&mut s, x, format!("{}×", trim_num(x)));
                         }
-                    });
+                    })
+                });
                 if (s - self.speed).abs() > f64::EPSILON {
                     self.set_speed(s);
                 }
@@ -1982,23 +1980,19 @@ impl Embedded {
                 )
                 .size()
                 .x;
-            let er = take((w + 34.0).clamp(80.0, 200.0) + 10.0);
+            let er = take(w + 24.0);
             ui.scope_builder(
                 egui::UiBuilder::new()
                     .max_rect(er)
                     .layout(egui::Layout::right_to_left(egui::Align::Center)),
                 |ui| {
-                    egui::ComboBox::from_id_salt("eq")
-                        .selected_text(egui::RichText::new(label).size(13.0))
-                        .width((w + 34.0).clamp(80.0, 200.0))
-                        .height(400.0)
-                        .show_ui(ui, |ui| {
+                    crate::theme::on_dark(|| {
+                        crate::theme::dropdown(ui, &label, 0.0, 440.0, |ui| {
                             if let Some(p) = crate::eq::menu(ui, eqv) {
                                 act.eq_pick = Some(p);
                             }
                         })
-                        .response
-                        .on_hover_text(t("Equalizer: Auto picks a preset for the song's genre; a preset you pick is kept for the artist"));
+                    });
                 },
             );
         }

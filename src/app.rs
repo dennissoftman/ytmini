@@ -423,9 +423,11 @@ pub struct App {
     net_checked: std::time::Instant,
     /// dev (`YTMINI_PLAY_SEQ=id,id,…`): videos to play one after another,
     /// each once the current one has played 4 s (start-up timing). Steps
-    /// `back` (as if Back were clicked), `pause`, `seek:<s>`, `tray`, `minimize`, `end` (seek to the last
+    /// `back` (as if Back were clicked), `wait:<s>`, `expand`, `pause`, `seek:<s>`, `tray`, `minimize`, `end` (seek to the last
     /// 2 s) and `shot:<png path>` too.
     play_seq: Vec<String>,
+    /// dev: a `wait:<s>` step holds the sequence until then.
+    play_seq_wait: Option<std::time::Instant>,
     /// Native lookup failures already told about (see `native::failures`).
     native_seen: u32,
     /// DeArrow branding per video id (None while being fetched).
@@ -573,6 +575,7 @@ impl App {
             net_route: yt::route_fingerprint(),
             net_checked: std::time::Instant::now(),
             native_seen: 0,
+            play_seq_wait: None,
             play_seq: std::env::var("YTMINI_PLAY_SEQ")
                 .map(|v| v.split(',').rev().map(str::to_string).collect())
                 .unwrap_or_default(),
@@ -3379,13 +3382,11 @@ impl App {
             if self.sessions.len() > 1 {
                 ui.add_space(10.0);
                 let labels: Vec<String> = self.sessions.iter().map(|s| s.label()).collect();
-                egui::ComboBox::from_id_salt("signin_profile")
-                    .selected_text(labels[pick].clone())
-                    .show_ui(ui, |ui| {
-                        for (i, l) in labels.iter().enumerate() {
-                            ui.selectable_value(&mut self.session_pick, i, l);
-                        }
-                    });
+                crate::theme::dropdown(ui, &labels[pick], 200.0, 360.0, |ui| {
+                    for (i, l) in labels.iter().enumerate() {
+                        ui.selectable_value(&mut self.session_pick, i, l);
+                    }
+                });
             }
         });
         act
@@ -4470,6 +4471,10 @@ impl App {
         );
         let eqv = self.eq_view();
         let mut eq_pick = None;
+        // no picture while collapsed: give the video texture's VRAM back
+        if let (Some(s), Some(gl)) = (&mut self.surface, frame.gl()) {
+            s.shrink(gl);
+        }
         let Some(p) = &mut self.embedded else { return };
         egui::Area::new(egui::Id::unique("music_card"))
             .order(egui::Order::Foreground)
@@ -4638,17 +4643,17 @@ impl App {
                             .max_rect(eq_r)
                             .layout(Layout::right_to_left(Align::Center)),
                         |ui| {
-                            egui::ComboBox::from_id_salt("music_eq")
-                                .selected_text(
-                                    RichText::new(format!("EQ · {}", v.current.label())).size(12.0),
-                                )
-                                .width(eq_w - 4.0)
-                                .height(400.0)
-                                .show_ui(ui, |ui| {
+                            crate::theme::dropdown(
+                                ui,
+                                &format!("EQ · {}", v.current.label()),
+                                0.0,
+                                440.0,
+                                |ui| {
                                     if let Some(pk) = crate::eq::menu(ui, v) {
                                         eq_pick = Some(pk);
                                     }
-                                });
+                                },
+                            );
                         },
                     );
                 }
@@ -4717,12 +4722,38 @@ impl App {
                         2,
                         accent(),
                     );
-                    sr.on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_text(format!(
-                            "{} / {}",
-                            player::fmt_time(p.pos),
-                            player::fmt_time(p.duration)
+                    // the time under the pointer, in a label just above it
+                    if let Some(hp) = sr.hover_pos() {
+                        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                        let f = ((hp.x - line.left()) / line.width()).clamp(0.0, 1.0) as f64;
+                        let tp = ctx.layer_painter(egui::LayerId::new(
+                            egui::Order::Tooltip,
+                            egui::Id::unique("music_seek_time"),
                         ));
+                        let g = tp.layout_no_wrap(
+                            format!(
+                                "{} / {}",
+                                player::fmt_time(f * p.duration),
+                                player::fmt_time(p.duration)
+                            ),
+                            FontId::proportional(12.5),
+                            text(),
+                        );
+                        let size = g.size() + Vec2::new(16.0, 8.0);
+                        let x = (hp.x - size.x / 2.0).clamp(card.left(), card.right() - size.x);
+                        let r = egui::Rect::from_min_size(
+                            egui::pos2(x, card.top() - size.y - 6.0),
+                            size,
+                        );
+                        tp.rect(
+                            r,
+                            8,
+                            panel(),
+                            Stroke::new(1.0, card_hover()),
+                            StrokeKind::Inside,
+                        );
+                        tp.galley(r.min + Vec2::new(8.0, 4.0), g, text());
+                    }
                 }
                 // keep the progress moving
                 if !p.paused {
@@ -4795,7 +4826,7 @@ impl App {
                                 });
                                 ui.end_row();
                                 ui.label(t("Quality"));
-                                egui::ComboBox::from_id_salt("q").selected_text(s.quality.label()).width(220.0).show_ui(ui, |ui| {
+                                crate::theme::dropdown(ui, &s.quality.label(), 220.0, 400.0, |ui| {
                                     for q in yt::Quality::choices(self.screen_cap) {
                                         ui.selectable_value(&mut s.quality, q, q.label());
                                     }
@@ -4932,7 +4963,7 @@ impl App {
                             let sys = crate::i18n::system();
                             let auto = if cfg!(windows) { tf("Same as Windows ({})", &[&sys.native_name()]) } else { tf("Same as macOS ({})", &[&sys.native_name()]) };
                             let shown = s.language.map_or(auto.clone(), |l| l.native_name().to_string());
-                            egui::ComboBox::from_id_salt("lang").selected_text(shown).width(240.0).show_ui(ui, |ui| {
+                            crate::theme::dropdown(ui, &shown, 240.0, 400.0, |ui| {
                                 ui.selectable_value(&mut s.language, None, auto);
                                 for l in crate::i18n::Lang::ALL {
                                     ui.selectable_value(&mut s.language, Some(l), l.native_name());
@@ -4944,7 +4975,7 @@ impl App {
                             let sysr = crate::i18n::system_region();
                             let auto = if cfg!(windows) { tf("Same as Windows ({})", &[&crate::i18n::regions::name(&sysr)]) } else { tf("Same as macOS ({})", &[&crate::i18n::regions::name(&sysr)]) };
                             let shown = s.region.as_deref().map_or(auto.clone(), |r| format!("{} ({r})", crate::i18n::regions::name(r)));
-                            egui::ComboBox::from_id_salt("region").selected_text(shown).width(240.0).height(360.0).show_ui(ui, |ui| {
+                            crate::theme::dropdown(ui, &shown, 240.0, 360.0, |ui| {
                                 ui.selectable_value(&mut s.region, None, auto);
                                 for (code, name) in crate::i18n::regions::REGIONS {
                                     ui.selectable_value(&mut s.region, Some(code.to_string()), format!("{name} ({code})"));
@@ -4957,7 +4988,7 @@ impl App {
                             ui.horizontal(|ui| {
                                 ui.label(t("Quality"));
                                 let label = |h: u32| if h == 0 { t("Audio only").to_string() } else { format!("{h}p") };
-                                egui::ComboBox::from_id_salt("dlq").selected_text(label(s.download_height)).show_ui(ui, |ui| {
+                                crate::theme::dropdown(ui, &label(s.download_height), 110.0, 400.0, |ui| {
                                     for h in [480, 720, 1080, 1440, 0] {
                                         ui.selectable_value(&mut s.download_height, h, label(h));
                                     }
@@ -5832,6 +5863,9 @@ impl eframe::App for App {
             && ctx.input(|i| i.time) > 6.0
             && self.pending_play.is_none()
             && self
+                .play_seq_wait
+                .is_none_or(|t| std::time::Instant::now() >= t)
+            && self
                 .embedded
                 .as_ref()
                 .is_none_or(|p| p.started && p.pos > 4.0)
@@ -5846,6 +5880,14 @@ impl eframe::App for App {
                 }
             } else if step == "tray" {
                 self.hide_to_tray(&ctx);
+            } else if let Some(secs) = step.strip_prefix("wait:").and_then(|t| t.parse().ok()) {
+                self.play_seq_wait =
+                    Some(std::time::Instant::now() + Duration::from_secs_f64(secs));
+            } else if step == "expand" {
+                self.mini = false;
+                if let Some(p) = &mut self.embedded {
+                    p.set_background(false);
+                }
             } else if step == "pause" {
                 if let Some(p) = &mut self.embedded {
                     p.toggle_pause();

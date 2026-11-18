@@ -291,3 +291,114 @@ pub fn paint_note(p: &egui::Painter, c: egui::Pos2, s: f32, color: Color32) {
         Stroke::NONE,
     ));
 }
+
+/// Our dropdown: a rounded pill showing the current choice (no arrow) that
+/// opens a rounded menu, scrolling past `max_h`. `content` lists the choices
+/// (selectable labels/values); a click on one closes the menu. Uses the
+/// current palette, so wrap it in `on_dark` over video.
+pub fn dropdown<R>(
+    ui: &mut egui::Ui,
+    label: &str,
+    min_w: f32,
+    max_h: f32,
+    content: impl FnOnce(&mut egui::Ui) -> R,
+) -> Option<R> {
+    let p = pal();
+    let font = FontId::proportional(13.0);
+    let g = ui.painter().layout_no_wrap(label.to_string(), font, p.text);
+    let size = Vec2::new((g.size().x + 24.0).max(min_w), 28.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
+    let hov = ui
+        .ctx()
+        .animate_bool_with_time(resp.id.with("hov"), resp.hovered() || open, 0.12);
+    let (base, over) = if p.dark {
+        (Color32::from_white_alpha(22), Color32::from_white_alpha(44))
+    } else {
+        (p.card, p.card_hover)
+    };
+    let fill = lerp_color(base, over, hov);
+    let r = CornerRadius::same((size.y / 2.0) as u8);
+    ui.painter().rect_filled(rect, r, fill);
+    if open {
+        ui.painter().rect_stroke(
+            rect,
+            r,
+            Stroke::new(1.0, p.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    // centred when the pill is wider than its text
+    let x = rect.left() + ((rect.width() - g.size().x) / 2.0).max(12.0);
+    ui.painter()
+        .galley(egui::pos2(x, rect.center().y - g.size().y / 2.0), g, p.text);
+
+    let shadow = egui::epaint::Shadow {
+        offset: [0, 6],
+        blur: 22,
+        spread: 0,
+        color: Color32::from_black_alpha(if p.dark { 120 } else { 60 }),
+    };
+    egui::Popup::menu(&resp)
+        .gap(6.0)
+        .width(rect.width().max(150.0))
+        .frame(
+            egui::Frame::new()
+                .fill(if p.dark {
+                    Color32::from_rgba_unmultiplied(28, 28, 31, 245)
+                } else {
+                    p.panel
+                })
+                .stroke(Stroke::new(
+                    1.0,
+                    if p.dark {
+                        Color32::from_white_alpha(20)
+                    } else {
+                        p.card_hover
+                    },
+                ))
+                .corner_radius(12)
+                .shadow(shadow)
+                .inner_margin(6),
+        )
+        .show(|ui| {
+            let dark = p.dark;
+            let st = ui.style_mut();
+            if dark {
+                st.visuals = egui::Visuals::dark();
+            }
+            st.spacing.button_padding = Vec2::new(10.0, 5.0);
+            st.spacing.item_spacing.y = 2.0;
+            st.visuals.selection.bg_fill = p.accent.gamma_multiply(0.35);
+            st.visuals.selection.stroke = Stroke::new(1.0, p.text);
+            for w in [
+                &mut st.visuals.widgets.inactive,
+                &mut st.visuals.widgets.hovered,
+                &mut st.visuals.widgets.active,
+            ] {
+                w.corner_radius = CornerRadius::same(8);
+                w.bg_stroke = Stroke::NONE;
+            }
+            st.visuals.widgets.hovered.weak_bg_fill = if dark {
+                Color32::from_white_alpha(22)
+            } else {
+                p.card_hover
+            };
+            egui::ScrollArea::vertical()
+                .max_height(max_h)
+                .show(ui, content)
+                .inner
+        })
+        .map(|r| r.inner)
+}
+
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgba_premultiplied(
+        l(a.r(), b.r()),
+        l(a.g(), b.g()),
+        l(a.b(), b.b()),
+        l(a.a(), b.a()),
+    )
+}
