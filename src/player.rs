@@ -169,6 +169,9 @@ pub struct Embedded {
     from_resolved: bool,
     /// Set when that happened, so the app drops its other stored URLs.
     pub resolved_failed: bool,
+    /// Audio filters in effect (see `apply_af`).
+    leveling: bool,
+    eq: Option<String>,
     /// Pause state last frame, to notice it change (however it was toggled).
     seen_paused: Option<bool>,
     /// ▶ / ❚❚ fading out over the video since then (`true`: just paused).
@@ -455,6 +458,8 @@ impl Embedded {
             resolved_failed: false,
             seen_paused: None,
             flash: None,
+            leveling: settings.volume_leveling,
+            eq: None,
             render: Some(render),
             mpv: Some(mpv),
             shared: Some(shared),
@@ -977,7 +982,30 @@ impl Embedded {
     }
 
     pub fn set_leveling(&mut self, on: bool) {
-        let _ = self.mpv().set_str("af", if on { LEVELING } else { "" });
+        self.leveling = on;
+        self.apply_af();
+    }
+
+    /// The song's EQ (an `af` entry from `eq::Preset::filter`), or none.
+    pub fn set_eq(&mut self, filter: Option<String>) {
+        if self.eq != filter {
+            self.eq = filter;
+            self.apply_af();
+        }
+    }
+
+    /// mpv's audio filters: the EQ, then the volume leveling.
+    fn apply_af(&mut self) {
+        let af: Vec<&str> = self
+            .eq
+            .as_deref()
+            .into_iter()
+            .chain(self.leveling.then_some(LEVELING))
+            .collect();
+        if std::env::var_os("YTMINI_DEBUG").is_some() {
+            eprintln!("player: af = {}", af.join(","));
+        }
+        let _ = self.mpv().set_str("af", &af.join(","));
     }
 
     /// C / Shift+C: next chapter, or back to the previous one.
@@ -1152,6 +1180,8 @@ pub struct Actions {
     pub video_rect: Option<egui::Rect>,
     /// The controls (and so the overlay) are showing: the mouse moved lately.
     pub controls_visible: bool,
+    /// A choice in the EQ menu.
+    pub eq_pick: Option<crate::eq::Pick>,
 }
 
 pub struct ViewCtx<'a> {
@@ -1170,6 +1200,8 @@ pub struct ViewCtx<'a> {
     pub panel_open: Option<bool>,
     /// A song: ♫ before the title, and Back keeps it playing in the music bar.
     pub song: bool,
+    /// Songs: the EQ menu's state.
+    pub eq: Option<crate::eq::View>,
 }
 
 pub const CONTROLS_H: f32 = 64.0;
@@ -1937,6 +1969,39 @@ impl Embedded {
                 }
             },
         );
+
+        // EQ (songs)
+        if let Some(eqv) = &v.eq {
+            let label = format!("EQ · {}", eqv.current.label());
+            let w = ui
+                .painter()
+                .layout_no_wrap(
+                    label.clone(),
+                    egui::FontId::proportional(13.0),
+                    Color32::WHITE,
+                )
+                .size()
+                .x;
+            let er = take((w + 34.0).clamp(80.0, 200.0) + 10.0);
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(er)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                |ui| {
+                    egui::ComboBox::from_id_salt("eq")
+                        .selected_text(egui::RichText::new(label).size(13.0))
+                        .width((w + 34.0).clamp(80.0, 200.0))
+                        .height(400.0)
+                        .show_ui(ui, |ui| {
+                            if let Some(p) = crate::eq::menu(ui, eqv) {
+                                act.eq_pick = Some(p);
+                            }
+                        })
+                        .response
+                        .on_hover_text(t("Equalizer: Auto picks a preset for the song's genre; a preset you pick is kept for the artist"));
+                },
+            );
+        }
 
         // volume
         let vr = take(150.0);

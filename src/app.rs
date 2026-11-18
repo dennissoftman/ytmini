@@ -107,6 +107,8 @@ enum Msg {
     Related(String, Vec<Video>),
     /// YouTube Music says this video is a song.
     Song(String),
+    /// The EQ preset for a song's genre (None: genre unknown).
+    Genre(String, Option<crate::eq::Preset>),
     /// Rating, channel, subscription and comments token of a video.
     Watch(String, crate::innertube::WatchInfo),
     /// A page of comments for a video (`append`: a later page).
@@ -378,6 +380,9 @@ pub struct App {
     up_next_open: bool,
     /// Videos known to be songs (marked in a list, or by YouTube Music).
     songs: std::collections::HashSet<String>,
+    /// Auto EQ per song (None: genre unknown), and lookups started.
+    eq_found: HashMap<String, Option<crate::eq::Preset>>,
+    eq_asked: std::collections::HashSet<String>,
     /// Back on a song: the player shrinks to a bar under the pages and the
     /// song plays on (audio only) instead of stopping.
     mini: bool,
@@ -542,6 +547,8 @@ impl App {
             feed_all: false,
             up_next_open: false,
             songs: std::collections::HashSet::new(),
+            eq_found: HashMap::new(),
+            eq_asked: std::collections::HashSet::new(),
             mini: false,
             queue_drag: None,
             controls_visible: true,
@@ -1250,6 +1257,9 @@ impl App {
                 Msg::Song(id) => {
                     self.songs.insert(id);
                 }
+                Msg::Genre(id, p) => {
+                    self.eq_found.insert(id, p);
+                }
                 Msg::Related(id, vids) => {
                     if self.playing_id() == Some(id.as_str()) {
                         self.related = (id, vids);
@@ -1458,6 +1468,92 @@ impl App {
             if self.played.len() > 200 {
                 self.played.remove(0);
             }
+        }
+    }
+
+    /// The playing song's artist (for the EQ choice and the lookup), and
+    /// the song's name.
+    fn song_artist(&self) -> Option<(String, String)> {
+        let p = self.embedded.as_ref()?;
+        let channel = match &self.watch {
+            Some((id, w)) if self.np_artist.is_empty() && *id == p.id => {
+                w.channel.clone().unwrap_or_default()
+            }
+            _ => self.np_artist.clone(),
+        };
+        crate::eq::artist_and_song(&p.title, &channel)
+    }
+
+    /// What the EQ menu shows for the playing video (None: not a song).
+    fn eq_view(&self) -> Option<crate::eq::View> {
+        let id = self.playing_id()?;
+        if !self.songs.contains(id) {
+            return None;
+        }
+        let manual = self.song_artist().and_then(|(a, _)| {
+            self.settings
+                .eq_artists
+                .get(&crate::eq::artist_key(&a))
+                .copied()
+        });
+        let auto = if self.settings.eq_auto {
+            self.eq_found
+                .get(id)
+                .map(|p| p.unwrap_or(crate::eq::Preset::Flat))
+        } else {
+            Some(crate::eq::Preset::Flat)
+        };
+        Some(crate::eq::View {
+            current: manual.or(auto).unwrap_or(crate::eq::Preset::Flat),
+            manual: manual.is_some(),
+            auto,
+        })
+    }
+
+    /// A choice from the EQ menu: remembered for the artist (Auto forgets it).
+    fn pick_eq(&mut self, pick: crate::eq::Pick) {
+        let Some((artist, _)) = self.song_artist() else {
+            return;
+        };
+        let key = crate::eq::artist_key(&artist);
+        match pick {
+            Some(p) => {
+                self.settings.eq_artists.insert(key, p);
+            }
+            None => {
+                self.settings.eq_artists.remove(&key);
+            }
+        }
+    }
+
+    /// Songs: look up the genre once, and keep mpv's EQ on the preset in
+    /// effect. Everything else plays flat.
+    fn sync_eq(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.embedded.as_ref().map(|p| p.id.clone()) else {
+            return;
+        };
+        let song = self.songs.contains(&id);
+        if song && self.settings.eq_auto && !self.eq_asked.contains(&id) {
+            if let Some((artist, name)) = self.song_artist() {
+                self.eq_asked.insert(id.clone());
+                let (tx, ctx, id) = (self.tx.clone(), ctx.clone(), id.clone());
+                std::thread::spawn(move || {
+                    let found = crate::eq::lookup(&artist, &name).ok();
+                    if std::env::var_os("YTMINI_DEBUG").is_some() {
+                        eprintln!("eq: {artist} — {name}: {found:?}");
+                    }
+                    let p = found
+                        .as_deref()
+                        .map(crate::eq::Preset::for_genres)
+                        .filter(|p| *p != crate::eq::Preset::Flat);
+                    let _ = tx.send(Msg::Genre(id, p));
+                    ctx.request_repaint();
+                });
+            }
+        }
+        let filter = self.eq_view().and_then(|v| v.current.filter());
+        if let Some(p) = &mut self.embedded {
+            p.set_eq(filter);
         }
     }
 
@@ -4244,6 +4340,8 @@ impl App {
         let mut jump: Option<Video> = None;
         let mut video_rect = egui::Rect::NOTHING;
         let song_now = self.playing_song();
+        let eq_now = self.eq_view();
+        let mut eq_pick = None;
         if let (Some(p), Some(surface), Some(gl)) =
             (&mut self.embedded, &mut self.surface, frame.gl())
         {
@@ -4259,6 +4357,7 @@ impl App {
                 autoplay_in,
                 panel_open: Some(self.up_next_open),
                 song: song_now,
+                eq: eq_now,
             };
             let act = p.ui(ui, view);
             go_next |= act.next;
@@ -4273,6 +4372,7 @@ impl App {
                 self.autoplay_cancelled = true;
             }
             back |= act.back;
+            eq_pick = act.eq_pick;
             toggle_fs |= act.toggle_fullscreen;
             quality = act.quality;
             if act.open_in_window {
@@ -4291,6 +4391,9 @@ impl App {
         }
         if toggle_fs {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
+        }
+        if let Some(pick) = eq_pick {
+            self.pick_eq(pick);
         }
         if let Some(q) = quality {
             self.settings.quality = q;
@@ -4365,6 +4468,8 @@ impl App {
             egui::pos2(lane.center().x, lane.bottom() - 16.0 - H / 2.0),
             Vec2::new(w, H),
         );
+        let eqv = self.eq_view();
+        let mut eq_pick = None;
         let Some(p) = &mut self.embedded else { return };
         egui::Area::new(egui::Id::unique("music_card"))
             .order(egui::Order::Foreground)
@@ -4408,7 +4513,13 @@ impl App {
                 };
                 let close_r = r(card.right() - 26.0, 32.0);
                 let open_r = r(close_r.center().x - 34.0, 32.0);
-                let next_r = r(open_r.center().x - 46.0, 38.0);
+                // EQ menu (songs), left of ⌃
+                let eq_w = if eqv.is_some() { 92.0 } else { 0.0 };
+                let eq_r = egui::Rect::from_min_max(
+                    egui::pos2(open_r.left() - 6.0 - eq_w, cy - 14.0),
+                    egui::pos2(open_r.left() - 6.0, cy + 14.0),
+                );
+                let next_r = r(eq_r.left() - 26.0, 38.0);
                 let pp_r = r(next_r.center().x - 42.0, 42.0);
                 let prev_r = r(pp_r.center().x - 42.0, 38.0);
 
@@ -4521,6 +4632,26 @@ impl App {
                     if has_next { text() } else { dim },
                 );
 
+                if let Some(v) = &eqv {
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(eq_r)
+                            .layout(Layout::right_to_left(Align::Center)),
+                        |ui| {
+                            egui::ComboBox::from_id_salt("music_eq")
+                                .selected_text(
+                                    RichText::new(format!("EQ · {}", v.current.label())).size(12.0),
+                                )
+                                .width(eq_w - 4.0)
+                                .height(400.0)
+                                .show_ui(ui, |ui| {
+                                    if let Some(pk) = crate::eq::menu(ui, v) {
+                                        eq_pick = Some(pk);
+                                    }
+                                });
+                        },
+                    );
+                }
                 // ⌃ open the player, ✕ stop
                 if btn(ui, open_r, "music_open", true)
                     .on_hover_text(t("Show the player"))
@@ -4599,6 +4730,9 @@ impl App {
                 }
             });
 
+        if let Some(pk) = eq_pick {
+            self.pick_eq(pk);
+        }
         if close {
             self.close_embedded(&ctx, frame);
         } else if expand {
@@ -4670,6 +4804,8 @@ impl App {
                             });
                             ui.checkbox(&mut s.mark_watched, t("Add videos I watch to my YouTube history"));
                             ui.checkbox(&mut s.volume_leveling, t("Level volume (quiet voices up, loud parts down)"));
+                            ui.checkbox(&mut s.eq_auto, t("Auto EQ for songs (a preset for the genre)"));
+                            ui.label(RichText::new(t("The genre comes from Deezer: ytmini sends it the artist and song name only. A preset you pick in the player's EQ menu is kept for that artist.")).small().color(text_dim()));
                             ui.checkbox(&mut s.prepare_on_hover, t("Start videos faster (prepare the one you're pointing at)"));
                                 ui.checkbox(&mut s.autoplay, t("Autoplay the next video in the queue"));
                             ui.label(
@@ -5577,6 +5713,7 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
             ctx.request_repaint_after(Duration::from_millis(200));
         }
+        self.sync_eq(ctx);
         crate::awake::set(match &self.embedded {
             Some(p) if p.started && !p.paused && !p.eof => {
                 if !self.hidden && !self.mini && p.has_video() {

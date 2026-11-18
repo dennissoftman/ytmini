@@ -11,6 +11,7 @@ mod crashlog;
 mod dearrow;
 mod deps;
 mod downloads;
+mod eq;
 mod i18n;
 mod innertube;
 mod links;

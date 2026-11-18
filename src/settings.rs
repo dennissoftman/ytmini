@@ -75,6 +75,10 @@ pub struct Settings {
     pub region: Option<String>,
     /// Even out loudness between and within videos (mpv dynaudnorm).
     pub volume_leveling: bool,
+    /// Songs get an EQ preset for their genre (looked up on Deezer).
+    pub eq_auto: bool,
+    /// Presets picked by hand, per artist (`eq::artist_key`).
+    pub eq_artists: std::collections::BTreeMap<String, crate::eq::Preset>,
     /// Skip SponsorBlock segments.
     pub sponsorblock: bool,
     /// SponsorBlock categories to skip (ids from `sponsorblock::CATEGORIES`).
@@ -147,6 +151,8 @@ impl Default for Settings {
             language: None,
             region: None,
             volume_leveling: true,
+            eq_auto: true,
+            eq_artists: Default::default(),
             sponsorblock: true,
             sb_categories: crate::sponsorblock::default_categories(),
             download_height: 720,
