@@ -1161,7 +1161,7 @@ fn chip_kind(token: &str) -> Option<u64> {
 }
 
 /// Base64 (URL-safe or standard alphabet, padding optional).
-fn b64url_decode(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn b64url_decode(s: &str) -> Option<Vec<u8>> {
     let val = |c: u8| -> Option<u32> {
         Some(match c {
             b'A'..=b'Z' => c - b'A',

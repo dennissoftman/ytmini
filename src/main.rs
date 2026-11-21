@@ -41,6 +41,12 @@ fn main() -> eframe::Result {
     // JS runtime (deno) are found through PATH, so extend it before any threads start.
     yt::extend_process_path();
     yt::tidy_cookie_storage();
+    // `--check-native [ids…]`: test our own stream lookup and exit
+    // (scripts/check_native.sh)
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--check-native") {
+        std::process::exit(if native::self_check(&args[1..]) { 0 } else { 1 });
+    }
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

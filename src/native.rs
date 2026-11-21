@@ -349,8 +349,10 @@ struct Fmt {
     /// 0 low, 1 medium, 2 high (audio)
     quality: u8,
     channels: u32,
-    /// the original/default audio track (or the only one)
-    default_track: bool,
+    /// audio track preference: 2 original (or the only one), 1 YouTube's
+    /// default (e.g. an auto-dub in the viewer's language), 0 other, -1
+    /// audio description. yt-dlp prefers the original the same way.
+    track_rank: i8,
     /// dynamic-range-compressed or voice-boosted variant
     altered: bool,
 }
@@ -387,7 +389,32 @@ fn parse_fmt(f: &Value) -> Option<Fmt> {
         }
     };
     let num = |k: &str| f.get(k).and_then(Value::as_u64).unwrap_or(0);
-    let track = f.get("audioTrack");
+    let tags = f
+        .get("xtags")
+        .and_then(Value::as_str)
+        .map(|x| parse_xtags(x).unwrap_or_else(|| vec![("?".into(), String::new())]))
+        .unwrap_or_default();
+    let tag = |k: &str| tags.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+    let track_rank = match f.get("audioTrack") {
+        None => 2,
+        Some(t) => {
+            let name = t
+                .get("displayName")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let acont = tag("acont").unwrap_or("");
+            if acont == "original" || name.contains("original") {
+                2
+            } else if acont == "descriptive" || name.contains("descriptive") {
+                -1
+            } else if t.get("audioIsDefault").and_then(Value::as_bool) == Some(true) {
+                1
+            } else {
+                0
+            }
+        }
+    };
     Some(Fmt {
         url,
         cipher,
@@ -402,14 +429,62 @@ fn parse_fmt(f: &Value) -> Option<Fmt> {
             _ => 0,
         },
         channels: num("audioChannels") as u32,
-        default_track: track.is_none_or(|t| {
-            t.get("audioIsDefault")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        }),
+        track_rank,
+        // Language tracks carry tags too (acont, lang); any other tag
+        // (drc, voice boost, or one we don't know yet) marks a variant.
         altered: f.get("isDrc").and_then(Value::as_bool).unwrap_or(false)
-            || f.get("xtags").is_some(),
+            || tags.iter().any(|(k, _)| k != "acont" && k != "lang"),
     })
+}
+
+/// `xtags`: base64url protobuf, a list of {1: key, 2: value} entries, e.g.
+/// acont=dubbed-auto, lang=en-US. None if it doesn't decode.
+fn parse_xtags(x: &str) -> Option<Vec<(String, String)>> {
+    fn varint(b: &[u8], i: &mut usize) -> Option<usize> {
+        let (mut v, mut shift) = (0usize, 0);
+        loop {
+            let c = *b.get(*i)?;
+            *i += 1;
+            v |= ((c & 0x7f) as usize) << shift;
+            if c & 0x80 == 0 {
+                return Some(v);
+            }
+            shift += 7;
+            if shift > 28 {
+                return None;
+            }
+        }
+    }
+    // (field number, bytes) of each length-delimited field
+    fn fields(b: &[u8]) -> Option<Vec<(usize, &[u8])>> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            let key = varint(b, &mut i)?;
+            if key & 7 != 2 {
+                return None;
+            }
+            let len = varint(b, &mut i)?;
+            out.push((key >> 3, b.get(i..i.checked_add(len)?)?));
+            i += len;
+        }
+        Some(out)
+    }
+    let raw = crate::innertube::b64url_decode(x)?;
+    let mut tags = Vec::new();
+    for (n, entry) in fields(&raw)? {
+        if n != 1 {
+            return None;
+        }
+        let kv = fields(entry)?;
+        let get = |want: usize| {
+            kv.iter()
+                .find(|(n, _)| *n == want)
+                .map(|(_, v)| String::from_utf8_lossy(v).into_owned())
+        };
+        tags.push((get(1)?, get(2).unwrap_or_default()));
+    }
+    Some(tags)
 }
 
 /// Our yt-dlp format strings (`yt::profile`): max height and whether 30 fps
@@ -462,7 +537,7 @@ fn pick(formats: &[Fmt], max_h: u32, fps30: bool) -> Option<(Fmt, Fmt)> {
         .iter()
         .filter(|f| !f.video && !f.altered)
         .filter_map(|f| Some((audio_codec_rank(&f.codec)?, f)))
-        .max_by_key(|(rank, f)| (f.default_track, f.quality, f.channels, *rank, f.bitrate))?
+        .max_by_key(|(rank, f)| (f.track_rank, f.quality, f.channels, *rank, f.bitrate))?
         .1;
     Some((video.clone(), audio.clone()))
 }
@@ -710,13 +785,15 @@ pub fn resolve(tools: &Tools, cookies: &Path, video: &Video, format: &str) -> Re
     } else {
         &TV_SAMSUNG
     };
-    lookup(tools, cookies, video, max_h, fps30, spec).map_err(|e| {
-        if e.is::<Skip>() {
-            e
-        } else {
-            e.context(spec.name)
-        }
-    })
+    lookup(tools, cookies, video, max_h, fps30, spec)
+        .map(|(d, _)| d)
+        .map_err(|e| {
+            if e.is::<Skip>() {
+                e
+            } else {
+                e.context(spec.name)
+            }
+        })
 }
 
 fn lookup(
@@ -726,7 +803,7 @@ fn lookup(
     max_h: u32,
     fps30: bool,
     spec: &Spec,
-) -> Result<Direct> {
+) -> Result<(Direct, String)> {
     let (player_id, code, sts) = player().context("player script")?;
     let client = Client::new(cookies)?;
     let r = client.post_as(
@@ -799,13 +876,23 @@ fn lookup(
         }
         h.ours.insert(video.id.clone());
     }
+    let picked = format!(
+        "{} {}p{} + {} {}ch{}",
+        v.codec,
+        v.height,
+        v.fps,
+        a.codec,
+        a.channels,
+        match a.track_rank {
+            2 => "",
+            1 => " (default track)",
+            _ => " (other track)",
+        }
+    );
     if debug() {
-        eprintln!(
-            "native: {} via {} → {} {}p{} + {} ({}ch)",
-            video.id, spec.name, v.codec, v.height, v.fps, a.codec, a.channels
-        );
+        eprintln!("native: {} via {} → {picked}", video.id, spec.name);
     }
-    Ok(Direct {
+    let direct = Direct {
         video: video_url,
         audio: Some(audio_url),
         user_agent: Some(spec.user_agent.to_string()),
@@ -814,7 +901,117 @@ fn lookup(
             .pointer("/videoDetails/title")
             .and_then(Value::as_str)
             .map(str::to_string),
-    })
+    };
+    Ok((direct, picked))
+}
+
+// ---------- self-check ----------
+
+/// Videos `--check-native` looks up: a plain video, a song, and a video
+/// with auto-dubbed audio tracks (which broke the lookup in 0.1.9).
+const CHECK_VIDEOS: [(&str, &str); 3] = [
+    ("aqz-KE-bpKQ", "Big Buck Bunny"),
+    ("dQw4w9WgXcQ", "song"),
+    ("G9Kt7VNB46A", "auto-dubbed tracks"),
+];
+
+/// `ytmini --check-native [video ids…]`: look the check videos up the way
+/// playback does (both clients, signature + n challenge, a one-byte stream
+/// check), without playing anything, so nothing reaches the watch history.
+/// Prints one line per lookup; returns false if any failed. Each run is
+/// appended to `logs/native-check.log`.
+pub fn self_check(ids: &[String]) -> bool {
+    let tools = match crate::yt::Tools::locate() {
+        Ok(t) => t,
+        Err(_) => {
+            println!("FAIL  yt-dlp or mpv not found (open ytmini once to install them)");
+            return false;
+        }
+    };
+    if tools.deno.is_none() || ejs_dir(&tools).is_none() {
+        println!("FAIL  no challenge solver (deno or ytmini's own yt-dlp missing)");
+        return false;
+    }
+    let cookies = match crate::yt::cookie_file() {
+        Ok(c) if c.exists() => c,
+        _ => {
+            println!("FAIL  not signed in (no cookies)");
+            return false;
+        }
+    };
+    let videos: Vec<(String, String)> = if ids.is_empty() {
+        CHECK_VIDEOS
+            .iter()
+            .map(|(id, what)| (id.to_string(), what.to_string()))
+            .collect()
+    } else {
+        ids.iter().map(|id| (id.clone(), String::new())).collect()
+    };
+    println!("ytmini {} native lookup check", env!("CARGO_PKG_VERSION"));
+    let mut ok = true;
+    let mut log = Vec::new();
+    for (i, (id, what)) in videos.iter().enumerate() {
+        for spec in [&WEB_CREATOR, &TV_SAMSUNG] {
+            if i > 0 || spec.name != WEB_CREATOR.name {
+                // spaced out, so YouTube doesn't take it for a bot
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            let video = Video {
+                id: id.clone(),
+                ..Default::default()
+            };
+            let t = Instant::now();
+            let r = lookup(&tools, &cookies, &video, 1080, false, spec);
+            let ms = t.elapsed().as_millis();
+            let label = if what.is_empty() {
+                id.clone()
+            } else {
+                format!("{id} ({what})")
+            };
+            let line = match r {
+                Ok((_, picked)) => format!("ok    {label} via {}: {picked}, {ms} ms", spec.name),
+                Err(e) => {
+                    ok = false;
+                    let reason = crate::crashlog::redact(&format!("{e:#}")).replace('\n', " ");
+                    format!("FAIL  {label} via {}: {reason}", spec.name)
+                }
+            };
+            println!("{line}");
+            log.push(line);
+        }
+    }
+    println!(
+        "{}",
+        if ok {
+            "All good: ytmini finds streams on its own."
+        } else {
+            "Something failed: ytmini falls back to yt-dlp (slower) until it's fixed."
+        }
+    );
+    if let Some(dir) = crate::crashlog::dir() {
+        let (date, time, zone) = crate::crashlog::now();
+        let entry = format!(
+            "{date} {time} {zone}  ytmini {}  {}\n{}\n",
+            env!("CARGO_PKG_VERSION"),
+            if ok { "ok" } else { "FAILED" },
+            log.iter()
+                .map(|l| format!("    {l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let path = dir.join("native-check.log");
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > 256 * 1024) {
+            let _ = std::fs::rename(&path, path.with_extension("log.old"));
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = f.write_all(entry.as_bytes());
+        }
+    }
+    ok
 }
 
 /// Fetch the player script and have the solver parse it, so the first video
@@ -921,7 +1118,7 @@ mod tests {
             bitrate: br,
             quality: 0,
             channels: 2,
-            default_track: true,
+            track_rank: 2,
             altered: false,
         }
     }
@@ -937,7 +1134,7 @@ mod tests {
         drc.altered = true;
         drc.bitrate = 999_999;
         let mut dub = aac51.clone();
-        dub.default_track = false;
+        dub.track_rank = 0;
         dub.bitrate = 999_999;
         let fs = vec![
             fmt(true, "vp9", 1080, 60, 4_600_000),
@@ -966,5 +1163,53 @@ mod tests {
             .collect();
         let (v, _) = pick(&fs2, 1080, true).unwrap();
         assert!(v.codec.starts_with("avc1"));
+    }
+
+    #[test]
+    fn reads_xtags() {
+        // from a real auto-dubbed video (2026-11-21)
+        assert_eq!(
+            parse_xtags("ChQKBWFjb250EgtkdWJiZWQtYXV0bwoNCgRsYW5nEgVlbi1VUw").unwrap(),
+            vec![
+                ("acont".into(), "dubbed-auto".into()),
+                ("lang".into(), "en-US".into())
+            ]
+        );
+        assert_eq!(
+            parse_xtags("ChEKBWFjb250EghvcmlnaW5hbAoNCgRsYW5nEgVlcy1VUw").unwrap()[0].1,
+            "original"
+        );
+        assert_eq!(
+            parse_xtags("CggKA2RyYxIBMQ").unwrap(),
+            vec![("drc".into(), "1".into())]
+        );
+        assert!(parse_xtags("!!").is_none());
+    }
+
+    #[test]
+    fn dubbed_tracks_pick_the_original() {
+        let audio = |xtags: &str, name: &str, default: bool| {
+            json!({
+                "itag": 251, "url": "https://x/videoplayback?n=a",
+                "mimeType": "audio/webm; codecs=\"opus\"", "bitrate": 130000,
+                "audioQuality": "AUDIO_QUALITY_MEDIUM", "audioChannels": 2,
+                "xtags": xtags,
+                "audioTrack": {"displayName": name, "audioIsDefault": default},
+            })
+        };
+        let fs: Vec<Fmt> = [
+            json!({"itag": 248, "url": "https://x/videoplayback", "mimeType": "video/webm; codecs=\"vp9\"", "height": 1080, "fps": 30, "bitrate": 2000000}),
+            audio("ChQKBWFjb250EgtkdWJiZWQtYXV0bwoNCgRsYW5nEgVlbi1VUw", "English (US)", true),
+            audio("ChEKBWFjb250EghvcmlnaW5hbAoNCgRsYW5nEgVlcy1VUw", "Spanish (US) original", false),
+        ]
+        .iter()
+        .filter_map(parse_fmt)
+        .collect();
+        assert!(fs.iter().all(|f| !f.altered));
+        let (_, a) = pick(&fs, 1080, false).expect("a format fits");
+        assert_eq!(a.track_rank, 2);
+        // an unknown tag still marks a variant
+        let odd = parse_fmt(&audio("CggKA2RyYxIBMQ", "x", true)).unwrap();
+        assert!(odd.altered);
     }
 }
