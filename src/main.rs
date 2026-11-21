@@ -45,7 +45,7 @@ fn main() -> eframe::Result {
     // (scripts/check_native.sh)
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--check-native") {
-        std::process::exit(if native::self_check(&args[1..]) { 0 } else { 1 });
+        std::process::exit(native::self_check(&args[1..]));
     }
 
     let options = eframe::NativeOptions {

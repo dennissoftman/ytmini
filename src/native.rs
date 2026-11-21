@@ -918,27 +918,41 @@ const CHECK_VIDEOS: [(&str, &str); 3] = [
 /// `ytmini --check-native [video ids…]`: look the check videos up the way
 /// playback does (both clients, signature + n challenge, a one-byte stream
 /// check), without playing anything, so nothing reaches the watch history.
-/// Prints one line per lookup; returns false if any failed. Each run is
+/// Prints one line per lookup. Exit code: 0 all fine, 1 a lookup failed
+/// (ours to fix), 2 can't check here (tools missing), 3 the saved session
+/// expired (opening ytmini refreshes it from the browser). Each run is
 /// appended to `logs/native-check.log`.
-pub fn self_check(ids: &[String]) -> bool {
+pub fn self_check(ids: &[String]) -> i32 {
     let tools = match crate::yt::Tools::locate() {
         Ok(t) => t,
         Err(_) => {
             println!("FAIL  yt-dlp or mpv not found (open ytmini once to install them)");
-            return false;
+            return 2;
         }
     };
     if tools.deno.is_none() || ejs_dir(&tools).is_none() {
         println!("FAIL  no challenge solver (deno or ytmini's own yt-dlp missing)");
-        return false;
+        return 2;
     }
     let cookies = match crate::yt::cookie_file() {
         Ok(c) if c.exists() => c,
         _ => {
             println!("FAIL  not signed in (no cookies)");
-            return false;
+            return 2;
         }
     };
+    println!("ytmini {} native lookup check", env!("CARGO_PKG_VERSION"));
+    // Google retires our copy of the login every few days; that's not a
+    // lookup failure, and every lookup would just fail the same way.
+    if let Err(e) = crate::innertube::check_session(&cookies) {
+        let e = format!("{e:#}");
+        if e.contains(crate::innertube::SESSION_EXPIRED) {
+            println!("SIGNED OUT  the saved YouTube session expired.");
+            println!("Open ytmini: it refreshes the session from your browser. Then run the check again.");
+            write_check_log("signed out", &[]);
+            return 3;
+        }
+    }
     let videos: Vec<(String, String)> = if ids.is_empty() {
         CHECK_VIDEOS
             .iter()
@@ -947,7 +961,6 @@ pub fn self_check(ids: &[String]) -> bool {
     } else {
         ids.iter().map(|id| (id.clone(), String::new())).collect()
     };
-    println!("ytmini {} native lookup check", env!("CARGO_PKG_VERSION"));
     let mut ok = true;
     let mut log = Vec::new();
     for (i, (id, what)) in videos.iter().enumerate() {
@@ -988,30 +1001,37 @@ pub fn self_check(ids: &[String]) -> bool {
             "Something failed: ytmini falls back to yt-dlp (slower) until it's fixed."
         }
     );
-    if let Some(dir) = crate::crashlog::dir() {
-        let (date, time, zone) = crate::crashlog::now();
-        let entry = format!(
-            "{date} {time} {zone}  ytmini {}  {}\n{}\n",
-            env!("CARGO_PKG_VERSION"),
-            if ok { "ok" } else { "FAILED" },
-            log.iter()
-                .map(|l| format!("    {l}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-        let path = dir.join("native-check.log");
-        if std::fs::metadata(&path).is_ok_and(|m| m.len() > 256 * 1024) {
-            let _ = std::fs::rename(&path, path.with_extension("log.old"));
-        }
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            let _ = f.write_all(entry.as_bytes());
-        }
+    write_check_log(if ok { "ok" } else { "FAILED" }, &log);
+    if ok {
+        0
+    } else {
+        1
     }
-    ok
+}
+
+fn write_check_log(result: &str, lines: &[String]) {
+    let Some(dir) = crate::crashlog::dir() else {
+        return;
+    };
+    let (date, time, zone) = crate::crashlog::now();
+    let mut entry = format!(
+        "{date} {time} {zone}  ytmini {}  {result}\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    for l in lines {
+        entry.push_str(&format!("    {l}\n"));
+    }
+    let path = dir.join("native-check.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 256 * 1024) {
+        let _ = std::fs::rename(&path, path.with_extension("log.old"));
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = f.write_all(entry.as_bytes());
+    }
 }
 
 /// Fetch the player script and have the solver parse it, so the first video

@@ -7,7 +7,10 @@
 #   ./scripts/check_native.sh            # the default test videos
 #   ./scripts/check_native.sh <id> ...   # specific videos
 #
-# On failure, the report is copied to the clipboard: paste it into a bug report.
+# Exit codes: 0 all fine; 1 a lookup failed: the report is copied to the
+# clipboard, paste it into a bug report; 2 can't check (tools or sign-in missing);
+# 3 the saved YouTube session expired: open ytmini (it refreshes the session
+# from your browser) and run the check again.
 set -u
 
 APP="${YTMINI_BIN:-$HOME/Applications/ytmini.app/Contents/MacOS/ytmini}"
@@ -22,7 +25,12 @@ out=$("$APP" --check-native "$@" 2>&1)
 status=$?
 echo "$out"
 
-if [ $status -ne 0 ]; then
+# 3: the saved login expired (normal every few days); not a lookup bug
+if [ $status -eq 3 ]; then
+    exit 3
+fi
+
+if [ $status -eq 1 ]; then
     {
         echo "ytmini native lookup check failed"
         echo
