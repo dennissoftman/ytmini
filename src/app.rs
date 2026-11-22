@@ -360,6 +360,8 @@ pub struct App {
     eof_at: Option<std::time::Instant>,
     autoplay_cancelled: bool,
     smoke: Option<Smoke>,
+    /// `signed_in()` cache: cookies.txt mtime → has a Google session.
+    signed_in_cache: std::cell::Cell<(Option<std::time::SystemTime>, bool)>,
 
     // links handed over from outside (clipboard, Services menu)
     /// Waiting for `ui` (needs the Frame to leave the player, and a signed-in main screen).
@@ -481,6 +483,29 @@ impl Smoke {
 }
 
 impl App {
+    /// The cookies hold a Google session (re-reads only when the file changes).
+    fn signed_in(&self) -> bool {
+        let mtime = std::fs::metadata(&self.cookies)
+            .and_then(|m| m.modified())
+            .ok();
+        let (cached, v) = self.signed_in_cache.get();
+        if mtime.is_some() && cached == mtime {
+            return v;
+        }
+        let v = mtime.is_some() && yt::logged_in(&self.cookies);
+        self.signed_in_cache.set((mtime, v));
+        v
+    }
+
+    /// Open the sign-in screen (signed-out mode, Settings, an empty feed).
+    fn open_signin(&mut self) {
+        self.import_error = None;
+        self.safari_blocked = signin::safari_needs_access();
+        self.sessions = signin::sessions();
+        self.session_pick = 0;
+        self.screen = Screen::Onboarding;
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let ctx = &cc.egui_ctx;
         crate::theme::init(ctx);
@@ -540,6 +565,7 @@ impl App {
             eof_at: None,
             autoplay_cancelled: false,
             smoke: None,
+            signed_in_cache: std::cell::Cell::new((None, false)),
             pending_link: None,
             link_start: None,
             clip_link: None,
@@ -675,7 +701,7 @@ impl App {
                 let on_main = matches!(self.screen, Screen::Main);
                 // a new yt-dlp (or deno) may have arrived: restart the helpers
                 crate::resolver::reset();
-                if yt::logged_in(&self.cookies) {
+                if self.signed_in() || self.settings.signed_out_ok {
                     let (tools, cookies) = (self.tools.clone(), self.cookies.clone());
                     std::thread::spawn(move || {
                         if let Some(t) = tools {
@@ -917,8 +943,11 @@ impl App {
     /// Load every sidebar tab in parallel (each on its own yt-dlp stream), so
     /// switching tabs shows fresh results right away.
     fn prefetch_tabs(&mut self, ctx: &egui::Context) {
+        let signed_in = self.signed_in();
         for t in BASE_TABS {
-            self.load(ctx, t, false);
+            if signed_in || !t.needs_account() {
+                self.load(ctx, t, false);
+            }
         }
     }
 
@@ -933,6 +962,13 @@ impl App {
                 .rev()
                 .map(|e| e.as_video())
                 .collect();
+            (tab.loading, tab.loaded_once, tab.exhausted, tab.error) = (false, true, true, None);
+            return;
+        }
+        if source.needs_account() && !self.signed_in() {
+            // signed out: Home shows a "search or sign in" card instead
+            let tab = self.tabs.entry(source).or_default();
+            tab.videos.clear();
             (tab.loading, tab.loaded_once, tab.exhausted, tab.error) = (false, true, true, None);
             return;
         }
@@ -1648,6 +1684,7 @@ impl App {
         // YTMINI_NO_HISTORY: testing against a real account without
         // touching its watch history / recommendations
         if self.settings.mark_watched
+            && self.signed_in()
             && self.smoke.is_none()
             && std::env::var_os("YTMINI_NO_HISTORY").is_none()
         {
@@ -2030,7 +2067,9 @@ impl App {
 
     fn ui_onboarding(&mut self, ui: &mut egui::Ui) {
         let mut cancel = false;
-        let can_cancel = yt::logged_in(&self.cookies) && self.importing.is_none();
+        let can_cancel =
+            (self.signed_in() || self.settings.signed_out_ok) && self.importing.is_none();
+        let mut skip = false;
         let busy = self.importing.is_some();
         let mut google = GoogleAction::None;
 
@@ -2094,6 +2133,19 @@ impl App {
                                 );
                             });
                     }
+                    if !can_cancel && !busy {
+                        ui.add_space(14.0);
+                        if ui.link(t("Continue without signing in")).clicked() {
+                            skip = true;
+                        }
+                        ui.label(
+                            RichText::new(t(
+                                "Search, channels and playback work without an account.",
+                            ))
+                            .small()
+                            .color(text_dim()),
+                        );
+                    }
                     if can_cancel {
                         ui.add_space(12.0);
                         if ui.button(t("← Back to videos")).clicked() {
@@ -2121,6 +2173,16 @@ impl App {
             self.import_error = None;
             self.screen = Screen::Main;
         }
+        if skip {
+            self.signin = None;
+            self.import_error = None;
+            self.settings.signed_out_ok = true;
+            self.settings.save();
+            self.screen = Screen::Main;
+            let ctx = ui.ctx().clone();
+            self.load(&ctx, Source::Feed, false);
+            self.prefetch_tabs(&ctx);
+        }
     }
 
     fn ui_main(&mut self, ui: &mut egui::Ui) {
@@ -2139,6 +2201,8 @@ impl App {
         let mut refresh = refresh_key;
         let mut switch_to: Option<Source> = None;
         let mut search: Option<String> = None;
+        let signed_in = self.signed_in();
+        let mut sign_in = false;
 
         // ----- sidebar -----
         let narrow = ctx.content_rect().width() < 760.0;
@@ -2179,6 +2243,9 @@ impl App {
                         || (self.active.is_page() && self.nav_back.first() == Some(t))
                 };
                 for t in BASE_TABS {
+                    if !signed_in && t.needs_account() && t != Source::Feed {
+                        continue;
+                    }
                     if t == Source::WatchLater && !collapsed {
                         ui.add_space(10.0);
                         ui.label(
@@ -2218,6 +2285,9 @@ impl App {
                     }
                     if item(ui, Icon::Gear, t("Settings"), self.show_settings) {
                         self.show_settings = !self.show_settings;
+                    }
+                    if !signed_in && item(ui, Icon::Account, t("Sign in"), false) {
+                        sign_in = true;
                     }
                 });
             });
@@ -2417,7 +2487,21 @@ impl App {
                             }
                         }
                     } else if tab.loaded_once {
-                        if source == Source::Feed {
+                        if source == Source::Feed && !signed_in {
+                            ui.label(
+                                RichText::new(t("You're not signed in"))
+                                    .size(18.0)
+                                    .color(text()),
+                            );
+                            ui.label(
+                                RichText::new(t("Search for videos and channels, or sign in to see your feed, subscriptions and history."))
+                                    .color(text_dim()),
+                            );
+                            ui.add_space(10.0);
+                            if accent_button(ui, t("Sign in")).clicked() {
+                                reimport_from_empty = true;
+                            }
+                        } else if source == Source::Feed {
                             ui.label(
                                 RichText::new(t("Your feed came back empty"))
                                     .size(18.0)
@@ -2594,6 +2678,7 @@ impl App {
                 m,
                 in_watch_later: source == Source::WatchLater,
                 in_history: source == Source::History,
+                signed_in,
                 download: dl_active
                     .get(&v.id)
                     .copied()
@@ -2912,6 +2997,9 @@ impl App {
             self.active = s.clone();
             self.load(&ctx, s, true);
         }
+        if sign_in {
+            self.open_signin();
+        }
         if let Some(t) = switch_to {
             self.feed_all = false;
             self.nav_back.clear();
@@ -2922,11 +3010,7 @@ impl App {
             self.load(&ctx, self.active.clone(), true);
         }
         if reimport_from_empty {
-            self.import_error = None;
-            self.safari_blocked = signin::safari_needs_access();
-            self.sessions = signin::sessions();
-            self.session_pick = 0;
-            self.screen = Screen::Onboarding;
+            self.open_signin();
         }
     }
 }
@@ -3108,6 +3192,10 @@ impl App {
             Source::Feed | Source::Subscriptions | Source::Music | Source::Topic { .. }
         );
         if !(feed || matches!(self.active, Source::Search(_))) {
+            return;
+        }
+        // signed out, Home is only the "search or sign in" card
+        if feed && !self.signed_in() {
             return;
         }
         let mut go: Option<Source> = None;
@@ -3696,8 +3784,16 @@ impl App {
                     }
                 });
                 ui.add_space(6.0);
+                let signed_in = self.signed_in();
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
+                    if !signed_in {
+                        // signed out: the like count, no account actions
+                        if let Some(n) = info.like_count.as_deref() {
+                            icon_pill(ui, Glyph::ThumbUp, Some(n), false);
+                        }
+                        return;
+                    }
                     if icon_pill(
                         ui,
                         Glyph::ThumbUp,
@@ -4808,6 +4904,7 @@ impl App {
         let mut check_updates = false;
         let mut clear_downloads = false;
         let before_quality = self.settings.quality;
+        let signed_in = self.signed_in();
         let tab = &mut self.settings_tab;
         egui::Window::new(t("Settings"))
             .open(&mut open)
@@ -5132,7 +5229,8 @@ impl App {
                                         }
                                     }
                                 }
-                                if ui.button(t("Sign in again…")).clicked() {
+                                let label = if signed_in { t("Sign in again…") } else { t("Sign in") };
+                                if ui.button(label).clicked() {
                                     reimport = true;
                                 }
                             });
@@ -5189,11 +5287,7 @@ impl App {
             self.cache_usage = Some(0);
         }
         if reimport {
-            self.import_error = None;
-            self.safari_blocked = signin::safari_needs_access();
-            self.sessions = signin::sessions();
-            self.session_pick = 0;
-            self.screen = Screen::Onboarding;
+            self.open_signin();
         }
     }
 }
@@ -6084,6 +6178,8 @@ struct CardInfo {
     m: Metrics,
     in_watch_later: bool,
     in_history: bool,
+    /// Account actions (save to playlist / Watch later) in the ⋯ menu.
+    signed_in: bool,
     /// None: not downloaded; Some(1.0): downloaded; less: in progress.
     download: Option<f32>,
     /// A Short: 9:16 cover, no duration badge.
@@ -6428,6 +6524,7 @@ fn video_card(
         m,
         in_watch_later,
         in_history,
+        signed_in,
         download,
         portrait,
     } = info;
@@ -6667,15 +6764,17 @@ fn video_card(
                 *action = CardAction::Quick(Quick::AddToQueue);
             }
             ui.separator();
-            if ui.button(t("Save to playlist…")).clicked() {
-                *action = CardAction::Quick(Quick::SaveTo);
-            }
-            if in_watch_later {
-                if ui.button(t("Remove from Watch later")).clicked() {
-                    *action = CardAction::Quick(Quick::WatchLater(false));
+            if signed_in {
+                if ui.button(t("Save to playlist…")).clicked() {
+                    *action = CardAction::Quick(Quick::SaveTo);
                 }
-            } else if ui.button(t("Save to Watch later")).clicked() {
-                *action = CardAction::Quick(Quick::WatchLater(true));
+                if in_watch_later {
+                    if ui.button(t("Remove from Watch later")).clicked() {
+                        *action = CardAction::Quick(Quick::WatchLater(false));
+                    }
+                } else if ui.button(t("Save to Watch later")).clicked() {
+                    *action = CardAction::Quick(Quick::WatchLater(true));
+                }
             }
             let (label, to) = if watched {
                 (t("Mark as unwatched"), false)
@@ -6949,6 +7048,7 @@ enum Icon {
     Lists,
     Search,
     Gear,
+    Account,
     Collapse,
     Expand,
 }
@@ -7047,6 +7147,17 @@ fn paint_icon(p: &egui::Painter, icon: Icon, c: egui::Pos2, color: Color32) {
             }
             p.circle_stroke(c, 5.5, st);
             p.circle_stroke(c, 2.0, st);
+        }
+        Icon::Account => {
+            // head and shoulders
+            p.circle_stroke(c + Vec2::new(0.0, -3.0), 3.5, st);
+            let pts: Vec<egui::Pos2> = (0..=16)
+                .map(|i| {
+                    let a = (200.0 + i as f32 * 140.0 / 16.0).to_radians();
+                    c + Vec2::new(0.0, 9.0) + Vec2::angled(a) * 7.0
+                })
+                .collect();
+            p.line(pts, st);
         }
         Icon::Collapse | Icon::Expand => {
             let s = if matches!(icon, Icon::Collapse) {

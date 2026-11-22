@@ -522,6 +522,20 @@ pub enum Source {
 }
 
 impl Source {
+    /// Lists that only exist for a signed-in account.
+    pub fn needs_account(&self) -> bool {
+        matches!(
+            self,
+            Source::Feed
+                | Source::Subscriptions
+                | Source::Music
+                | Source::WatchLater
+                | Source::History
+                | Source::Playlists
+                | Source::Topic { .. }
+        )
+    }
+
     pub fn label(&self) -> String {
         match self {
             Source::Feed => t("Feed").into(),

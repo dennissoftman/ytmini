@@ -59,6 +59,9 @@ pub struct Settings {
     pub close_to_tray: bool,
     /// For one-click "Refresh session".
     pub signin_source: Option<SignInSource>,
+    /// "Continue without signing in": skip the sign-in screen while there's
+    /// no session (search, channels and playback work signed out).
+    pub signed_out_ok: bool,
     pub density: Density,
     /// Sidebar shows icons only.
     pub sidebar_collapsed: bool,
@@ -144,6 +147,7 @@ impl Default for Settings {
             mark_watched: true,
             close_to_tray: true,
             signin_source: None,
+            signed_out_ok: false,
             density: Density::Comfortable,
             sidebar_collapsed: false,
             prepare_on_hover: true,

@@ -2029,3 +2029,30 @@ mod music_live {
         assert!(!super::is_song("aqz-KE-bpKQ").unwrap());
     }
 }
+
+#[cfg(test)]
+mod signed_out_live {
+    /// What works without a session. Run with an empty profile:
+    /// `YTMINI_CONFIG_DIR=$(mktemp -d) cargo test --release -- --ignored signed_out_lists --nocapture`
+    #[test]
+    #[ignore]
+    fn signed_out_lists() {
+        use crate::yt::Source;
+        let cookies = crate::yt::config_dir().unwrap().join("cookies.txt");
+        assert!(!cookies.exists(), "needs an empty YTMINI_CONFIG_DIR");
+        for src in [
+            Source::Feed,
+            Source::Music,
+            Source::Search("big buck bunny".into()),
+            Source::Channel {
+                url: "https://www.youtube.com/@BlenderStudio".into(),
+                name: "Blender Studio".into(),
+            },
+        ] {
+            let n = super::Pager::new(&cookies, &src)
+                .and_then(|mut p| p.next_page())
+                .map(|v| v.map(|v| v.len()));
+            eprintln!("{src:?}: {n:?}");
+        }
+    }
+}

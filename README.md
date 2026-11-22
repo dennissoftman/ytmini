@@ -78,6 +78,9 @@ Edge, Chromium, Opera and Vivaldi (macOS; one Keychain prompt), or Safari
 sign-in inside embedded web views, and OAuth doesn't give access to the feed,
 history or Watch later, so this is the only way to see your own YouTube.
 
+You can also skip signing in: search, channels and playback work without an
+account; your feed, subscriptions, Watch later and history need one.
+
 Only cookies for `youtube.com` and Google sign-in are copied. They stay in
 ytmini's own settings folder (readable only by you) and are sent nowhere but
 YouTube. When Google retires the copy, ytmini refreshes it from the same
