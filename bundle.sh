@@ -34,7 +34,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key>               <string>ytmini</string>
   <key>CFBundleDisplayName</key>        <string>ytmini</string>
-  <key>CFBundleIdentifier</key>         <string>local.ytmini</string>
+  <key>CFBundleIdentifier</key>         <string>io.github.dennissoftman.ytmini</string>
   <key>CFBundleExecutable</key>         <string>ytmini</string>
   <key>CFBundleIconFile</key>           <string>ytmini</string>
   <key>CFBundlePackageType</key>        <string>APPL</string>

@@ -1,6 +1,7 @@
 //! DeArrow (experimental): community-written titles and thumbnails that
-//! replace clickbait. https://dearrow.ajay.app — same hash-prefix privacy as
-//! SponsorBlock: the server gets 4 hex chars of the id's SHA-256, never the id.
+//! replace clickbait. https://dearrow.ajay.app — titles use the same
+//! hash-prefix lookup as SponsorBlock (the server gets 4 hex chars of the id's
+//! SHA-256), but DeArrow's rendered thumbnails are fetched by video id.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;

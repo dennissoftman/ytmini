@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Installs what's missing (via Homebrew) and runs ytmini.
-# Pass --reimport to pick a browser and grab fresh cookies again.
+# Installs what's missing (via Homebrew) and runs a development build of
+# ytmini. Arguments are passed on, e.g. ./run.sh --play <url|id>.
 set -euo pipefail
 cd "$(dirname "$0")"
 

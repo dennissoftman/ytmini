@@ -60,8 +60,9 @@ jobs:
 
       - name: Build tools
         run: |
-          brew install mpv llvm makensis
+          brew install mpv llvm lld makensis jq
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
 
       - name: macOS app
         run: |

@@ -4,8 +4,10 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    # fix(deps): merging an update cuts a patch release (release-please)
     commit-message:
-      prefix: chore
+      prefix: fix
+      include: scope
     groups:
       cargo:
         patterns: ["*"]

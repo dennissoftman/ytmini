@@ -1,5 +1,7 @@
-//! ytmini — a minimal personal YouTube client.
-//! yt-dlp lists videos and handles auth (browser cookies); mpv plays them.
+//! ytmini — a minimal desktop YouTube client.
+//! Lists and account actions go through YouTube's web API with the session
+//! imported from your browser; stream links come from our own lookup (yt-dlp
+//! as the fallback); libmpv plays them.
 
 #![cfg_attr(windows, windows_subsystem = "windows")] // no console window on Windows
 

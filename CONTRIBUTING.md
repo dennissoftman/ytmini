@@ -55,7 +55,8 @@ messages (or PR titles, when squash-merging) as
 |---|---|---|
 | `feat:` | something new a user can see | minor (patch while < 1.0) |
 | `fix:` | a bug fix | patch |
-| `perf:`, `refactor:`, `docs:`, `ci:`, `chore:`, `test:` | everything else | none |
+| `perf:`, `revert:` | speed-ups, reverts | patch |
+| `refactor:`, `docs:`, `ci:`, `chore:`, `test:` | everything else | none (not in the changelog) |
 | `feat!:` / `BREAKING CHANGE:` | breaking change | major (minor while < 1.0) |
 
 Describe the change from the user's point of view:
@@ -75,7 +76,7 @@ Don't bump `version` in `Cargo.toml` by hand.
 ```bash
 cargo build --release
 cargo test --release
-cargo fmt --check && cargo clippy --release -- -D warnings
+cargo fmt --check && cargo clippy --release --all-targets -- -D warnings
 ```
 
 - macOS bundle: `./bundle.sh` (needs `brew install mpv`).

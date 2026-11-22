@@ -17,20 +17,25 @@ target=x86_64-pc-windows-msvc
 RUSTFLAGS="-C target-feature=+crt-static -A linker-messages" cargo xwin build --release --target $target
 
 cache=target/win-libmpv
-if [ ! -f $cache/libmpv-2.dll ]; then
-    url=$(gh api repos/shinchiro/mpv-winbuild-cmake/releases/latest \
-        --jq '.assets[] | select(.name|test("^mpv-dev-x86_64-[0-9]")) | .browser_download_url')
+# MPV_WINBUILD_TAG pins a release (e.g. 20251101); default: the latest.
+# The release used is recorded in libmpv-source.txt (GPL source requests).
+if [ ! -f $cache/libmpv-2.dll ] || [ ! -f $cache/libmpv-source.txt ]; then
+    rel=${MPV_WINBUILD_TAG:+tags/$MPV_WINBUILD_TAG}
+    json=$(gh api "repos/shinchiro/mpv-winbuild-cmake/releases/${rel:-latest}")
+    tag=$(printf '%s' "$json" | jq -r .tag_name)
+    url=$(printf '%s' "$json" | jq -r '.assets[] | select(.name|test("^mpv-dev-x86_64-[0-9]")) | .browser_download_url')
     rm -rf $cache && mkdir -p $cache
     curl -fsSL -o $cache/mpv.7z "$url"
     bsdtar -xf $cache/mpv.7z -C $cache libmpv-2.dll
     rm $cache/mpv.7z
+    printf 'libmpv-2.dll: https://github.com/shinchiro/mpv-winbuild-cmake/releases/tag/%s\n(%s)\n' "$tag" "$(basename "$url")" > $cache/libmpv-source.txt
 fi
 
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 setup=dist/ytmini-$version-setup.exe
 stage=target/win-pkg/ytmini
 rm -rf target/win-pkg && mkdir -p $stage dist
-cp target/$target/release/ytmini.exe $cache/libmpv-2.dll LICENSE.md NOTICE.md \
+cp target/$target/release/ytmini.exe $cache/libmpv-2.dll $cache/libmpv-source.txt LICENSE.md NOTICE.md \
     licenses/GPL-3.0.txt $stage/
 rm -f dist/ytmini-win64.zip dist/ytmini-*setup.exe
 (cd target/win-pkg && zip -qr -9 ../../dist/ytmini-win64.zip ytmini)

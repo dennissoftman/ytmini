@@ -24,13 +24,14 @@ Inside the bundle, `Contents/Resources/licenses/` holds:
 - `THIRD_PARTY.txt`: every bundled package and the exact version, so the
   corresponding source can be obtained
 
-## Windows: ytmini-setup.exe / ytmini-win64.zip
+## Windows: ytmini-<version>-setup.exe / ytmini-<version>-win64.zip
 
 The Windows build ships `libmpv-2.dll` from
 [shinchiro/mpv-winbuild-cmake](https://github.com/shinchiro/mpv-winbuild-cmake)
 (mpv with FFmpeg and its codec libraries linked in), under the GPL-3.0; the
 Windows package as a whole is likewise distributed under the GNU GPL version 3
-(`GPL-3.0.txt`, installed next to `ytmini.exe`).
+(`GPL-3.0.txt`, installed next to `ytmini.exe`). `libmpv-source.txt`, next to
+it, names the mpv-winbuild-cmake release the DLL came from.
 
 ## Source
 
