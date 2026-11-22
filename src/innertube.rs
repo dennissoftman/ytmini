@@ -47,7 +47,11 @@ static JAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 impl Client {
     /// From a Netscape cookies.txt (yt-dlp's export).
     pub fn new(cookies: &Path) -> Result<Client> {
-        let jar = std::fs::read_to_string(cookies).context("reading cookies")?;
+        // no file yet: signed out, anonymous requests
+        let jar = match std::fs::read_to_string(cookies) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            r => r.context("reading cookies")?,
+        };
         let mut pairs: Vec<(String, String)> = Vec::new();
         for line in jar.lines() {
             let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);

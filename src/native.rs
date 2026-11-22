@@ -793,6 +793,11 @@ pub fn resolve(tools: &Tools, cookies: &Path, video: &Video, format: &str) -> Re
     if tools.deno.is_none() || ejs_dir(tools).is_none() {
         return Err(Skip("no challenge solver (system yt-dlp or no deno)").into());
     }
+    // Both clients need a session (signed out, YouTube answers LOGIN_REQUIRED);
+    // yt-dlp's anonymous clients handle that case.
+    if !crate::yt::logged_in(cookies) {
+        return Err(Skip("signed out").into());
+    }
     let spec = if crate::innertube::premium() == Some(true) {
         &WEB_CREATOR
     } else {

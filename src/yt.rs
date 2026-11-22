@@ -232,8 +232,12 @@ impl CookieCopy {
         fs::create_dir_all(&dir)?;
         let n = N.fetch_add(1, Ordering::Relaxed);
         let p = dir.join(format!("cookies-{}-{n}.txt", std::process::id()));
-        // signed out: an empty jar
-        let data = fs::read(src).unwrap_or_default();
+        // signed out: an empty jar, with the header yt-dlp requires (it
+        // rejects a 0-byte file as "not a Netscape format cookies file")
+        let data = fs::read(src)
+            .ok()
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| b"# Netscape HTTP Cookie File\n".to_vec());
         write_private(&p.with_extension("tmp"), &p, &data)?;
         Ok(CookieCopy(p))
     }
