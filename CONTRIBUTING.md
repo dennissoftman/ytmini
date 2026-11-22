@@ -201,6 +201,7 @@ playing.
 | `YTMINI_HL` / `YTMINI_GL` | YouTube language / region override |
 | `YTMINI_THEME=light\|dark` | force the theme |
 | `YTMINI_NO_NATIVE=1` | skip the native stream lookup |
+| `YTMINI_X11=1` | Linux: use X11 instead of Wayland (automatic in WSL) |
 | `YTMINI_IMPORT=1` | allow Keychain cookie import in sign-in tests |
 
 ## Design decisions
