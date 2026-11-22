@@ -47,7 +47,7 @@ jobs:
       # without them the app is ad-hoc signed (see CONTRIBUTING.md, "Signing").
       MACOS_SIGNING: ${{ secrets.MACOS_CERTIFICATE != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
 
