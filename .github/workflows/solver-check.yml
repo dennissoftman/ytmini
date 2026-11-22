@@ -17,13 +17,16 @@ permissions:
 
 jobs:
   solver:
-    runs-on: ubuntu-latest
+    # same runner as CI's Linux job, so its build cache applies
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: Linux
 
       - name: Build
         run: cargo build --release

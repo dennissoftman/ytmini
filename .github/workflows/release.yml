@@ -47,6 +47,7 @@ jobs:
       # Developer ID signing + notarization run only when these secrets exist;
       # without them the app is ad-hoc signed (see CONTRIBUTING.md, "Signing").
       MACOS_SIGNING: ${{ secrets.MACOS_CERTIFICATE != '' }}
+      XWIN_CACHE_DIR: ${{ github.workspace }}/../xwin-cache
     steps:
       - uses: actions/checkout@v7
         with:
@@ -56,13 +57,26 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      # CI's macOS cache (the Windows target still builds fresh)
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macOS
 
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-xwin
 
+      # cargo-xwin's download of Microsoft's CRT and Windows SDK headers
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.XWIN_CACHE_DIR }}
+          key: xwin-${{ runner.os }}-v1
+
       - name: Build tools
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
         run: |
           brew install mpv llvm lld makensis jq
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
@@ -152,6 +166,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: Linux
 
       - name: Linux packages
         run: ./scripts/build_linux.sh

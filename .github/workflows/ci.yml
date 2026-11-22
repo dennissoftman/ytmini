@@ -38,7 +38,10 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # one cache per platform, shared with the Solver check and release builds
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.name }}
 
       - name: Format
         if: runner.os == 'macOS'
