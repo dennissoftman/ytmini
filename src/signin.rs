@@ -472,6 +472,7 @@ impl ChromiumKeys {
 }
 
 /// PBKDF2-SHA1 over "saltysalt", as Chromium derives its cookie key.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn chromium_derive(password: &[u8], rounds: u32) -> [u8; 16] {
     let mut key = [0u8; 16];
     pbkdf2::pbkdf2_hmac::<sha1::Sha1>(password, b"saltysalt", rounds, &mut key);
