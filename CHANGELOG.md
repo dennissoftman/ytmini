@@ -4,6 +4,24 @@ Entries after 0.2.0 are written by
 [release-please](https://github.com/googleapis/release-please) from
 Conventional Commits. Earlier versions were summarised by hand.
 
+## [0.3.0](https://github.com/dennissoftman/ytmini/compare/v0.2.0...v0.3.0) (2026-11-22)
+
+
+### Features
+
+* Home without signing in: suggestions for what you played, then popular videos for your region ([3ca56fe](https://github.com/dennissoftman/ytmini/commit/3ca56feacf925e78d6f2ac5353fcb723c1ce5749))
+* Linux packages (.deb and tarball) ([d5c0a95](https://github.com/dennissoftman/ytmini/commit/d5c0a95f041366ab9c12949a16b8dfd136855580))
+* sign in from more browsers ([b0828ff](https://github.com/dennissoftman/ytmini/commit/b0828ff6f5072af40e96c430bfe293e752d7f147))
+* use ytmini without signing in ([f9f2b1b](https://github.com/dennissoftman/ytmini/commit/f9f2b1b0b1bd8350686a152610b9a2b2c735e1e1))
+
+
+### Bug Fixes
+
+* **deps:** bump the cargo group with 2 updates ([#3](https://github.com/dennissoftman/ytmini/issues/3)) ([966a794](https://github.com/dennissoftman/ytmini/commit/966a7944720bb8e04c96f7c82a34cf924535fb4b))
+* Linux: the window opens under WSL ([c3ab54c](https://github.com/dennissoftman/ytmini/commit/c3ab54cd5842eb96084ad17326052f86152892bf))
+* playing videos without signing in works again ([d49479c](https://github.com/dennissoftman/ytmini/commit/d49479c56a7e7733f2fc7ddc49824b0f0066267a))
+* videos play on the first start even when the system yt-dlp is outdated ([86ede1e](https://github.com/dennissoftman/ytmini/commit/86ede1eb47f3046f5ad8876aa58b574cb941329a))
+
 ## 0.2.0 (2026-11-22)
 
 First public release.
