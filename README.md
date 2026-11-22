@@ -8,6 +8,7 @@ A small, fast desktop YouTube client for macOS, Windows and Linux.
 Your own account, no browser tab, no ads in the way.
 
 [![CI](https://github.com/dennissoftman/ytmini/actions/workflows/ci.yml/badge.svg)](https://github.com/dennissoftman/ytmini/actions/workflows/ci.yml)
+[![Solver check](https://github.com/dennissoftman/ytmini/actions/workflows/solver-check.yml/badge.svg)](https://github.com/dennissoftman/ytmini/actions/workflows/solver-check.yml)
 [![Release](https://img.shields.io/github/v/release/dennissoftman/ytmini?sort=semver)](https://github.com/dennissoftman/ytmini/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/dennissoftman/ytmini/total)](https://github.com/dennissoftman/ytmini/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
@@ -29,8 +30,8 @@ playlists in a quick, quiet window, with mpv doing the playback.
 
 - **Your YouTube**: Home with category chips, Subscriptions, Watch later,
   History, playlists, channels and search, signed in as you.
-- **Fast starts**: stream links are looked up directly (about 0.2 s, macOS
-  for now) with [yt-dlp](https://github.com/yt-dlp/yt-dlp) as the fallback;
+- **Fast starts**: stream links are looked up directly (about 0.2 s when
+  signed in; macOS and Linux for now) with [yt-dlp](https://github.com/yt-dlp/yt-dlp) as the fallback;
   the next video is prepared ahead and videos start preparing when you hover
   them.
 - **Embedded mpv player**: hardware decoding, chapters, seek-bar previews,

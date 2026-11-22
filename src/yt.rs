@@ -75,6 +75,18 @@ impl Tools {
         }
     }
 
+    /// Just yt-dlp and deno, for the challenge solver (`--check-solver`):
+    /// no player needed.
+    pub fn solver_only(ytdlp: PathBuf, deno: PathBuf) -> Tools {
+        Tools {
+            ytdlp,
+            ytdlp_managed: true,
+            mpv: None,
+            deno: Some(deno),
+            path_env: OsString::new(),
+        }
+    }
+
     pub fn ytdlp_cmd(&self) -> Command {
         let mut c = Command::new(&self.ytdlp);
         c.env("PATH", &self.path_env).stdin(Stdio::null());

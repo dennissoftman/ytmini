@@ -49,6 +49,10 @@ fn main() -> eframe::Result {
     if args.first().map(String::as_str) == Some("--check-native") {
         std::process::exit(native::self_check(&args[1..]));
     }
+    // `--check-solver`: the session-free part of it (daily CI)
+    if args.first().map(String::as_str) == Some("--check-solver") {
+        std::process::exit(native::check_solver());
+    }
 
     #[cfg(target_os = "linux")]
     prefer_x11_where_wayland_breaks();

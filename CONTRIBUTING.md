@@ -154,7 +154,14 @@ changes that API often. Check it with:
 ./target/release/ytmini --check-native <id> ...
 ```
 
-It looks up each test video with both clients (web_creator, tv_samsung),
+`./target/release/ytmini --check-solver` checks the part that needs no
+account: it installs yt-dlp and deno the way the app does, fetches YouTube's
+current player script and solves sample n and signature challenges. The
+[Solver check](.github/workflows/solver-check.yml) workflow runs it daily and
+opens an issue when it fails (exit 1); exit 2 means the runner couldn't reach
+the downloads or YouTube.
+
+`--check-native` looks up each test video with both clients (web_creator, tv_samsung),
 solves the challenges and fetches one byte of each stream. Nothing plays, so
 nothing reaches your watch history. Exit codes: 0 fine; 1 a lookup failed
 (please open an issue with the output); 2 can't check here; 3 the saved

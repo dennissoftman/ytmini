@@ -1,0 +1,58 @@
+name: Solver check
+
+# Daily: does ytmini's own stream lookup still solve the challenges in
+# YouTube's current player? This is the part that breaks most often and the
+# only part that needs no account; the player API itself is checked with a
+# signed-in session by scripts/check_native.sh. A failure opens an issue (or
+# comments on the open one).
+
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  solver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Check
+        id: check
+        run: |
+          set +e
+          YTMINI_CONFIG_DIR="$RUNNER_TEMP/ytmini" ./target/release/ytmini --check-solver | tee check.txt
+          code=${PIPESTATUS[0]}
+          if [ "$code" = 2 ]; then
+            # downloads or YouTube unreachable from the runner: not ours to fix
+            echo "::warning::Couldn't set up the solver check (network); see the log."
+            exit 0
+          fi
+          exit "$code"
+
+      - name: Report
+        if: failure() && steps.check.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Daily solver check failed"
+          run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          body=$(printf 'The [daily check](%s) failed:\n\n```\n%s\n```\n' "$run" "$(cat check.txt)")
+          n=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
+                --json number --jq '.[0].number // empty')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" -R "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi

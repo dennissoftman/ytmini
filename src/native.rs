@@ -933,6 +933,104 @@ const CHECK_VIDEOS: [(&str, &str); 3] = [
     ("G9Kt7VNB46A", "auto-dubbed tracks"),
 ];
 
+/// `ytmini --check-solver`: the session-free part of the lookup, for CI.
+/// Installs yt-dlp and deno the way the app does (checksums verified),
+/// fetches YouTube's current player script and solves sample n and signature
+/// challenges with yt-dlp's solver in our sandboxed deno. Exit code: 0 fine,
+/// 1 the solver failed on this player (ours to fix), 2 couldn't set up
+/// (downloads or YouTube unreachable).
+pub fn check_solver() -> i32 {
+    use crate::deps::{self, Dep};
+    println!(
+        "ytmini {} challenge solver check",
+        env!("CARGO_PKG_VERSION")
+    );
+    let mut paths = Vec::new();
+    for dep in [Dep::YtDlp, Dep::Deno] {
+        let path = match dep.managed() {
+            Some(p) => Ok(p),
+            None => deps::install(dep, &|_| {}),
+        };
+        match path {
+            Ok(p) => {
+                let v = deps::version(&p).unwrap_or_default();
+                let v = v.strip_prefix(dep.name()).unwrap_or(&v).trim();
+                println!("ok    {} {v}", dep.name());
+                paths.push(p);
+            }
+            Err(e) => {
+                println!("FAIL  installing {}: {e:#}", dep.name());
+                return 2;
+            }
+        }
+    }
+    let tools = Tools::solver_only(paths[0].clone(), paths[1].clone());
+    if ejs_dir(&tools).is_none() {
+        println!("FAIL  this yt-dlp build has no challenge solver scripts");
+        return 1;
+    }
+    let (id, code, sts) = match player() {
+        Ok(p) => p,
+        Err(e) => {
+            println!("FAIL  fetching the player: {e:#}");
+            // no player id / signature timestamp is a layout change, ours to fix
+            return if format!("{e:#}").contains("no ") {
+                1
+            } else {
+                2
+            };
+        }
+    };
+    println!("ok    player {id} (signature timestamp {sts})");
+    // the shapes YouTube uses: n ≈ 16 URL-safe chars, s ≈ 100+
+    let n_in = "ZdZIqFPQK-Ty8wId".to_string();
+    let s_in: String = "AOq0QJ8wRQIhAKz5Tq3yv0oK_9Dg4u1mWlC7hXr6pEJbNfSdVYtGcUaHjL2iMkBnZoQx\
+                        AiBn8sWq3Rt5Yu7Io9Pa1Sd3Fg5Hj7Kl9Zx1Cv3Bn5Mq7Wd"
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let t = Instant::now();
+    let (n_out, s_out) = match solve(
+        &tools,
+        &id,
+        &code,
+        std::slice::from_ref(&n_in),
+        std::slice::from_ref(&s_in),
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            println!("FAIL  solver: {e:#}");
+            return 1;
+        }
+    };
+    let ms = t.elapsed().as_millis();
+    let mut ok = true;
+    match n_out.get(&n_in) {
+        Some(n) if !n.is_empty() && n != &n_in && !n.starts_with("enhanced_except") => {
+            println!("ok    n challenge solved ({ms} ms)")
+        }
+        other => {
+            println!("FAIL  n challenge: {other:?}");
+            ok = false;
+        }
+    }
+    match s_out.get(&s_in) {
+        Some(s) if s != &s_in && s.len() + 10 >= s_in.len() && s.len() <= s_in.len() => {
+            println!("ok    signature challenge solved")
+        }
+        other => {
+            println!("FAIL  signature challenge: {other:?}");
+            ok = false;
+        }
+    }
+    if ok {
+        println!("All good: the challenge solver works with the current player.");
+        0
+    } else {
+        1
+    }
+}
+
 /// `ytmini --check-native [video ids…]`: look the check videos up the way
 /// playback does (both clients, signature + n challenge, a one-byte stream
 /// check), without playing anything, so nothing reaches the watch history.
