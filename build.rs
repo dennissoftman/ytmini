@@ -1,5 +1,6 @@
-//! Windows: put the app icon into ytmini.exe (Explorer, taskbar pins,
-//! shortcuts). The window icon itself is set at runtime in main.rs.
+//! Windows: put the app icon (Explorer, taskbar pins, shortcuts) and the
+//! version info (file properties, SmartScreen, code signing) into ytmini.exe.
+//! The window icon itself is set at runtime in main.rs.
 //! Needs `llvm-rc` (LLVM, also used when cross-compiling with cargo-xwin) or
 //! Windows SDK's `rc.exe`; without either the exe just has no icon.
 
@@ -9,6 +10,7 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=assets/icon.ico");
+    println!("cargo:rerun-if-changed=Cargo.toml");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -19,7 +21,7 @@ fn main() {
     let res = out.join("ytmini.res");
     // forward slashes: rc treats backslashes in strings as escapes
     let icon_path = icon.to_string_lossy().replace('\\', "/");
-    std::fs::write(&rc, format!("1 ICON \"{icon_path}\"\n")).unwrap();
+    std::fs::write(&rc, format!("1 ICON \"{icon_path}\"\n{}", version_info())).unwrap();
 
     // llvm-rc: our .rc has no #includes, so skip its clang preprocessing
     let llvm = ["-no-preprocess"].as_slice();
@@ -47,4 +49,48 @@ fn main() {
         }
     }
     println!("cargo:warning=no resource compiler (llvm-rc / rc.exe): ytmini.exe gets no icon");
+}
+
+/// A VERSIONINFO resource from Cargo.toml. Numeric flags only: the .rc is
+/// compiled without the preprocessor, so winver.h names aren't available.
+fn version_info() -> String {
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap();
+    let mut n = version
+        .split(['.', '-', '+'])
+        .map(|p| p.parse::<u16>().unwrap_or(0))
+        .chain(std::iter::repeat(0));
+    let (a, b, c) = (n.next().unwrap(), n.next().unwrap(), n.next().unwrap());
+    let desc = std::env::var("CARGO_PKG_DESCRIPTION").unwrap_or_default();
+    format!(
+        r#"1 VERSIONINFO
+FILEVERSION {a},{b},{c},0
+PRODUCTVERSION {a},{b},{c},0
+FILEFLAGSMASK 0x3F
+FILEFLAGS 0x0
+FILEOS 0x40004
+FILETYPE 0x1
+FILESUBTYPE 0x0
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "The ytmini authors"
+      VALUE "FileDescription", "ytmini"
+      VALUE "FileVersion", "{version}"
+      VALUE "InternalName", "ytmini"
+      VALUE "LegalCopyright", "The ytmini authors (MIT)"
+      VALUE "OriginalFilename", "ytmini.exe"
+      VALUE "ProductName", "ytmini"
+      VALUE "ProductVersion", "{version}"
+      VALUE "Comments", "{desc}"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
+"#
+    )
 }

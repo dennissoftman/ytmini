@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Builds dist/ytmini.app (macOS). Pass --install to copy it to ~/Applications.
+# Set CODESIGN_IDENTITY to sign with a Developer ID (see the end).
 # libmpv (+ deps) and mpv are copied in from Homebrew at build time, so the
 # result runs on Macs without Homebrew. yt-dlp and deno are downloaded by the
 # app itself on first run (and yt-dlp kept up to date) — see src/deps.rs.
@@ -86,8 +87,22 @@ fi
 cp LICENSE.md NOTICE.md "$APP/Contents/Resources/licenses/"
 cp licenses/GPL-3.0.txt "$APP/Contents/Resources/licenses/"
 
-# Ad-hoc signature so Gatekeeper/TCC treat it as one consistent app.
-codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || echo "warning: codesign failed (app still runs locally)"
+# Signing. Without CODESIGN_IDENTITY: an ad-hoc signature, so Gatekeeper/TCC
+# treat it as one consistent app on this Mac. With a "Developer ID
+# Application: …" identity (the release workflow): every library and helper,
+# then the app, with the hardened runtime and a secure timestamp, as
+# notarization requires.
+IDENTITY="${CODESIGN_IDENTITY:-}"
+if [[ -z "$IDENTITY" ]]; then
+  codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || echo "warning: codesign failed (app still runs locally)"
+else
+  sign() { codesign --force --timestamp --options runtime --sign "$IDENTITY" "$@"; }
+  for f in "$APP"/Contents/Frameworks/*.dylib; do sign "$f"; done
+  sign --entitlements assets/ytmini.entitlements "$APP/Contents/Helpers/mpv"
+  sign --entitlements assets/ytmini.entitlements "$APP"
+  codesign --verify --strict --deep "$APP"
+  echo "signed as: $IDENTITY"
+fi
 
 echo "built $APP"
 

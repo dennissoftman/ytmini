@@ -71,6 +71,24 @@ release workflow builds and attaches:
 
 Don't bump `version` in `Cargo.toml` by hand.
 
+### Signing
+
+The release workflow signs and notarizes the macOS app when these repository
+secrets exist (otherwise it ships an ad-hoc signed app):
+
+| Secret | What |
+|---|---|
+| `MACOS_CERTIFICATE` | the *Developer ID Application* certificate with its private key, exported as `.p12`, base64 |
+| `MACOS_CERTIFICATE_PASSWORD` | the `.p12` export password |
+| `APPLE_API_KEY` | an App Store Connect API key (`AuthKey_….p8` contents, Developer access) for `notarytool` |
+| `APPLE_API_KEY_ID`, `APPLE_API_ISSUER` | that key's ID and issuer ID |
+
+`bundle.sh` signs with `CODESIGN_IDENTITY` when it's set: every bundled
+library, the mpv helper and the app, with the hardened runtime and
+[`assets/ytmini.entitlements`](assets/ytmini.entitlements). mpv's LuaJIT needs
+executable memory; without those entitlements macOS kills the app as soon as
+mpv loads a script.
+
 ## Building
 
 ```bash

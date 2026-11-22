@@ -1,12 +1,18 @@
 # Changelog
 
-Entries after 0.1.14 are written by
+Entries after 0.2.0 are written by
 [release-please](https://github.com/googleapis/release-please) from
 Conventional Commits. Earlier versions were summarised by hand.
 
-## 0.1.14 (2026-11-22)
+## 0.2.0 (2026-11-22)
 
 First public release.
+
+### Features
+
+* macOS: releases are signed with a Developer ID and notarized by Apple, so
+  they open without a Gatekeeper warning.
+* Windows: `ytmini.exe` carries its name and version in its file properties.
 
 ### Bug Fixes
 

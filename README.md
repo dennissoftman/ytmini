@@ -55,8 +55,14 @@ Download the latest build from
 
 | Platform | File | Notes |
 |---|---|---|
-| macOS 15+ (Apple Silicon) | `ytmini-<version>-macos-arm64.zip` | Unzip and move `ytmini.app` to Applications. The app isn't signed: the first time, right-click it → **Open**, or run `xattr -dr com.apple.quarantine /Applications/ytmini.app`. |
-| Windows 10/11 (x64) | `ytmini-<version>-setup.exe` | Per-user install, no admin rights. SmartScreen may warn about an unknown publisher: **More info → Run anyway**. A portable zip is attached too. |
+| macOS 15+ (Apple Silicon) | `ytmini-<version>-macos-arm64.zip` | Unzip and move `ytmini.app` to Applications. Releases are signed with a Developer ID and notarized by Apple. |
+| Windows 10/11 (x64) | `ytmini-<version>-setup.exe` | Per-user install, no admin rights. A portable zip is attached too. |
+
+**First launch warnings.** If macOS says it can't check ytmini for malware
+(a build that isn't notarized), open **System Settings → Privacy & Security**,
+scroll down and click **Open Anyway**. Windows releases aren't signed yet (see
+[Code signing policy](#code-signing-policy)), so SmartScreen may warn about an
+unknown publisher: click **More info → Run anyway**.
 
 On first launch ytmini downloads [yt-dlp](https://github.com/yt-dlp/yt-dlp)
 and [deno](https://deno.com) from their official GitHub releases (checksums
@@ -88,8 +94,6 @@ browser.
 libmpv is loaded at runtime, not linked, so `cargo build` works without mpv
 installed and the app still starts if libmpv is missing.
 
-Third-party services get no cookies: SponsorBlock and DeArrow receive the video
-id, Deezer (Auto EQ) the artist and title.
 
 ### Where things live
 
@@ -97,6 +101,46 @@ id, Deezer (Auto EQ) the artist and title.
 |---|---|---|
 | Settings, session, logs, yt-dlp/deno | `~/Library/Application Support/ytmini/` | `%APPDATA%\ytmini\` |
 | Cache (thumbnails, lists) | `~/Library/Caches/ytmini/` | `%LOCALAPPDATA%\ytmini\` |
+
+## Privacy
+
+ytmini has no servers, accounts, analytics or telemetry. Everything it keeps
+(settings, your session, resume points, logs) stays on your computer, and logs
+are scrubbed of links and tokens.
+
+It talks to:
+
+| Service | When | What it receives |
+|---|---|---|
+| YouTube / Google | always | your session cookies and requests, as your browser would |
+| GitHub | first launch, then a daily check | downloads of yt-dlp and deno; no user data |
+| [SponsorBlock](https://sponsor.ajay.app) | on by default (Settings) | 4 characters of a hash of the video id, never the id |
+| [Deezer](https://www.deezer.com) | Auto EQ for songs, on by default (Settings) | the artist and song title, to look up the genre ([privacy](https://www.deezer.com/legal/personal-datas)) |
+| [DeArrow](https://dearrow.ajay.app) | experimental, off by default (Settings) | a hash prefix for titles, the video id for thumbnails |
+
+None of the third parties gets cookies or anything that identifies you beyond
+your IP address. Crash reports are only written to a local file; nothing is
+sent anywhere.
+
+## Code signing policy
+
+Release packages are built by GitHub Actions from the tagged source
+([`release.yml`](.github/workflows/release.yml)); nothing is built or uploaded
+by hand.
+
+- **macOS**: signed with the maintainer's Apple Developer ID and notarized by
+  Apple.
+- **Windows**: not signed yet. We're applying to the
+  [SignPath Foundation](https://signpath.org) for free open-source code
+  signing.
+
+Team roles:
+
+- Committers and reviewers: [@dennissoftman](https://github.com/dennissoftman)
+- Approvers: [@dennissoftman](https://github.com/dennissoftman)
+
+Outside contributions are merged only after review. Privacy: see
+[Privacy](#privacy); ytmini sends no data except as listed there.
 
 ## Build from source
 

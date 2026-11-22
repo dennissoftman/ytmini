@@ -1,6 +1,6 @@
 [package]
 name = "ytmini"
-version = "0.1.14"
+version = "0.2.0"
 edition = "2021"
 description = "A small, fast desktop YouTube client for macOS and Windows (egui + libmpv)"
 authors = ["Denys Mitin"]
