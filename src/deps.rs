@@ -308,7 +308,9 @@ fn hex(bytes: &[u8]) -> String {
 
 /// `<exe> --version`, first line.
 pub fn version(exe: &Path) -> Option<String> {
-    let out = Command::new(exe)
+    let mut c = Command::new(exe);
+    crate::yt::hide_console(&mut c);
+    let out = c
         .arg("--version")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -325,9 +327,19 @@ fn check_stamp(dep: Dep) -> Option<PathBuf> {
     Some(dep.dir()?.with_extension("checked"))
 }
 
+/// Stamp "checked now". The stamp's modified time is what counts; Windows
+/// keeps the old time when an empty file is rewritten empty, so set it
+/// explicitly (otherwise every launch looked overdue and re-checked in a loop).
 fn mark_checked(dep: Dep) {
     if let Some(p) = check_stamp(dep) {
-        let _ = fs::write(p, b"");
+        let now = SystemTime::now();
+        let secs = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let _ = fs::write(&p, secs.to_string());
+        if let Ok(f) = fs::OpenOptions::new().write(true).open(&p) {
+            let _ = f.set_modified(now);
+        }
     }
 }
 

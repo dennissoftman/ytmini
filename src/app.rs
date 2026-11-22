@@ -99,6 +99,9 @@ struct DepsState {
     activity: Option<String>,
     error: Option<String>,
     busy: bool,
+    /// The yt-dlp update check ran this launch. Finishing it re-checks the
+    /// tools, which must not start it again (a stale stamp once looped).
+    update_tried: bool,
     /// "yt-dlp 2026.10.26 (auto-updated)" etc., for Settings.
     versions: Vec<(String, String)>,
 }
@@ -657,12 +660,14 @@ impl App {
                 if t.deno.is_none() {
                     need.push(Dep::Deno);
                 }
-                let update_due =
-                    t.ytdlp_managed && deps::check_due(Dep::YtDlp, Duration::from_secs(24 * 3600));
+                let update_due = !self.deps.update_tried
+                    && t.ytdlp_managed
+                    && deps::check_due(Dep::YtDlp, Duration::from_secs(24 * 3600));
                 self.tools = Some(t);
                 if !need.is_empty() {
                     self.run_deps_job(ctx, need, false);
                 } else if update_due {
+                    self.deps.update_tried = true;
                     self.run_deps_job(ctx, vec![Dep::YtDlp], true);
                 }
                 self.refresh_versions(ctx);

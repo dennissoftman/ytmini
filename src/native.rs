@@ -210,6 +210,7 @@ fn spawn_solver(tools: &Tools) -> Result<Solver> {
     let deno = tools.deno.as_ref().context("no deno")?;
     let script = solver_script(tools)?;
     let mut c = std::process::Command::new(deno);
+    crate::yt::hide_console(&mut c);
     // no --allow-* flags: no files, network, env or subprocesses
     c.args([
         "run",

@@ -176,7 +176,7 @@ fn is_executable(p: &Path) -> bool {
 }
 
 /// Don't flash a console window for every subprocess on Windows.
-fn hide_console(_c: &mut Command) {
+pub fn hide_console(_c: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
