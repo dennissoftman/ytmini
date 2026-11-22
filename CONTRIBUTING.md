@@ -190,7 +190,7 @@ playing.
 | `YTMINI_DEBUG=1` | timing and state lines on stderr |
 | `YTMINI_NO_HISTORY=1` | don't report playback to your watch history; don't save resume points or the continue card |
 | `YTMINI_MPV_LOG=<file>` | full mpv log (check the `af` chain for EQ) |
-| `YTMINI_CONFIG_DIR=<dir>` | separate config/profile (fresh install, signed out) |
+| `YTMINI_CONFIG_DIR=<dir>` | separate profile with its own cache (fresh install, signed out) |
 | `YTMINI_LANG=ru` | UI language, for screenshots |
 | `YTMINI_HL` / `YTMINI_GL` | YouTube language / region override |
 | `YTMINI_THEME=light\|dark` | force the theme |

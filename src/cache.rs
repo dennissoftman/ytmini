@@ -39,7 +39,12 @@ impl Limits {
 }
 
 pub fn root() -> Option<PathBuf> {
-    let d = dirs::cache_dir()?.join("ytmini");
+    // A separate profile (YTMINI_CONFIG_DIR) gets its own cache too, so it
+    // never shows the real profile's cached feed, history or thumbnails.
+    let d = match std::env::var_os("YTMINI_CONFIG_DIR") {
+        Some(_) => crate::yt::config_dir().ok()?.join("cache"),
+        None => dirs::cache_dir()?.join("ytmini"),
+    };
     fs::create_dir_all(d.join("thumbs")).ok()?;
     fs::create_dir_all(d.join("lists")).ok()?;
     Some(d)
