@@ -175,6 +175,7 @@ impl Client {
             .read_to_string()
             .context("reading YouTube's reply")?;
         if status == 401 && self.signed_in() {
+            SESSION_LOST.store(true, std::sync::atomic::Ordering::Relaxed);
             bail!("{SESSION_EXPIRED} (HTTP 401)");
         }
         if status != 200 {
@@ -182,6 +183,7 @@ impl Client {
         }
         let v: Value = serde_json::from_str(&text).context("YouTube API: bad JSON")?;
         if self.signed_in() && reports_signed_out(&v) {
+            SESSION_LOST.store(true, std::sync::atomic::Ordering::Relaxed);
             bail!("{SESSION_EXPIRED}");
         }
         Ok(v)
@@ -216,6 +218,16 @@ pub fn premium() -> Option<bool> {
 /// Marker in errors when our saved session no longer signs in (Google
 /// rotated it away); the app re-imports from the browser.
 pub const SESSION_EXPIRED: &str = "YouTube session expired";
+
+/// Set by any call that found the session expired, wherever it ran (stream
+/// lookups fall back to yt-dlp and would otherwise keep it to themselves);
+/// the app takes it and refreshes the session from the browser.
+static SESSION_LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a call found the session expired since the last time this was asked.
+pub fn take_session_lost() -> bool {
+    SESSION_LOST.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
 
 /// The reply's own tracking params say `logged_in=0`.
 fn reports_signed_out(v: &Value) -> bool {

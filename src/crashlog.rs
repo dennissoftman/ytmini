@@ -77,6 +77,10 @@ pub fn redact(s: &str) -> String {
 }
 
 fn local_offset() -> i64 {
+    // Windows has no `date +%z` (a Git-for-Windows one would flash a console)
+    if cfg!(windows) {
+        return 0;
+    }
     std::process::Command::new("date")
         .arg("+%z")
         .output()

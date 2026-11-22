@@ -3470,6 +3470,9 @@ impl App {
     /// Any signed-in call (history reporting, Watch later, the periodic
     /// probe) that finds the session gone starts the refresh, not just feeds.
     fn watch_session(&mut self, ctx: &egui::Context) {
+        if crate::innertube::take_session_lost() {
+            self.auto_refresh_session(ctx);
+        }
         if let Some((text, true)) = &self.status {
             if text.contains(crate::innertube::SESSION_EXPIRED) {
                 self.status = Some((
@@ -6826,6 +6829,7 @@ fn open_url(url: &str) -> std::io::Result<()> {
     } else if cfg!(windows) {
         let mut c = std::process::Command::new("cmd");
         c.args(["/C", "start", ""]);
+        crate::yt::hide_console(&mut c); // no flash of a cmd window
         c
     } else {
         std::process::Command::new("xdg-open")
