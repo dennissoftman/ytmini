@@ -53,7 +53,7 @@ messages (or PR titles, when squash-merging) as
 
 | Prefix | Use for | Version bump |
 |---|---|---|
-| `feat:` | something new a user can see | minor (patch while < 1.0) |
+| `feat:` | something new a user can see | minor |
 | `fix:` | a bug fix | patch |
 | `perf:`, `revert:` | speed-ups, reverts | patch |
 | `refactor:`, `docs:`, `ci:`, `chore:`, `test:` | everything else | none (not in the changelog) |
