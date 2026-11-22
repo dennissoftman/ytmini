@@ -48,3 +48,8 @@ Not bundled, downloaded from their official releases:
 
 - **yt-dlp**: The Unlicense (<https://github.com/yt-dlp/yt-dlp>)
 - **deno**: MIT (<https://github.com/denoland/deno>), only if no system deno exists
+
+## Linux: ytmini-<version>-linux-x86_64.tar.gz / ytmini_<version>_amd64.deb
+
+The Linux packages contain only ytmini itself (MIT). libmpv and its
+libraries come from your distribution, under their own licenses.

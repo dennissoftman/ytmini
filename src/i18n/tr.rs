@@ -302,6 +302,7 @@ pub const T: &[(&str, &str)] = &[
     ("A playing video continues as audio only. Quit from the tray icon.", "Oynatılan video yalnızca ses olarak devam eder. Tepsi simgesinden çıkın."),
     ("Refresh (Ctrl+R)", "Yenile (Ctrl+R)"),
     ("Show in Explorer", "Dosya Gezgini’nde göster"),
+    ("Show in folder", "Klasörde göster"),
     ("Auto never exceeds what this screen can show ({}p). On battery and in Battery Saver it plays 1080p30. Sharp VP9 is preferred: most current PCs decode it in hardware, so it costs no more battery than blurry H.264.", "Otomatik, bu ekranın gösterebileceğinin ({}p) üstüne çıkmaz. Pildeyken ve Pil tasarrufu açıkken 1080p30 oynatır. Keskin VP9 tercih edilir: güncel PC’lerin çoğu onu donanımla çözer, bu yüzden bulanık H.264’ten fazla pil harcamaz."),
     ("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (high-DPI) screens.", "Standart ≈ 14 KB, yüksek ≈ 60 KB (diskte her biri). Otomatik, keskin (yüksek DPI) ekranlarda yükseği seçer."),
     ("Preparing {}…", "{} hazırlanıyor…"),

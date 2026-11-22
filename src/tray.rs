@@ -6,6 +6,7 @@ use eframe::egui;
 use std::sync::mpsc::Sender;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 pub enum TrayEvent {
     Show,
     PlayPause,

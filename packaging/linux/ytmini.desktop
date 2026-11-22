@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ytmini
+GenericName=YouTube client
+Comment=A small, fast desktop YouTube client
+Exec=ytmini
+Icon=ytmini
+Terminal=false
+Categories=AudioVideo;Video;Player;Network;
+Keywords=youtube;video;music;mpv;
+StartupWMClass=ytmini

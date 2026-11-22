@@ -27,6 +27,9 @@ jobs:
             os: macos-15
           - name: Windows
             os: windows-latest
+          # oldest supported runner: the release binary needs this glibc (2.35)
+          - name: Linux
+            os: ubuntu-22.04
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7

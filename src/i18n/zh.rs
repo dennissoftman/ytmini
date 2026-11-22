@@ -302,6 +302,7 @@ pub const T: &[(&str, &str)] = &[
     ("A playing video continues as audio only. Quit from the tray icon.", "正在播放的视频将仅以音频继续播放。可从托盘图标退出。"),
     ("Refresh (Ctrl+R)", "刷新 (Ctrl+R)"),
     ("Show in Explorer", "在资源管理器中显示"),
+    ("Show in folder", "在文件夹中显示"),
     ("Auto never exceeds what this screen can show ({}p). On battery and in Battery Saver it plays 1080p30. Sharp VP9 is preferred: most current PCs decode it in hardware, so it costs no more battery than blurry H.264.", "自动模式不会超过此屏幕能显示的分辨率（{}p）。使用电池和开启节电模式时播放 1080p30。优先使用清晰的 VP9：大多数现代 PC 可硬件解码，因此不比模糊的 H.264 更耗电。"),
     ("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (high-DPI) screens.", "标准 ≈ 14 KB，高 ≈ 60 KB（每张，磁盘上）。自动模式在清晰（高 DPI）屏幕上选择高。"),
     ("Preparing {}…", "正在准备 {}…"),

@@ -302,6 +302,7 @@ pub const T: &[(&str, &str)] = &[
     ("A playing video continues as audio only. Quit from the tray icon.", "Um vídeo em reprodução continua só com áudio. Encerre pelo ícone da bandeja."),
     ("Refresh (Ctrl+R)", "Atualizar (Ctrl+R)"),
     ("Show in Explorer", "Mostrar no Explorador de Arquivos"),
+    ("Show in folder", "Mostrar na pasta"),
     ("Auto never exceeds what this screen can show ({}p). On battery and in Battery Saver it plays 1080p30. Sharp VP9 is preferred: most current PCs decode it in hardware, so it costs no more battery than blurry H.264.", "O automático nunca passa do que esta tela consegue mostrar ({}p). Na bateria e na Economia de bateria, reproduz em 1080p30. O VP9 nítido é preferido: a maioria dos PCs atuais o decodifica em hardware, então não gasta mais bateria que o H.264 borrado."),
     ("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (high-DPI) screens.", "Padrão ≈ 14 KB, alta ≈ 60 KB cada no disco. O automático escolhe alta em telas nítidas (alta densidade)."),
     ("Preparing {}…", "Preparando {}…"),

@@ -151,7 +151,8 @@ fn candidates() -> Vec<std::path::PathBuf> {
     } else if cfg!(windows) {
         &["libmpv-2.dll", "mpv-2.dll", "mpv-1.dll"]
     } else {
-        &["libmpv.so.2", "libmpv.so"]
+        // .so.1: mpv 0.34 and older (Ubuntu 22.04, Debian 11); same client API
+        &["libmpv.so.2", "libmpv.so", "libmpv.so.1"]
     };
     v.extend(names.iter().map(std::path::PathBuf::from));
     v

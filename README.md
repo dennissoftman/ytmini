@@ -4,14 +4,14 @@
 
 # ytmini
 
-A small, fast desktop YouTube client for macOS and Windows.
+A small, fast desktop YouTube client for macOS, Windows and Linux.
 Your own account, no browser tab, no ads in the way.
 
 [![CI](https://github.com/dennissoftman/ytmini/actions/workflows/ci.yml/badge.svg)](https://github.com/dennissoftman/ytmini/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/dennissoftman/ytmini?sort=semver)](https://github.com/dennissoftman/ytmini/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/dennissoftman/ytmini/total)](https://github.com/dennissoftman/ytmini/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
-![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
+![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)
 ![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)
 
 </div>
@@ -57,6 +57,7 @@ Download the latest build from
 |---|---|---|
 | macOS 15+ (Apple Silicon) | `ytmini-<version>-macos-arm64.zip` | Unzip and move `ytmini.app` to Applications. Releases are signed with a Developer ID and notarized by Apple. |
 | Windows 10/11 (x64) | `ytmini-<version>-setup.exe` | Per-user install, no admin rights. A portable zip is attached too. |
+| Linux (x86_64, glibc 2.35+) | `ytmini_<version>_amd64.deb` or `ytmini-<version>-linux-x86_64.tar.gz` | Needs libmpv from your distribution: `sudo apt install libmpv2` (Debian/Ubuntu; the .deb pulls it in), `sudo dnf install mpv-libs` (Fedora), `sudo pacman -S mpv` (Arch). The tarball's `install.sh` installs for your user. No tray icon on Linux: closing the window quits. |
 
 **First launch warnings.** If macOS says it can't check ytmini for malware
 (a build that isn't notarized), open **System Settings → Privacy & Security**,
@@ -71,8 +72,9 @@ verified) and keeps yt-dlp up to date.
 ### Signing in
 
 ytmini reads the YouTube session from a browser you're already signed in to:
-Firefox (macOS and Windows), Chrome, Brave, Edge, Chromium, Opera and Vivaldi
-(macOS; one Keychain prompt), or Safari (needs Full Disk Access). Google blocks
+Firefox (macOS, Windows and Linux, including snap and Flatpak), Chrome, Brave,
+Edge, Chromium, Opera and Vivaldi (macOS; one Keychain prompt), or Safari
+(needs Full Disk Access). Google blocks
 sign-in inside embedded web views, and OAuth doesn't give access to the feed,
 history or Watch later, so this is the only way to see your own YouTube.
 
@@ -97,10 +99,10 @@ installed and the app still starts if libmpv is missing.
 
 ### Where things live
 
-| | macOS | Windows |
-|---|---|---|
-| Settings, session, logs, yt-dlp/deno | `~/Library/Application Support/ytmini/` | `%APPDATA%\ytmini\` |
-| Cache (thumbnails, lists) | `~/Library/Caches/ytmini/` | `%LOCALAPPDATA%\ytmini\` |
+| | macOS | Windows | Linux |
+|---|---|---|---|
+| Settings, session, logs, yt-dlp/deno | `~/Library/Application Support/ytmini/` | `%APPDATA%\ytmini\` | `~/.config/ytmini/` |
+| Cache (thumbnails, lists) | `~/Library/Caches/ytmini/` | `%LOCALAPPDATA%\ytmini\` | `~/.cache/ytmini/` |
 
 ## Privacy
 
@@ -166,6 +168,12 @@ brew install mpv
 
 ```bash
 ./scripts/build_windows.sh   # dist/ytmini-<version>-setup.exe and a portable zip
+```
+
+**Linux packages**, built on Linux (needs a C compiler; `dpkg-deb` for the .deb):
+
+```bash
+./scripts/build_linux.sh     # dist/ytmini-<version>-linux-x86_64.tar.gz and ytmini_<version>_amd64.deb
 ```
 
 ## Contributing

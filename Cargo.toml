@@ -2,7 +2,7 @@
 name = "ytmini"
 version = "0.2.0"
 edition = "2021"
-description = "A small, fast desktop YouTube client for macOS and Windows (egui + libmpv)"
+description = "A small, fast desktop YouTube client for macOS, Windows and Linux (egui + libmpv)"
 authors = ["Denys Mitin"]
 license = "MIT"
 repository = "https://github.com/dennissoftman/ytmini"

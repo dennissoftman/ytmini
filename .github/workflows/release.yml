@@ -2,7 +2,8 @@ name: Release
 
 # release-please keeps a release PR (version bump + CHANGELOG.md) up to date
 # from Conventional Commits on master. Merging it tags vX.Y.Z and creates the
-# GitHub release; the build job then attaches the macOS and Windows packages.
+# GitHub release; the build jobs then attach the macOS, Windows and Linux
+# packages and SHA256SUMS.txt.
 
 on:
   push:
@@ -125,14 +126,56 @@ jobs:
           version="${TAG#v}"
           mv dist/ytmini-win64.zip "dist/ytmini-${version}-win64.zip"
 
-      - name: Checksums
-        working-directory: dist
-        run: shasum -a 256 ytmini-*.zip ytmini-*-setup.exe > SHA256SUMS.txt
-
       - name: Upload to the release
         run: |
           gh release upload "$TAG" --clobber \
             dist/ytmini-*-macos-arm64.zip \
             dist/ytmini-*-setup.exe \
-            dist/ytmini-*-win64.zip \
-            dist/SHA256SUMS.txt
+            dist/ytmini-*-win64.zip
+
+  build-linux:
+    needs: release-please
+    if: >-
+      always() &&
+      (needs.release-please.outputs.release_created == 'true' ||
+       (github.event_name == 'workflow_dispatch' && inputs.tag != ''))
+    # The oldest runner sets the minimum glibc (2.35: Ubuntu 22.04, Debian 12).
+    runs-on: ubuntu-22.04
+    env:
+      TAG: ${{ needs.release-please.outputs.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Linux packages
+        run: ./scripts/build_linux.sh
+
+      - name: Upload to the release
+        run: |
+          gh release upload "$TAG" --clobber \
+            dist/ytmini-*-linux-x86_64.tar.gz \
+            dist/ytmini_*_amd64.deb
+
+  checksums:
+    needs: [release-please, build, build-linux]
+    if: >-
+      always() && needs.build.result == 'success' && needs.build-linux.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.release-please.outputs.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: SHA256SUMS.txt
+        run: |
+          mkdir assets && cd assets
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" \
+            -p 'ytmini-*' -p 'ytmini_*'
+          sha256sum ytmini-* ytmini_* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber SHA256SUMS.txt

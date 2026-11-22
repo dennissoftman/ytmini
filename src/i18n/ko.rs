@@ -302,6 +302,7 @@ pub const T: &[(&str, &str)] = &[
     ("A playing video continues as audio only. Quit from the tray icon.", "재생 중인 비디오는 오디오로만 계속 재생됩니다. 알림 영역 아이콘에서 종료하십시오."),
     ("Refresh (Ctrl+R)", "새로 고침(Ctrl+R)"),
     ("Show in Explorer", "파일 탐색기에서 보기"),
+    ("Show in folder", "폴더에서 보기"),
     ("Auto never exceeds what this screen can show ({}p). On battery and in Battery Saver it plays 1080p30. Sharp VP9 is preferred: most current PCs decode it in hardware, so it costs no more battery than blurry H.264.", "자동은 이 화면이 표시할 수 있는 해상도({}p)를 넘지 않습니다. 배터리 사용 중이거나 배터리 절약 모드에서는 1080p30으로 재생합니다. 선명한 VP9을 우선합니다. 대부분의 최신 PC는 하드웨어로 디코딩하므로 흐릿한 H.264보다 배터리를 더 쓰지 않습니다."),
     ("Standard ≈ 14 KB, high ≈ 60 KB each on disk. Auto picks high on sharp (high-DPI) screens.", "표준 ≈ 14KB, 고화질 ≈ 60KB(디스크에서 각각). 자동은 선명한(고DPI) 화면에서 고화질을 선택합니다."),
     ("Preparing {}…", "{} 준비 중…"),

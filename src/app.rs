@@ -5027,7 +5027,7 @@ impl App {
                                     ))
                                     .color(text_dim()),
                                 );
-                                if ui.button(if cfg!(windows) { t("Show in Explorer") } else { t("Show in Finder") }).clicked() {
+                                if ui.button(if cfg!(windows) { t("Show in Explorer") } else if cfg!(target_os = "macos") { t("Show in Finder") } else { t("Show in folder") }).clicked() {
                                     if let Ok(d) = crate::downloads::dir() {
                                         let _ = open_folder(&d);
                                     }
@@ -6855,7 +6855,7 @@ fn open_url(url: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Show a folder in Finder / Explorer.
+/// Show a folder in Finder / Explorer / the Linux file manager.
 fn open_folder(path: &std::path::Path) -> std::io::Result<()> {
     let mut c = if cfg!(target_os = "macos") {
         std::process::Command::new("open")

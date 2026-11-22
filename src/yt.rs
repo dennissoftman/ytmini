@@ -443,9 +443,15 @@ pub fn profile_dirs(id: &str) -> Vec<PathBuf> {
         let cfg = home.join(".config");
         match id {
             "chrome" => vec![cfg.join("google-chrome")],
+            // classic, XDG (Firefox ≥ 147 for new profiles), snap, Flatpak
             "firefox" => vec![
                 home.join(".mozilla/firefox"),
+                dirs::config_dir()
+                    .unwrap_or(cfg.clone())
+                    .join("mozilla/firefox"),
                 home.join("snap/firefox/common/.mozilla/firefox"),
+                home.join(".var/app/org.mozilla.firefox/.mozilla/firefox"),
+                home.join(".var/app/org.mozilla.firefox/config/mozilla/firefox"),
             ],
             "brave" => vec![cfg.join("BraveSoftware/Brave-Browser")],
             "edge" => vec![cfg.join("microsoft-edge")],
