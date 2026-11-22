@@ -678,7 +678,9 @@ mod live {
             .into_iter()
             .find(|s| s.firefox || std::env::var_os("YTMINI_IMPORT").is_some())
             .unwrap();
-        let tmp = std::env::temp_dir();
+        // real cookies: only inside the private config dir
+        let tmp = crate::yt::config_dir().unwrap().join("run");
+        std::fs::create_dir_all(&tmp).unwrap();
         let a = tmp.join("ytmini-native.txt");
         let t = std::time::Instant::now();
         s.export_cookies(&a).unwrap();
@@ -710,7 +712,10 @@ mod live {
         eprintln!("current: {} signed in: {logged}", s.label());
         // Importing Chromium cookies asks for Keychain access, so opt in.
         if logged && (s.firefox || std::env::var_os("YTMINI_IMPORT").is_some()) {
-            let out = std::env::temp_dir().join("ytmini-signin-test-cookies.txt");
+            let out = crate::yt::config_dir()
+                .unwrap()
+                .join("run")
+                .join("signin-test-cookies.txt");
             s.export_cookies(&out).unwrap();
             assert!(crate::yt::logged_in(&out));
             let _ = std::fs::remove_file(out);

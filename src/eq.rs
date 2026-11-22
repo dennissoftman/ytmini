@@ -151,7 +151,7 @@ pub fn artist_and_song(title: &str, channel: &str) -> Option<(String, String)> {
             }
         }
     }
-    (!channel.is_empty() && !clean.is_empty()).then(|| (channel, clean))
+    (!channel.is_empty() && !clean.is_empty()).then_some((channel, clean))
 }
 
 /// How a per-artist choice is keyed: the first credited artist, lowercase.

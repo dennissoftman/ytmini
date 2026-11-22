@@ -6,6 +6,7 @@ use eframe::egui;
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // sent by macOS media keys only
 pub enum Cmd {
     Toggle,
     Play,

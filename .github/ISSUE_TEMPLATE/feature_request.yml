@@ -1,0 +1,11 @@
+name: Feature request
+description: Suggest something ytmini should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like ytmini to do?
+      description: The problem it solves for you matters more than the exact design.
+    validations:
+      required: true

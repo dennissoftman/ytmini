@@ -72,6 +72,16 @@ PLIST
 # libmpv + its ~50 dylibs and the mpv fallback binary, relinked to live inside the app.
 python3 scripts/bundle_dylibs.py "$APP" --prefix "$(brew --prefix)"
 
+# The bundled Homebrew dylibs need the macOS they were built for; say so in
+# Info.plist, so older systems refuse cleanly instead of crashing at launch.
+MINOS=$(for f in "$APP"/Contents/Frameworks/*.dylib "$APP/Contents/MacOS/ytmini"; do
+  otool -l "$f" | awk '/LC_BUILD_VERSION/{b=1} b&&/minos/{print $2; b=0}'
+done | sort -V | tail -1)
+if [[ -n "$MINOS" ]]; then
+  plutil -replace LSMinimumSystemVersion -string "$MINOS" "$APP/Contents/Info.plist"
+  echo "minimum macOS: $MINOS"
+fi
+
 # Our own license + notice, and the full GPLv3 text (the bundle as a whole is GPLv3).
 cp LICENSE.md NOTICE.md "$APP/Contents/Resources/licenses/"
 cp licenses/GPL-3.0.txt "$APP/Contents/Resources/licenses/"

@@ -7,13 +7,19 @@
 #   ./scripts/check_native.sh            # the default test videos
 #   ./scripts/check_native.sh <id> ...   # specific videos
 #
-# Exit codes: 0 all fine; 1 a lookup failed: the report is copied to the
-# clipboard, paste it into a bug report; 2 can't check (tools or sign-in missing);
+# Exit codes: 0 all fine; 1 a lookup failed: a report is copied to the
+# clipboard (macOS) for a bug report; 2 can't check (tools or sign-in missing);
 # 3 the saved YouTube session expired: open ytmini (it refreshes the session
 # from your browser) and run the check again.
 set -u
 
-APP="${YTMINI_BIN:-$HOME/Applications/ytmini.app/Contents/MacOS/ytmini}"
+if [ -n "${YTMINI_BIN:-}" ]; then
+    APP="$YTMINI_BIN"
+elif [ -x "$HOME/Applications/ytmini.app/Contents/MacOS/ytmini" ]; then
+    APP="$HOME/Applications/ytmini.app/Contents/MacOS/ytmini"
+else
+    APP="/Applications/ytmini.app/Contents/MacOS/ytmini"
+fi
 LOGS="$HOME/Library/Application Support/ytmini/logs"
 
 if [ ! -x "$APP" ]; then
@@ -37,11 +43,13 @@ if [ $status -eq 1 ]; then
         echo "$out"
         if [ -f "$LOGS/native-lookup.log" ]; then
             echo
-            echo "Recent fallbacks to yt-dlp (logs/native-lookup.log):"
+            echo "Recent fallbacks to yt-dlp (logs/native-lookup.log; video ids, remove any you don't want to share):"
             tail -n 10 "$LOGS/native-lookup.log"
         fi
-    } | pbcopy
+    } > "${TMPDIR:-/tmp}/ytmini-check-report.txt"
+    command -v pbcopy >/dev/null && pbcopy < "${TMPDIR:-/tmp}/ytmini-check-report.txt"
     echo
-    echo "The report is on the clipboard: paste it into a bug report."
+    echo "Report copied to the clipboard; please paste it into an issue:"
+    echo "https://github.com/dennissoftman/ytmini/issues/new"
 fi
 exit $status

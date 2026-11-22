@@ -62,18 +62,31 @@ fn write(info: &std::panic::PanicHookInfo<'_>) -> std::io::Result<()> {
     std::fs::write(d.join(name), body)
 }
 
-/// Drop anything that looks like a URL (tokens, signed stream links).
+/// Drop anything that looks like a URL (tokens, signed stream links),
+/// wherever it starts: `url=https://…`, `"https://…"`, `(https://…)`.
 pub fn redact(s: &str) -> String {
-    s.split_inclusive(char::is_whitespace)
-        .map(|w| {
-            if w.trim_start().starts_with("http://") || w.trim_start().starts_with("https://") {
-                let end: String = w.chars().filter(|c| c.is_whitespace()).collect();
-                format!("<url>{end}")
-            } else {
-                w.to_string()
-            }
-        })
-        .collect()
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let at = [lower.find("https://"), lower.find("http://")]
+            .into_iter()
+            .flatten()
+            .min();
+        let Some(at) = at else {
+            out.push_str(rest);
+            return out;
+        };
+        out.push_str(&rest[..at]);
+        out.push_str("<url>");
+        let tail = &rest[at..];
+        let stop = tail
+            .find(|c: char| {
+                c.is_whitespace() || matches!(c, '"' | '\'' | ')' | '>' | ']' | '}' | ',')
+            })
+            .unwrap_or(tail.len());
+        rest = &tail[stop..];
+    }
 }
 
 fn local_offset() -> i64 {
@@ -150,6 +163,10 @@ mod tests {
         assert_eq!(
             super::redact("bad https://rr1.googlevideo.com/x?sig=1 here"),
             "bad <url> here"
+        );
+        assert_eq!(
+            super::redact(r#"Err("https://x/v?sig=1"), url=http://a/b (HTTPS://C/d)"#),
+            r#"Err("<url>"), url=<url> (<url>)"#
         );
     }
 }

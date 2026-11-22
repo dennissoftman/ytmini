@@ -5025,7 +5025,7 @@ impl App {
                                 );
                                 if ui.button(if cfg!(windows) { t("Show in Explorer") } else { t("Show in Finder") }).clicked() {
                                     if let Ok(d) = crate::downloads::dir() {
-                                        let _ = open_url(&d.display().to_string());
+                                        let _ = open_folder(&d);
                                     }
                                 }
                                 if !self.downloads.entries.is_empty() && ui.button(t("Delete all")).clicked() {
@@ -5082,7 +5082,7 @@ impl App {
                                 );
                                 if ui.button(t("Open logs folder")).clicked() {
                                     if let Some(d) = crate::crashlog::dir() {
-                                        let _ = open_url(&d.display().to_string());
+                                        let _ = open_folder(&d);
                                     }
                                 }
                             });
@@ -6822,19 +6822,45 @@ fn skeleton_grid(ui: &mut egui::Ui, cols: usize, size: Vec2, thumb_h: f32) {
     ui.ctx().request_repaint();
 }
 
-/// Open a URL in the default browser.
+/// Open a web link (http/https only) in the default browser. Links come from
+/// descriptions and comments, so nothing on the way may interpret them: on
+/// Windows that rules out `cmd /C start`, where `&`, `|` or `^` in a URL run
+/// commands.
 fn open_url(url: &str) -> std::io::Result<()> {
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://"))
+        || url.chars().any(|c| c.is_control() || c == '"')
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a web link",
+        ));
+    }
     let mut c = if cfg!(target_os = "macos") {
         std::process::Command::new("open")
     } else if cfg!(windows) {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "start", ""]);
-        crate::yt::hide_console(&mut c); // no flash of a cmd window
+        // passes the URL to the shell's protocol handler as one argument
+        let mut c = std::process::Command::new("rundll32.exe");
+        c.arg("url.dll,FileProtocolHandler");
         c
     } else {
         std::process::Command::new("xdg-open")
     };
     let mut child = c.arg(url).spawn()?;
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
+/// Show a folder in Finder / Explorer.
+fn open_folder(path: &std::path::Path) -> std::io::Result<()> {
+    let mut c = if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else if cfg!(windows) {
+        std::process::Command::new("explorer.exe")
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    let mut child = c.arg(path).spawn()?;
     std::thread::spawn(move || child.wait());
     Ok(())
 }

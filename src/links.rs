@@ -127,6 +127,7 @@ fn parse_time(t: &str) -> Option<f64> {
 static INBOX: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static CTX: OnceLock<egui::Context> = OnceLock::new();
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only the macOS Services menu pushes
 fn push(text: String) {
     INBOX.lock().unwrap_or_else(|e| e.into_inner()).push(text);
     if let Some(ctx) = CTX.get() {

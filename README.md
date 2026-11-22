@@ -1,84 +1,138 @@
+<div align="center">
+
+<img src="assets/icon.png" width="96" alt="ytmini icon">
+
 # ytmini
 
-A minimal personal YouTube client: egui UI, mpv/libmpv for playback.
+A small, fast desktop YouTube client for macOS and Windows.
+Your own account, no browser tab, no ads in the way.
 
-Who does what:
+[![CI](https://github.com/dennissoftman/ytmini/actions/workflows/ci.yml/badge.svg)](https://github.com/dennissoftman/ytmini/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/dennissoftman/ytmini?sort=semver)](https://github.com/dennissoftman/ytmini/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/dennissoftman/ytmini/total)](https://github.com/dennissoftman/ytmini/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
+![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
+![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)
+
+</div>
+
+ytmini is a native app (Rust, [egui](https://github.com/emilk/egui) and
+[libmpv](https://mpv.io)) that signs in with the YouTube session from your
+browser and gives you your feed, subscriptions, Watch later, history and
+playlists in a quick, quiet window, with mpv doing the playback.
+
+> ytmini is an unofficial client. It is not affiliated with, endorsed by or
+> connected to YouTube or Google. It uses YouTube's private web API, which can
+> change at any time.
+
+## Features
+
+- **Your YouTube**: Home with category chips, Subscriptions, Watch later,
+  History, playlists, channels and search, signed in as you.
+- **Fast starts**: stream links are looked up directly (about 0.2 s, macOS
+  for now) with [yt-dlp](https://github.com/yt-dlp/yt-dlp) as the fallback;
+  the next video is prepared ahead and videos start preparing when you hover
+  them.
+- **Embedded mpv player**: hardware decoding, chapters, seek-bar previews,
+  quality that follows battery and Low Power Mode, YouTube's keyboard
+  shortcuts, fullscreen.
+- **Up next**: a queue you can reorder, autoplay, and YouTube's related videos.
+- **Music**: songs are recognised, get song-only suggestions, keep playing in a
+  small card when you go back, and get an automatic EQ preset per genre.
+- **Background play**: minimise or close to the tray and audio keeps going,
+  autoplay included.
+- **Extras**: [SponsorBlock](https://sponsor.ajay.app) segment skipping,
+  [DeArrow](https://dearrow.ajay.app) titles and thumbnails (experimental),
+  downloads, comments (read-only), like / subscribe / save to playlist,
+  continue where you left off.
+- **13 interface languages**, with YouTube's language and region set
+  separately.
+
+## Install
+
+Download the latest build from
+[Releases](https://github.com/dennissoftman/ytmini/releases/latest).
+
+| Platform | File | Notes |
+|---|---|---|
+| macOS 15+ (Apple Silicon) | `ytmini-<version>-macos-arm64.zip` | Unzip and move `ytmini.app` to Applications. The app isn't signed: the first time, right-click it → **Open**, or run `xattr -dr com.apple.quarantine /Applications/ytmini.app`. |
+| Windows 10/11 (x64) | `ytmini-<version>-setup.exe` | Per-user install, no admin rights. SmartScreen may warn about an unknown publisher: **More info → Run anyway**. A portable zip is attached too. |
+
+On first launch ytmini downloads [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+and [deno](https://deno.com) from their official GitHub releases (checksums
+verified) and keeps yt-dlp up to date.
+
+### Signing in
+
+ytmini reads the YouTube session from a browser you're already signed in to:
+Firefox (macOS and Windows), Chrome, Brave, Edge, Chromium, Opera and Vivaldi
+(macOS; one Keychain prompt), or Safari (needs Full Disk Access). Google blocks
+sign-in inside embedded web views, and OAuth doesn't give access to the feed,
+history or Watch later, so this is the only way to see your own YouTube.
+
+Only cookies for `youtube.com` and Google sign-in are copied. They stay in
+ytmini's own settings folder (readable only by you) and are sent nowhere but
+YouTube. When Google retires the copy, ytmini refreshes it from the same
+browser.
+
+## How it works
 
 | Job | How |
 |---|---|
-| Lists (feed, subscriptions, watch later, history, playlists, search, channels) | YouTube's own web API, signed with your session (`src/innertube.rs`); yt-dlp if a reply can't be read |
-| Sign-in | reads your browser's cookie store directly: Firefox (any OS), Chrome/Brave/Edge/Chromium/Opera/Vivaldi on macOS (one Keychain prompt), Safari (needs Full Disk Access). No yt-dlp. In-app Google login isn't possible: Google blocks sign-in in embedded web views, and OAuth doesn't give access to the feed/history/watch later |
-| Watch history, Watch later edits | YouTube's web API |
-| Playback (resolving stream URLs) | yt-dlp through mpv's ytdl hook — the part YouTube changes most often, kept with yt-dlp on purpose |
+| Lists (feed, subscriptions, Watch later, history, playlists, search, channels) | YouTube's web API with your session ([`innertube.rs`](src/innertube.rs)); yt-dlp if a reply can't be read |
+| Stream links | asked from YouTube's player API directly, with YouTube's JS challenges solved by yt-dlp's own solver in a deno process with no permissions ([`native.rs`](src/native.rs)); anything unexpected falls back to warm yt-dlp helpers ([`resolver.rs`](src/resolver.rs)) |
+| Playback | libmpv's OpenGL render API inside the window ([`mpv.rs`](src/mpv.rs), [`player.rs`](src/player.rs)); a separate mpv window if libmpv can't load |
+| Sign-in | your browser's cookie store, read directly ([`signin.rs`](src/signin.rs)) |
+| Likes, subscriptions, Watch later edits, history | YouTube's web API |
 
-## Run
+libmpv is loaded at runtime, not linked, so `cargo build` works without mpv
+installed and the app still starts if libmpv is missing.
 
-```bash
-./run.sh                 # installs yt-dlp, mpv, deno via Homebrew if missing, then runs
-./bundle.sh --install    # builds dist/ytmini.app and copies it to ~/Applications
-ytmini --play <url|id>   # open a video straight into the player
-```
+Third-party services get no cookies: SponsorBlock and DeArrow receive the video
+id, Deezer (Auto EQ) the artist and title.
 
-`ytmini.app` is self-contained except for two downloads it manages itself:
+### Where things live
 
-| Component | Where it comes from |
-|---|---|
-| libmpv + ~50 dylibs (FFmpeg, libass, codecs…), `mpv` fallback binary | copied from Homebrew into the bundle by `bundle.sh` (`scripts/bundle_dylibs.py` relinks them to `@rpath`, so nothing points at `/opt/homebrew`) |
-| yt-dlp | downloaded on first run from yt-dlp's GitHub release into `~/Library/Application Support/ytmini/bin/`, SHA-256 verified, update check daily (and right away when YouTube errors look like a stale yt-dlp) |
-| deno (JS runtime yt-dlp needs for YouTube) | a system `deno` if present, otherwise downloaded and verified the same way |
+| | macOS | Windows |
+|---|---|---|
+| Settings, session, logs, yt-dlp/deno | `~/Library/Application Support/ytmini/` | `%APPDATA%\ytmini\` |
+| Cache (thumbnails, lists) | `~/Library/Caches/ytmini/` | `%LOCALAPPDATA%\ytmini\` |
 
-Why the *unpacked* yt-dlp build (`yt-dlp_macos.zip`, 124 MB on disk) and not the
-single-file one: the single-file build unpacks itself on every launch and macOS
-re-scans those files each time — 13 s per call, measured, vs 0.26 s unpacked.
+## Build from source
 
-Building the bundle needs `brew install mpv` on the build machine; running it
-doesn't need Homebrew at all.
-
-**Licensing:** ytmini's code is MIT ([LICENSE.md](LICENSE.md)). The built
-`ytmini.app` also contains GPL-3.0 FFmpeg and GPL/LGPL mpv, so the bundle as a
-whole is distributed under GPLv3 — see [NOTICE.md](NOTICE.md). `bundle.sh` puts every
-bundled package's license files and exact versions in
-`Contents/Resources/licenses/`.
-
-## Embedded player and libmpv
-
-The player renders inside the window through libmpv's OpenGL render API
-(`src/mpv.rs`, `src/player.rs`). **libmpv is loaded at runtime with `dlopen`,
-not linked at build time**, so:
-
-- no `build.rs` or linker paths — `cargo build` works without mpv installed;
-- the app still starts if libmpv is missing or an mpv upgrade breaks it, and
-  falls back to playing in a separate mpv window (also selectable in Settings).
-
-Search order: `<app>/Contents/Frameworks/libmpv.2.dylib` (bundled), next to the
-executable, `/opt/homebrew/lib` (Apple Silicon Homebrew), `/usr/local/lib`
-(Intel Homebrew), `/opt/local/lib` (MacPorts), then the system loader path.
-On Linux `libmpv.so.2`, on Windows `libmpv-2.dll` next to the exe or on PATH.
-Requires libmpv client API 2.x (mpv ≥ 0.35).
-
-Because a Finder-launched `.app` gets a bare PATH, the app adds the Homebrew
-locations to its own PATH at startup so libmpv's ytdl hook finds yt-dlp and
-yt-dlp finds deno.
-
-## Where things live (macOS)
-
-| What | Path |
-|---|---|
-| Cookies (chmod 600), settings, mpv log, managed yt-dlp/deno (`bin/`) | `~/Library/Application Support/ytmini/` |
-| Disk cache (thumbnails, last tab results) | `~/Library/Caches/ytmini/` |
-
-Cache defaults: 256 MB, 30 days, LRU — both adjustable in Settings.
-
-## Tests
+Needs [Rust](https://rustup.rs) (stable).
 
 ```bash
-cargo test                                         # unit tests
-cargo test -- --ignored --test-threads 1           # live: hits YouTube with your cookies, opens mpv
-./target/release/ytmini --smoke-test aqz-KE-bpKQ   # embedded player: play, seek, back, replay,
-                                                   # live quality switch, quit while playing
+cargo build --release
 ```
+
+**macOS app bundle** (needs [Homebrew](https://brew.sh) mpv on the build
+machine; the result doesn't need Homebrew):
+
+```bash
+brew install mpv
+./bundle.sh            # dist/ytmini.app
+./bundle.sh --install  # and copy it to ~/Applications
+```
+
+`./run.sh` installs mpv if missing and runs a development build.
+
+**Windows installer**, cross-compiled from macOS (needs `cargo-xwin`, LLVM,
+`makensis`, `gh`):
+
+```bash
+./scripts/build_windows.sh   # dist/ytmini-<version>-setup.exe and a portable zip
+```
+
+## Contributing
+
+Bug reports and pull requests are welcome. Please read
+[CONTRIBUTING.md](CONTRIBUTING.md) first: it covers the privacy rules, how to
+test without touching your own watch history, translations and the commit
+style that drives releases.
 
 ## License
 
-MIT for ytmini's own code — see [LICENSE.md](LICENSE.md). Bundled third-party
-components and what that means for `ytmini.app`: [NOTICE.md](NOTICE.md).
+ytmini's own code is [MIT](LICENSE.md). The released app bundles mpv and
+FFmpeg (GPL), so the macOS and Windows packages as a whole are distributed
+under the GNU GPL v3; see [NOTICE.md](NOTICE.md).

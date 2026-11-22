@@ -1,3 +1,5 @@
 /target
 /dist
 .DS_Store
+# maintainer-only notes
+CLAUDE.local.md

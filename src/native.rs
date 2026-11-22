@@ -231,9 +231,21 @@ fn spawn_solver(tools: &Tools) -> Result<Solver> {
     } else {
         Stdio::null()
     });
-    if let Some(home) = std::env::var_os("HOME") {
-        // deno keeps its compile cache under the home folder
-        c.env("HOME", home);
+    // deno keeps its compile cache under the home folder; on Windows it also
+    // needs the system and profile folders to start. Without --allow-env the
+    // solver script can't read any of these.
+    for var in [
+        "HOME",
+        "SystemRoot",
+        "USERPROFILE",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "TEMP",
+        "TMP",
+    ] {
+        if let Some(v) = std::env::var_os(var) {
+            c.env(var, v);
+        }
     }
     let mut child = c.spawn().context("starting deno")?;
     let stdin = child.stdin.take().context("deno stdin")?;

@@ -1,0 +1,49 @@
+name: Bug report
+description: Something doesn't work
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please don't paste cookies, `cookies.txt` or full stream links (`googlevideo.com/...`). Logs and the outputs below are already redacted.
+  - type: input
+    id: version
+    attributes:
+      label: ytmini version
+      description: Settings → Account & updates, or the release you installed
+      placeholder: 0.1.14
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: System
+      options:
+        - macOS
+        - Windows
+    validations:
+      required: true
+  - type: input
+    id: os_version
+    attributes:
+      label: OS version
+      placeholder: macOS 15.3 / Windows 11 24H2
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+      description: Steps to reproduce help a lot. A video id is fine if the problem is with one video.
+    validations:
+      required: true
+  - type: textarea
+    id: check
+    attributes:
+      label: Stream lookup check (if videos are slow to start or fail)
+      description: "macOS: `./scripts/check_native.sh` or `ytmini --check-native`"
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Crash log
+      description: "If ytmini crashed: the newest `logs/crash-*.log` in ytmini's settings folder (macOS `~/Library/Application Support/ytmini/`, Windows `%APPDATA%\\ytmini\\`)."
+      render: text

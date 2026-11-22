@@ -1,0 +1,88 @@
+name: Release
+
+# release-please keeps a release PR (version bump + CHANGELOG.md) up to date
+# from Conventional Commits on master. Merging it tags vX.Y.Z and creates the
+# GitHub release; the build job then attaches the macOS and Windows packages.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Rebuild and re-upload the packages for an existing tag (e.g. v0.1.14)
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - id: rp
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build:
+    needs: release-please
+    if: >-
+      always() &&
+      (needs.release-please.outputs.release_created == 'true' ||
+       (github.event_name == 'workflow_dispatch' && inputs.tag != ''))
+    # Homebrew's libraries require the macOS version they were built on, so
+    # this runner sets the app's minimum macOS (bundle.sh writes it to Info.plist).
+    runs-on: macos-15
+    env:
+      TAG: ${{ needs.release-please.outputs.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-xwin
+
+      - name: Build tools
+        run: |
+          brew install mpv llvm makensis
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      - name: macOS app
+        run: |
+          ./bundle.sh
+          version="${TAG#v}"
+          ditto -c -k --keepParent dist/ytmini.app "dist/ytmini-${version}-macos-arm64.zip"
+
+      - name: Windows installer
+        run: |
+          ./scripts/build_windows.sh
+          version="${TAG#v}"
+          mv dist/ytmini-win64.zip "dist/ytmini-${version}-win64.zip"
+
+      - name: Checksums
+        working-directory: dist
+        run: shasum -a 256 ytmini-*.zip ytmini-*-setup.exe > SHA256SUMS.txt
+
+      - name: Upload to the release
+        run: |
+          gh release upload "$TAG" --clobber \
+            dist/ytmini-*-macos-arm64.zip \
+            dist/ytmini-*-setup.exe \
+            dist/ytmini-*-win64.zip \
+            dist/SHA256SUMS.txt

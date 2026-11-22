@@ -464,14 +464,25 @@ pub fn mark_watched(cookies: &Path, video_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// The host of an https URL, or None if anything about it is unusual
+/// (userinfo, fragment tricks like `https://evil.com#.youtube.com/`,
+/// backslashes): only plain hostnames get the session.
+fn session_host(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("https://")?;
+    let end = rest.find(['/', '?', '#', ':']).unwrap_or(rest.len());
+    let host = &rest[..end];
+    let plain = !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    plain.then_some(host)
+}
+
 impl Client {
     /// A plain GET with the session cookies. Only to YouTube over HTTPS:
     /// the URL comes from YouTube's reply, and cookies never go elsewhere.
     fn get(&self, url: &str) -> Result<()> {
-        let host = url
-            .strip_prefix("https://")
-            .and_then(|r| r.split(['/', '?', ':']).next())
-            .unwrap_or("");
+        let host = session_host(url).unwrap_or("");
         if !(host == "youtube.com" || host.ends_with(".youtube.com")) {
             bail!("refusing to send the session to {host:?}");
         }
@@ -493,6 +504,23 @@ impl Client {
             bail!("HTTP {status}");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod host_check {
+    #[test]
+    fn only_plain_youtube_hosts() {
+        use super::session_host as h;
+        assert_eq!(
+            h("https://www.youtube.com/api/stats?x=1"),
+            Some("www.youtube.com")
+        );
+        assert_eq!(h("https://s.youtube.com:443/x"), Some("s.youtube.com"));
+        assert_eq!(h("https://evil.com#.youtube.com/"), Some("evil.com"));
+        assert_eq!(h("https://youtube.com@evil.com/"), None);
+        assert_eq!(h("https://evil.com\\.youtube.com/"), None);
+        assert_eq!(h("http://www.youtube.com/"), None);
     }
 }
 
