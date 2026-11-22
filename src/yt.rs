@@ -56,7 +56,7 @@ impl Tools {
         let path_env = std::env::join_paths(&dirs).unwrap_or_default();
         let managed = crate::deps::Dep::YtDlp.managed();
         let ytdlp_managed = managed.is_some();
-        let ytdlp = managed.or_else(|| find_exe("yt-dlp", &dirs));
+        let ytdlp = managed.or_else(|| find_exes("yt-dlp", &dirs).find(|p| recent_ytdlp(p)));
         let mpv = bundled_helper("mpv").or_else(|| find_exe("mpv", &dirs));
         let player_ok = mpv.is_some() || crate::mpv::available().is_ok();
         match (ytdlp, player_ok) {
@@ -104,6 +104,61 @@ impl Tools {
             .map(|d| format!("js-runtimes=deno:{}", d.display()))
             .collect()
     }
+}
+
+/// YouTube breaks old yt-dlp releases within weeks, and distro packages lag
+/// far behind (Ubuntu 24.04 ships 2024.04.09). A system yt-dlp older than
+/// this is ignored, so the app downloads its own before playing anything.
+const YTDLP_MAX_AGE_DAYS: i64 = 90;
+
+/// A system yt-dlp is recent enough to use until ytmini's own copy arrives.
+/// Asked once per path (runs `yt-dlp --version`).
+fn recent_ytdlp(exe: &Path) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(Default::default);
+    if let Some(ok) = seen.lock().unwrap_or_else(|e| e.into_inner()).get(exe) {
+        return *ok;
+    }
+    let today = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs() / 86_400) as i64)
+        .unwrap_or(0);
+    let version = crate::deps::version(exe);
+    let ok = version
+        .as_deref()
+        .and_then(ytdlp_release_day)
+        .is_some_and(|day| today - day <= YTDLP_MAX_AGE_DAYS);
+    if !ok {
+        eprintln!(
+            "ignoring {} ({}): too old for YouTube",
+            exe.display(),
+            version.as_deref().unwrap_or("no version")
+        );
+    }
+    seen.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(exe.to_path_buf(), ok);
+    ok
+}
+
+/// Days since 1970-01-01 of a yt-dlp version ("2025.10.22", nightlies
+/// "2025.10.22.232720").
+fn ytdlp_release_day(version: &str) -> Option<i64> {
+    let mut parts = version.trim().split('.').map(|p| p.parse::<i64>().ok());
+    let (y, m, d) = (parts.next()??, parts.next()??, parts.next()??);
+    if !(2000..3000).contains(&y) || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // days from civil (Howard Hinnant's algorithm)
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
 }
 
 /// An executable shipped inside the app bundle (`ytmini.app/Contents/Helpers/<name>`)
@@ -159,14 +214,19 @@ fn search_dirs() -> Vec<PathBuf> {
 }
 
 fn find_exe(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
+    find_exes(name, dirs).next()
+}
+
+/// Every `name` executable in `dirs`, in search order.
+fn find_exes<'a>(name: &str, dirs: &'a [PathBuf]) -> impl Iterator<Item = PathBuf> + 'a {
     let names: Vec<String> = if cfg!(windows) {
         vec![format!("{name}.exe"), format!("{name}.com")]
     } else {
         vec![name.to_string()]
     };
     dirs.iter()
-        .flat_map(|d| names.iter().map(move |n| d.join(n)))
-        .find(|p| is_executable(p))
+        .flat_map(move |d| names.clone().into_iter().map(move |n| d.join(n)))
+        .filter(|p| is_executable(p))
 }
 
 fn is_executable(p: &Path) -> bool {
@@ -1575,6 +1635,16 @@ pub fn last_player_error() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ytdlp_version_dates() {
+        assert_eq!(ytdlp_release_day("2000.03.01"), Some(11_017));
+        assert_eq!(ytdlp_release_day("2024.04.09"), Some(19_822));
+        assert_eq!(ytdlp_release_day("2025.10.22.232720"), Some(20_383));
+        assert_eq!(ytdlp_release_day("2024.03.01"), Some(19_783));
+        assert_eq!(ytdlp_release_day("stable@2025.10.22"), None);
+        assert_eq!(ytdlp_release_day(""), None);
+    }
 
     /// yt-dlp gets a private copy of the cookies, gone when dropped.
     #[test]
