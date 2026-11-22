@@ -116,7 +116,9 @@ cargo fmt --check && cargo clippy --release --all-targets -- -D warnings
 Live tests and dev runs use your real session. Your watch history drives your
 recommendations, so keep test playback out of it:
 
-- Launch with `YTMINI_NO_HISTORY=1` whenever a test plays anything.
+- Launch with `YTMINI_NO_HISTORY=1` whenever a test plays anything. It also
+  keeps resume points and the continue card in memory only (as
+  `--smoke-test` does), so your own aren't overwritten.
 - If a test video lands in your history anyway, remove it:
   `YTMINI_REMOVE=id1,id2 cargo test --release remove_history -- --ignored --nocapture`
 - Use `YTMINI_CONFIG_DIR=<scratch dir>` for a separate, signed-out profile
@@ -186,7 +188,7 @@ playing.
 | Variable | Effect |
 |---|---|
 | `YTMINI_DEBUG=1` | timing and state lines on stderr |
-| `YTMINI_NO_HISTORY=1` | don't report playback to your watch history |
+| `YTMINI_NO_HISTORY=1` | don't report playback to your watch history; don't save resume points or the continue card |
 | `YTMINI_MPV_LOG=<file>` | full mpv log (check the `af` chain for EQ) |
 | `YTMINI_CONFIG_DIR=<dir>` | separate config/profile (fresh install, signed out) |
 | `YTMINI_LANG=ru` | UI language, for screenshots |

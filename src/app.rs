@@ -612,6 +612,7 @@ impl App {
                 app.show_settings = true;
             }
             if a == "--smoke-test" {
+                crate::positions::set_no_trace();
                 if let Some(v) = args.next().as_deref().and_then(Video::from_url_or_id) {
                     app.settings.player = PlayerMode::Embedded;
                     app.smoke = Some(Smoke {
@@ -1584,6 +1585,9 @@ impl App {
         } else if before.as_deref() == Some(id.as_str()) {
             self.last_stopped = None;
         } else {
+            return;
+        }
+        if crate::positions::no_trace() {
             return;
         }
         if let Ok(d) = yt::config_dir() {

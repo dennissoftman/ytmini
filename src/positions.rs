@@ -51,6 +51,19 @@ fn path() -> Option<std::path::PathBuf> {
     yt::config_dir().ok().map(|d| d.join("positions.json"))
 }
 
+static NO_TRACE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Test runs (`--smoke-test`, `YTMINI_NO_HISTORY=1`) keep resume points and
+/// the continue card in memory only, so they don't overwrite the real ones.
+pub fn set_no_trace() {
+    NO_TRACE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn no_trace() -> bool {
+    NO_TRACE.load(std::sync::atomic::Ordering::Relaxed)
+        || std::env::var_os("YTMINI_NO_HISTORY").is_some()
+}
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -123,7 +136,7 @@ impl Positions {
     }
 
     pub fn save(&mut self) {
-        if !self.dirty {
+        if !self.dirty || no_trace() {
             return;
         }
         if self.map.len() > MAX_ENTRIES {
