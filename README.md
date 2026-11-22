@@ -58,7 +58,7 @@ Download the latest build from
 |---|---|---|
 | macOS 15+ (Apple Silicon) | `ytmini-<version>-macos-arm64.zip` | Unzip and move `ytmini.app` to Applications. Releases are signed with a Developer ID and notarized by Apple. |
 | Windows 10/11 (x64) | `ytmini-<version>-setup.exe` | Per-user install, no admin rights. A portable zip is attached too. |
-| Linux (x86_64, glibc 2.35+) | `ytmini_<version>_amd64.deb` or `ytmini-<version>-linux-x86_64.tar.gz` | Needs libmpv from your distribution: `sudo apt install libmpv2` (Debian/Ubuntu; the .deb pulls it in), `sudo dnf install mpv-libs` (Fedora), `sudo pacman -S mpv` (Arch). The tarball's `install.sh` installs for your user. No tray icon on Linux: closing the window quits. |
+| Linux (x86_64, glibc 2.35+) | `ytmini_<version>_amd64.deb` or `ytmini-<version>-linux-x86_64.tar.gz` | Needs libmpv from your distribution: `sudo apt install --no-install-recommends ./ytmini_<version>_amd64.deb` pulls it in on Debian/Ubuntu (without the flag, apt also adds the distribution's yt-dlp, which ytmini doesn't use: it keeps its own up to date), `sudo dnf install mpv-libs` (Fedora), `sudo pacman -S mpv` (Arch). The tarball's `install.sh` installs for your user. No tray icon on Linux: closing the window quits. |
 
 **First launch warnings.** If macOS says it can't check ytmini for malware
 (a build that isn't notarized), open **System Settings → Privacy & Security**,
