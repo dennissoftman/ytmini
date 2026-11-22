@@ -51,8 +51,11 @@ pub fn sessions() -> Vec<Session> {
     for b in crate::yt::ALL_BROWSERS {
         let firefox = match b.family {
             crate::yt::Family::Firefox => true,
-            // decryption is implemented for macOS's Keychain only
-            crate::yt::Family::Chromium if cfg!(target_os = "macos") => false,
+            // decryption: macOS Keychain, Linux keyring; Windows' app-bound
+            // encryption can't be read from outside the browser
+            crate::yt::Family::Chromium if cfg!(any(target_os = "macos", target_os = "linux")) => {
+                false
+            }
             crate::yt::Family::Chromium => continue,
             crate::yt::Family::Safari => {
                 if let Some(db) = safari_cookie_file().filter(|f| std::fs::File::open(f).is_ok()) {
@@ -244,7 +247,7 @@ impl Session {
             let mut c = Command::new("open");
             c.args([
                 "-a",
-                if self.safari { "Safari" } else { "Firefox" },
+                if self.safari { "Safari" } else { self.browser },
                 SIGN_IN_URL,
             ]);
             c
@@ -322,7 +325,6 @@ impl Session {
             })?;
             rows.extend(it.flatten());
         } else {
-            let key = chromium_key(self.id)?;
             // DB schema ≥ 24 prefixes each plaintext with SHA-256(host) (32 bytes).
             let version: i64 = conn
                 .query_row("select value from meta where key = 'version'", [], |r| {
@@ -335,34 +337,55 @@ impl Session {
                 "select host_key as h, path, is_secure, expires_utc, name, value, encrypted_value, is_httponly from cookies where {filter}"
             );
             let mut st = conn.prepare(&sql)?;
-            let mut q = st.query([])?;
-            while let Some(r) = q.next()? {
-                let plain: String = r.get(5)?;
-                let enc: Vec<u8> = r.get(6)?;
-                let value = if !plain.is_empty() {
-                    plain
-                } else {
-                    match decrypt_chromium(&key, &enc, version >= 24) {
-                        Some(v) => v,
-                        None => continue,
+            let raw: Vec<(Cookie, Vec<u8>)> = st
+                .query_map([], |r| {
+                    // microseconds since 1601-01-01 → unix seconds (0 = session cookie)
+                    let us: i64 = r.get(3)?;
+                    let expiry = if us == 0 {
+                        0
+                    } else {
+                        us / 1_000_000 - 11_644_473_600
+                    };
+                    Ok((
+                        Cookie {
+                            host: r.get(0)?,
+                            path: r.get(1)?,
+                            secure: r.get::<_, i64>(2)? != 0,
+                            expiry,
+                            name: r.get(4)?,
+                            value: r.get(5)?,
+                            http_only: r.get::<_, i64>(7)? != 0,
+                        },
+                        r.get(6)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            // Linux "v11" values need the keyring's password: ask only then
+            let need_v11 = raw
+                .iter()
+                .any(|(c, e)| c.value.is_empty() && e.starts_with(b"v11"));
+            let keys = chromium_keys(self.id, need_v11)?;
+            let mut v11_failed = 0;
+            for (mut c, enc) in raw {
+                if c.value.is_empty() {
+                    match keys.decrypt(&enc, version >= 24) {
+                        Some(v) => c.value = v,
+                        None => {
+                            v11_failed += usize::from(enc.starts_with(b"v11"));
+                            continue;
+                        }
                     }
-                };
-                // microseconds since 1601-01-01 → unix seconds (0 = session cookie)
-                let us: i64 = r.get(3)?;
-                let expiry = if us == 0 {
-                    0
-                } else {
-                    us / 1_000_000 - 11_644_473_600
-                };
-                rows.push(Cookie {
-                    host: r.get(0)?,
-                    path: r.get(1)?,
-                    secure: r.get::<_, i64>(2)? != 0,
-                    expiry,
-                    name: r.get(4)?,
-                    value,
-                    http_only: r.get::<_, i64>(7)? != 0,
-                });
+                }
+                rows.push(c);
+            }
+            if v11_failed > 0
+                && !rows
+                    .iter()
+                    .any(|c| LOGIN_COOKIES.contains(&c.name.as_str()))
+            {
+                if let Some(e) = &keys.keyring_error {
+                    anyhow::bail!("couldn't read {}'s key from the keyring: {e}", self.browser);
+                }
             }
         }
         write_jar(&rows, dest, &self.label())
@@ -427,8 +450,150 @@ struct Cookie {
     http_only: bool,
 }
 
+/// Keys for a Chromium browser's encrypted cookie values: "v10" values use
+/// `v10`; "v11" (Linux, keyring-backed) try each of `v11`.
+struct ChromiumKeys {
+    v10: [u8; 16],
+    v11: Vec<[u8; 16]>,
+    /// Why the keyring's password couldn't be read (Linux), for the error.
+    keyring_error: Option<String>,
+}
+
+impl ChromiumKeys {
+    fn decrypt(&self, enc: &[u8], hashed_host: bool) -> Option<String> {
+        if enc.starts_with(b"v11") {
+            self.v11
+                .iter()
+                .find_map(|k| decrypt_chromium(k, enc, hashed_host))
+        } else {
+            decrypt_chromium(&self.v10, enc, hashed_host)
+        }
+    }
+}
+
+/// PBKDF2-SHA1 over "saltysalt", as Chromium derives its cookie key.
+fn chromium_derive(password: &[u8], rounds: u32) -> [u8; 16] {
+    let mut key = [0u8; 16];
+    pbkdf2::pbkdf2_hmac::<sha1::Sha1>(password, b"saltysalt", rounds, &mut key);
+    key
+}
+
+#[cfg(target_os = "macos")]
+fn chromium_keys(id: &str, _need_v11: bool) -> Result<ChromiumKeys> {
+    Ok(ChromiumKeys {
+        v10: chromium_key(id)?,
+        v11: Vec::new(),
+        keyring_error: None,
+    })
+}
+
+/// Linux: "v10" uses the fixed password "peanuts"; "v11" uses the
+/// "<Browser> Safe Storage" password from the desktop keyring (GNOME Keyring,
+/// KWallet, KeePassXC… through the Secret Service, or kwallet-query), or an
+/// empty one when the browser runs with `--password-store=basic`.
+#[cfg(target_os = "linux")]
+fn chromium_keys(id: &str, need_v11: bool) -> Result<ChromiumKeys> {
+    let mut keys = ChromiumKeys {
+        v10: chromium_derive(b"peanuts", 1),
+        v11: Vec::new(),
+        keyring_error: None,
+    };
+    if need_v11 {
+        match keyring::password(id) {
+            Ok(p) => keys.v11.push(chromium_derive(p.as_bytes(), 1)),
+            Err(e) => keys.keyring_error = Some(format!("{e:#}")),
+        }
+        keys.v11.push(chromium_derive(b"", 1));
+    }
+    Ok(keys)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn chromium_keys(id: &str, _need_v11: bool) -> Result<ChromiumKeys> {
+    anyhow::bail!("reading {id}'s cookies isn't supported on this system")
+}
+
+/// The keyring entry Chromium browsers keep their cookie password in.
+#[cfg(target_os = "linux")]
+mod keyring {
+    use anyhow::{Context, Result};
+
+    /// "Chrome" → items labelled "Chrome Safe Storage", KWallet folder "Chrome Keys".
+    fn browser_name(id: &str) -> Result<&'static str> {
+        Ok(match id {
+            "chrome" => "Chrome",
+            "chromium" => "Chromium",
+            "brave" => "Brave",
+            "edge" => "Microsoft Edge",
+            "opera" => "Opera",
+            "vivaldi" => "Vivaldi",
+            _ => anyhow::bail!("unknown Chromium browser {id}"),
+        })
+    }
+
+    pub fn password(id: &str) -> Result<String> {
+        let name = browser_name(id)?;
+        let label = format!("{name} Safe Storage");
+        let ss = secret_service(&label);
+        if let Ok(Some(p)) = &ss {
+            return Ok(p.clone());
+        }
+        if let Some(p) = kwallet(name, &label) {
+            return Ok(p);
+        }
+        match ss {
+            Err(e) => Err(e),
+            _ => anyhow::bail!("no \"{label}\" entry in the keyring"),
+        }
+    }
+
+    /// Secret Service (D-Bus): the default collection first, unlocking it
+    /// if needed (the desktop may ask for the keyring password once).
+    fn secret_service(label: &str) -> Result<Option<String>> {
+        use secret_service::{blocking::SecretService, EncryptionType};
+        let ss = SecretService::connect(EncryptionType::Plain)
+            .context("connecting to the Secret Service")?;
+        let mut collections = Vec::new();
+        if let Ok(c) = ss.get_default_collection() {
+            collections.push(c);
+        }
+        collections.extend(ss.get_all_collections().unwrap_or_default());
+        for c in &collections {
+            if c.is_locked().unwrap_or(true) && c.unlock().is_err() {
+                continue;
+            }
+            for item in c.get_all_items().unwrap_or_default() {
+                if item.get_label().ok().as_deref() == Some(label) {
+                    let secret = item.get_secret().context("reading the keyring entry")?;
+                    return Ok(Some(String::from_utf8_lossy(&secret).into_owned()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// KWallet 5 without Secret Service: its CLI.
+    fn kwallet(name: &str, label: &str) -> Option<String> {
+        let out = std::process::Command::new("kwallet-query")
+            .args([
+                "--read-password",
+                label,
+                "--folder",
+                &format!("{name} Keys"),
+                "kdewallet",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        let p = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
+        (out.status.success() && !p.is_empty() && !p.starts_with("Failed to read")).then_some(p)
+    }
+}
+
 /// AES key for a Chromium browser's cookies on macOS: PBKDF2 over the
 /// "<Browser> Safe Storage" Keychain password (asks the user once).
+#[cfg(target_os = "macos")]
 fn chromium_key(id: &str) -> Result<[u8; 16]> {
     let (service, account) = match id {
         "chrome" => ("Chrome Safe Storage", "Chrome"),
@@ -449,15 +614,15 @@ fn chromium_key(id: &str) -> Result<[u8; 16]> {
         anyhow::bail!("Keychain access to \"{service}\" was denied");
     }
     let password = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
-    let mut key = [0u8; 16];
-    pbkdf2::pbkdf2_hmac::<sha1::Sha1>(password.as_bytes(), b"saltysalt", 1003, &mut key);
-    Ok(key)
+    Ok(chromium_derive(password.as_bytes(), 1003))
 }
 
-/// "v10" + AES-128-CBC (IV of 16 spaces, PKCS#7).
+/// "v10"/"v11" + AES-128-CBC (IV of 16 spaces, PKCS#7).
 fn decrypt_chromium(key: &[u8; 16], enc: &[u8], hashed_host: bool) -> Option<String> {
     use aes::cipher::{block_padding::Pkcs7, BlockModeDecrypt, KeyIvInit};
-    let body = enc.strip_prefix(b"v10")?;
+    let body = enc
+        .strip_prefix(b"v10")
+        .or_else(|| enc.strip_prefix(b"v11"))?;
     let mut buf = body.to_vec();
     let dec = cbc::Decryptor::<aes::Aes128>::new(key.into(), &[b' '; 16].into());
     let plain = dec.decrypt_padded::<Pkcs7>(&mut buf).ok()?;
@@ -549,6 +714,10 @@ fn exe(id: &str) -> Option<PathBuf> {
             "opera" => ("Opera", "Opera"),
             "vivaldi" => ("Vivaldi", "Vivaldi"),
             "firefox" => ("Firefox", "firefox"),
+            "librewolf" => ("LibreWolf", "librewolf"),
+            "waterfox" => ("Waterfox", "waterfox"),
+            "floorp" => ("Floorp", "floorp"),
+            "zen" => ("Zen", "zen"),
             _ => return None,
         };
         vec![
@@ -561,6 +730,10 @@ fn exe(id: &str) -> Option<PathBuf> {
             "edge" => "Microsoft\\Edge\\Application\\msedge.exe",
             "brave" => "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
             "firefox" => "Mozilla Firefox\\firefox.exe",
+            "librewolf" => "LibreWolf\\librewolf.exe",
+            "waterfox" => "Waterfox\\waterfox.exe",
+            "floorp" => "Ablaze Floorp\\floorp.exe",
+            "zen" => "Zen Browser\\zen.exe",
             _ => return None,
         };
         let local = dirs::data_local_dir().unwrap_or_default();
@@ -570,20 +743,36 @@ fn exe(id: &str) -> Option<PathBuf> {
             .chain(std::iter::once(local.join(rel)))
             .collect()
     } else {
+        // command names, then the Flatpak app id
         let names: &[&str] = match id {
-            "chrome" => &["google-chrome", "google-chrome-stable"],
-            "chromium" => &["chromium", "chromium-browser"],
-            "brave" => &["brave-browser", "brave"],
-            "edge" => &["microsoft-edge"],
-            "vivaldi" => &["vivaldi"],
-            "opera" => &["opera"],
-            "firefox" => &["firefox"],
+            "chrome" => &["google-chrome", "google-chrome-stable", "com.google.Chrome"],
+            "chromium" => &["chromium", "chromium-browser", "org.chromium.Chromium"],
+            "brave" => &["brave-browser", "brave", "com.brave.Browser"],
+            "edge" => &[
+                "microsoft-edge",
+                "microsoft-edge-stable",
+                "com.microsoft.Edge",
+            ],
+            "vivaldi" => &["vivaldi", "vivaldi-stable", "com.vivaldi.Vivaldi"],
+            "opera" => &["opera", "com.opera.Opera"],
+            "firefox" => &["firefox", "org.mozilla.firefox"],
+            "librewolf" => &["librewolf", "io.gitlab.librewolf-community"],
+            "waterfox" => &["waterfox", "net.waterfox.waterfox"],
+            "floorp" => &["floorp", "one.ablaze.floorp"],
+            "zen" => &["zen", "zen-browser", "app.zen_browser.zen"],
             _ => return None,
         };
-        let dirs = ["/usr/bin", "/usr/local/bin", "/snap/bin"];
+        let flatpak_user = home.join(".local/share/flatpak/exports/bin");
+        let dirs = [
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/snap/bin"),
+            PathBuf::from("/var/lib/flatpak/exports/bin"),
+            flatpak_user,
+        ];
         names
             .iter()
-            .flat_map(|n| dirs.iter().map(move |d| PathBuf::from(d).join(n)))
+            .flat_map(|n| dirs.iter().map(move |d| d.join(n)))
             .collect()
     };
     cands.into_iter().find(|p| p.is_file())
@@ -661,6 +850,15 @@ mod tests {
             Some("world")
         );
         assert_eq!(decrypt_chromium(&key, b"v11garbage", false), None);
+        // Linux: v11 values try the keyring key, then the empty password
+        let keys = ChromiumKeys {
+            v10: [0; 16],
+            v11: vec![[1; 16], key],
+            keyring_error: None,
+        };
+        let mut v11 = enc(b"linux");
+        v11[..3].copy_from_slice(b"v11");
+        assert_eq!(keys.decrypt(&v11, false).as_deref(), Some("linux"));
     }
 }
 

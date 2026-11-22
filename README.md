@@ -72,9 +72,12 @@ verified) and keeps yt-dlp up to date.
 ### Signing in
 
 ytmini reads the YouTube session from a browser you're already signed in to:
-Firefox (macOS, Windows and Linux, including snap and Flatpak), Chrome, Brave,
-Edge, Chromium, Opera and Vivaldi (macOS; one Keychain prompt), or Safari
-(needs Full Disk Access). Google blocks
+
+| Browser | macOS | Windows | Linux |
+|---|---|---|---|
+| Firefox, LibreWolf, Waterfox, Floorp, Zen | ✓ | ✓ | ✓ (also snap / Flatpak) |
+| Chrome, Chromium, Brave, Edge, Opera, Vivaldi | ✓ (one Keychain prompt) | – (their cookies are locked to the browser) | ✓ (key from GNOME Keyring / KWallet) |
+| Safari | ✓ (needs Full Disk Access) | | | Google blocks
 sign-in inside embedded web views, and OAuth doesn't give access to the feed,
 history or Watch later, so this is the only way to see your own YouTube.
 

@@ -397,6 +397,27 @@ pub const ALL_BROWSERS: &[Browser] = &[
         id: "vivaldi",
         family: Family::Chromium,
     },
+    // Firefox-engine browsers keep cookies exactly like Firefox
+    Browser {
+        name: "LibreWolf",
+        id: "librewolf",
+        family: Family::Firefox,
+    },
+    Browser {
+        name: "Waterfox",
+        id: "waterfox",
+        family: Family::Firefox,
+    },
+    Browser {
+        name: "Floorp",
+        id: "floorp",
+        family: Family::Firefox,
+    },
+    Browser {
+        name: "Zen",
+        id: "zen",
+        family: Family::Firefox,
+    },
 ];
 
 pub fn profile_dirs(id: &str) -> Vec<PathBuf> {
@@ -418,6 +439,10 @@ pub fn profile_dirs(id: &str) -> Vec<PathBuf> {
             "chromium" => &["Chromium"],
             "opera" => &["com.operasoftware.Opera"],
             "vivaldi" => &["Vivaldi"],
+            "librewolf" => &["librewolf"],
+            "waterfox" => &["Waterfox"],
+            "floorp" => &["Floorp"],
+            "zen" => &["zen"],
             _ => &[],
         };
         rel.iter().map(|r| s.join(r)).collect()
@@ -435,14 +460,23 @@ pub fn profile_dirs(id: &str) -> Vec<PathBuf> {
             "chromium" => vec![local.join("Chromium/User Data")],
             "opera" => vec![roaming.join("Opera Software/Opera Stable")],
             "vivaldi" => vec![local.join("Vivaldi/User Data")],
+            "librewolf" => vec![roaming.join("librewolf")],
+            "waterfox" => vec![roaming.join("Waterfox")],
+            "floorp" => vec![roaming.join("Floorp")],
+            "zen" => vec![roaming.join("zen")],
             _ => vec![],
         }
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let cfg = home.join(".config");
+        // ~/.var/app/<app id>/<rel>: the browser installed from Flathub
+        let flatpak = |app: &str, rel: &str| home.join(".var/app").join(app).join(rel);
         match id {
-            "chrome" => vec![cfg.join("google-chrome")],
+            "chrome" => vec![
+                cfg.join("google-chrome"),
+                flatpak("com.google.Chrome", "config/google-chrome"),
+            ],
             // classic, XDG (Firefox ≥ 147 for new profiles), snap, Flatpak
             "firefox" => vec![
                 home.join(".mozilla/firefox"),
@@ -453,14 +487,38 @@ pub fn profile_dirs(id: &str) -> Vec<PathBuf> {
                 home.join(".var/app/org.mozilla.firefox/.mozilla/firefox"),
                 home.join(".var/app/org.mozilla.firefox/config/mozilla/firefox"),
             ],
-            "brave" => vec![cfg.join("BraveSoftware/Brave-Browser")],
-            "edge" => vec![cfg.join("microsoft-edge")],
+            "brave" => vec![
+                cfg.join("BraveSoftware/Brave-Browser"),
+                flatpak("com.brave.Browser", "config/BraveSoftware/Brave-Browser"),
+            ],
+            "edge" => vec![
+                cfg.join("microsoft-edge"),
+                flatpak("com.microsoft.Edge", "config/microsoft-edge"),
+            ],
             "chromium" => vec![
                 cfg.join("chromium"),
                 home.join("snap/chromium/common/chromium"),
+                flatpak("org.chromium.Chromium", "config/chromium"),
             ],
-            "opera" => vec![cfg.join("opera")],
-            "vivaldi" => vec![cfg.join("vivaldi")],
+            "opera" => vec![
+                cfg.join("opera"),
+                flatpak("com.opera.Opera", "config/opera"),
+            ],
+            "vivaldi" => vec![
+                cfg.join("vivaldi"),
+                flatpak("com.vivaldi.Vivaldi", "config/vivaldi"),
+            ],
+            "librewolf" => vec![
+                home.join(".librewolf"),
+                cfg.join("librewolf/librewolf"),
+                flatpak("io.gitlab.librewolf-community", ".librewolf"),
+            ],
+            "waterfox" => vec![home.join(".waterfox")],
+            "floorp" => vec![
+                home.join(".floorp"),
+                flatpak("one.ablaze.floorp", ".floorp"),
+            ],
+            "zen" => vec![home.join(".zen"), flatpak("app.zen_browser.zen", ".zen")],
             _ => vec![],
         }
     }

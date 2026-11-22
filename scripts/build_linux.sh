@@ -48,7 +48,6 @@ Version: ${VERSION}
 Architecture: amd64
 Maintainer: Denys Mitin <denisukmol2002@gmail.com>
 Depends: libmpv2 | libmpv1, libc6 (>= ${glibc})
-Recommends: firefox | firefox-esr
 Section: video
 Priority: optional
 Installed-Size: ${size}
@@ -56,7 +55,9 @@ Homepage: https://github.com/dennissoftman/ytmini
 Description: small, fast desktop YouTube client
  ytmini shows your YouTube feed, subscriptions, Watch later, history and
  playlists with your own account, and plays videos in an embedded mpv player.
- It signs in with the YouTube session from your Firefox profile.
+ It signs in with the YouTube session from your browser (Firefox and its
+ forks, Chrome, Chromium, Brave, Edge, Opera, Vivaldi), or works without
+ signing in.
 CONTROL
   dpkg-deb --root-owner-group --build "$root" "dist/ytmini_${VERSION}_amd64.deb" >/dev/null
   echo "built dist/ytmini_${VERSION}_amd64.deb"

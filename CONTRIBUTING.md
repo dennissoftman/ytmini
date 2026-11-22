@@ -107,8 +107,10 @@ cargo fmt --check && cargo clippy --release --all-targets -- -D warnings
 - Linux packages: `./scripts/build_linux.sh` on Linux (release builds run on
   Ubuntu 22.04, so the binary needs glibc 2.35+). libmpv isn't bundled; the
   .deb depends on `libmpv2 | libmpv1`. No tray on Linux (it would need GTK);
-  closing the window quits. Sign-in reads Firefox only: Chromium browsers
-  there keep their key in the desktop keyring.
+  closing the window quits. Chromium browsers there encrypt cookies with
+  "peanuts" (v10) or the "<Browser> Safe Storage" password from the desktop
+  keyring (v11), read through the Secret Service (`secret-service` crate) or
+  `kwallet-query`.
 - `build.rs` embeds `assets/icon.ico` with `llvm-rc`, using relative paths
   because llvm-rc reads `/Users/…` as an option.
 - The NSIS installer (`installer/ytmini.nsi`, strings in
