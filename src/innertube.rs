@@ -971,7 +971,10 @@ fn watch_info(r: &Value) -> WatchInfo {
 
 /// The watch page, signed in: suggestions (see below) and [`WatchInfo`].
 pub fn watch_next(cookies: &Path, video_id: &str) -> Result<(Vec<Video>, WatchInfo)> {
-    let c = Client::new(cookies)?;
+    watch_next_with(&Client::new(cookies)?, video_id)
+}
+
+fn watch_next_with(c: &Client, video_id: &str) -> Result<(Vec<Video>, WatchInfo)> {
     let r = c.post("next", json!({ "videoId": video_id }))?;
     let info = watch_info(&r);
     let results = r
@@ -1439,8 +1442,121 @@ pub fn is_song(video_id: &str) -> Result<bool> {
         }))
 }
 
+/// YouTube's own topic channels, as a signed-out front page. News and Live
+/// follow the region (`gl`); YouTube's signed-out Home itself is empty.
+const ANON_SHELVES: [&str; 4] = [
+    "UCYfdidRxbB8Qhf0Nx7ioOYw", // News
+    "UC4R8DWoMoI7CAwX8_LjQHig", // Live
+    "UCOpNcN46UbXVtpKMrmU4Abg", // Gaming
+    "UCEgdi0XIXXZ-qJOFPf4JSKw", // Sports
+];
+/// Recently played videos to base suggestions on, and how many per page.
+const ANON_SEEDS: usize = 9;
+const ANON_SEEDS_PER_PAGE: usize = 3;
+
+enum AnonStep {
+    /// Suggestions for these videos, mixed.
+    Related(Vec<String>),
+    Channel(&'static str),
+}
+
+/// Home without an account: YouTube's suggestions for what you played lately
+/// (from ytmini's own resume points, kept on this computer), then popular
+/// videos for your region. YouTube sees only which videos it's asked about,
+/// as when you open them.
+struct AnonHome {
+    steps: std::collections::VecDeque<AnonStep>,
+    /// Already shown, played to the end, or a seed itself.
+    skip: std::collections::HashSet<String>,
+    shown_any: bool,
+}
+
+impl AnonHome {
+    fn new() -> AnonHome {
+        let positions = crate::positions::Positions::load();
+        let seeds = positions.recent(ANON_SEEDS);
+        let mut skip = positions.watched_ids();
+        skip.extend(seeds.iter().cloned());
+        let mut steps: std::collections::VecDeque<AnonStep> = seeds
+            .chunks(ANON_SEEDS_PER_PAGE)
+            .map(|c| AnonStep::Related(c.to_vec()))
+            .collect();
+        steps.extend(ANON_SHELVES.map(AnonStep::Channel));
+        AnonHome {
+            steps,
+            skip,
+            shown_any: false,
+        }
+    }
+
+    fn next_page(&mut self, client: &Client) -> Result<Option<Vec<Video>>> {
+        let mut error = None;
+        while let Some(step) = self.steps.pop_front() {
+            let lists: Vec<Result<Vec<Video>>> = match &step {
+                AnonStep::Related(ids) => std::thread::scope(|s| {
+                    let jobs: Vec<_> = ids
+                        .iter()
+                        .map(|id| s.spawn(move || watch_next_with(client, id).map(|r| r.0)))
+                        .collect();
+                    jobs.into_iter()
+                        .map(|j| {
+                            j.join()
+                                .unwrap_or_else(|_| Err(anyhow::anyhow!("panicked")))
+                        })
+                        .collect()
+                }),
+                AnonStep::Channel(id) => {
+                    vec![client.post("browse", json!({ "browseId": id })).map(|r| {
+                        let mut out = Vec::new();
+                        collect(&r, &mut out, &mut None);
+                        out
+                    })]
+                }
+            };
+            let mut ok = Vec::new();
+            for l in lists {
+                match l {
+                    Ok(v) => ok.push(v),
+                    Err(e) => error = Some(e),
+                }
+            }
+            let out = self.mix(ok);
+            if !out.is_empty() {
+                self.shown_any = true;
+                return Ok(Some(out));
+            }
+        }
+        match error {
+            Some(e) if !self.shown_any => Err(e),
+            _ => Ok(None),
+        }
+    }
+
+    /// Round-robin over the lists, dropping what was shown or watched.
+    fn mix(&mut self, lists: Vec<Vec<Video>>) -> Vec<Video> {
+        let mut iters: Vec<_> = lists.into_iter().map(Vec::into_iter).collect();
+        let mut out = Vec::new();
+        loop {
+            let mut any = false;
+            for it in iters.iter_mut() {
+                if let Some(v) = it.next() {
+                    any = true;
+                    if self.skip.insert(v.id.clone()) {
+                        out.push(v);
+                    }
+                }
+            }
+            if !any {
+                return out;
+            }
+        }
+    }
+}
+
 pub struct Pager {
     is_feed: bool,
+    /// Home while signed out (see [`AnonHome`]).
+    anon: Option<AnonHome>,
     client: Client,
     endpoint: &'static str,
     first: Option<Value>,
@@ -1491,6 +1607,7 @@ impl Pager {
         };
         Ok(Pager {
             is_feed: matches!(source, Source::Feed),
+            anon: (matches!(source, Source::Feed) && !client.signed_in()).then(AnonHome::new),
             client,
             endpoint,
             first: Some(first),
@@ -1507,6 +1624,9 @@ impl Pager {
 
     /// The next page; `Ok(None)` when the list has ended.
     pub fn next_page(&mut self) -> Result<Option<Vec<Video>>> {
+        if let Some(home) = &mut self.anon {
+            return home.next_page(&self.client);
+        }
         let body = match (&self.first, &self.token) {
             (Some(b), _) => b.clone(),
             (None, Some(t)) => json!({ "continuation": t }),
@@ -2017,6 +2137,7 @@ mod music_live {
         );
         let mut c = super::Pager {
             first: Some(serde_json::json!({ "browseId": super::MUSIC_CHANNEL })),
+            anon: None,
             ..super::Pager::new(&cookies, &crate::yt::Source::Feed).unwrap()
         };
         let f = c.next_page().unwrap().unwrap_or_default();
@@ -2032,6 +2153,34 @@ mod music_live {
 
 #[cfg(test)]
 mod signed_out_live {
+    /// Home signed out: suggestions for recent plays, then regional shelves.
+    /// Run with YTMINI_CONFIG_DIR=<scratch dir> (signed out; its positions.json
+    /// gives the seeds). `cargo test -- --ignored anon_home --nocapture`
+    #[test]
+    #[ignore]
+    fn anon_home() {
+        let cookies = crate::yt::config_dir().unwrap().join("cookies.txt");
+        let mut p = super::Pager::new(&cookies, &crate::yt::Source::Feed).unwrap();
+        assert!(
+            p.anon.is_some(),
+            "signed in: use a scratch YTMINI_CONFIG_DIR"
+        );
+        let mut all = std::collections::HashSet::new();
+        let mut n = 0;
+        while let Some(page) = p.next_page().unwrap() {
+            n += 1;
+            eprintln!(
+                "page {n}: {} videos, e.g. {:?}",
+                page.len(),
+                page.iter().take(3).map(|v| v.title()).collect::<Vec<_>>()
+            );
+            for v in &page {
+                assert!(all.insert(v.id.clone()), "repeated {}", v.id);
+            }
+        }
+        assert!(n >= 4);
+    }
+
     /// What works without a session. Run with an empty profile:
     /// `YTMINI_CONFIG_DIR=$(mktemp -d) cargo test --release -- --ignored signed_out_lists --nocapture`
     #[test]

@@ -125,6 +125,26 @@ impl Positions {
         self.dirty = true;
     }
 
+    /// The `n` videos played most recently (past the first half minute).
+    pub fn recent(&self, n: usize) -> Vec<String> {
+        let mut v: Vec<(&String, &Entry)> = self
+            .map
+            .iter()
+            .filter(|(_, e)| e.pos >= 30.0 || e.watched())
+            .collect();
+        v.sort_by_key(|(_, e)| std::cmp::Reverse(e.at));
+        v.into_iter().take(n).map(|(k, _)| k.clone()).collect()
+    }
+
+    /// Videos played to the end.
+    pub fn watched_ids(&self) -> std::collections::HashSet<String> {
+        self.map
+            .iter()
+            .filter(|(_, e)| e.watched())
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
     pub fn forget(&mut self, id: &str) {
         self.dirty |= self.map.remove(id).is_some();
     }

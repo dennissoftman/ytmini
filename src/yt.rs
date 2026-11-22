@@ -654,10 +654,10 @@ pub enum Source {
 impl Source {
     /// Lists that only exist for a signed-in account.
     pub fn needs_account(&self) -> bool {
+        // Home works signed out too (suggestions and regional videos)
         matches!(
             self,
-            Source::Feed
-                | Source::Subscriptions
+            Source::Subscriptions
                 | Source::Music
                 | Source::WatchLater
                 | Source::History

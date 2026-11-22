@@ -2543,8 +2543,9 @@ impl App {
                     | Source::Search(_)
             );
             // Home: each of YouTube's categories as its own row
-            // Home: For you (3 rows), Shorts, then the categories; the page ends
-            let home = source == Source::Feed && !feed_all;
+            // Home: For you (3 rows), Shorts, then the categories; the page ends.
+            // Signed out there are no categories: the endless grid right away.
+            let home = source == Source::Feed && !feed_all && signed_in;
             let topics: Vec<(String, String)> = if home {
                 crate::innertube::HOME_CHIPS
                     .lock()

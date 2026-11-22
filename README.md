@@ -83,7 +83,9 @@ sign-in inside embedded web views, and OAuth doesn't give access to the feed,
 history or Watch later, so this is the only way to see your own YouTube.
 
 You can also skip signing in: search, channels and playback work without an
-account; your feed, subscriptions, Watch later and history need one.
+account, and Home suggests videos related to what you played lately (from
+ytmini's local history) plus popular videos for your region. Your own feed,
+subscriptions, Watch later and history need an account.
 
 Only cookies for `youtube.com` and Google sign-in are copied. They stay in
 ytmini's own settings folder (readable only by you) and are sent nowhere but
@@ -126,6 +128,9 @@ It talks to:
 | [SponsorBlock](https://sponsor.ajay.app) | on by default (Settings) | 4 characters of a hash of the video id, never the id |
 | [Deezer](https://www.deezer.com) | Auto EQ for songs, on by default (Settings) | the artist and song title, to look up the genre ([privacy](https://www.deezer.com/legal/personal-datas)) |
 | [DeArrow](https://dearrow.ajay.app) | experimental, off by default (Settings) | a hash prefix for titles, the video id for thumbnails |
+
+Signed out, Home asks YouTube for suggestions for the videos you played
+lately, which sends their ids without cookies, as opening them would.
 
 None of the third parties gets cookies or anything that identifies you beyond
 your IP address. Crash reports are only written to a local file; nothing is
