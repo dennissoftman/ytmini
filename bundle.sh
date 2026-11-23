@@ -55,14 +55,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>ko</string>
   </array>
   <key>NSPrincipalClass</key>           <string>NSApplication</string>
-  <!-- Right-click a YouTube link (or selected text) → Services → Open in ytmini. src/links.rs -->
+  <!-- Right-click a YouTube link (or selected text) → Services → Open in ytmini. src/links.rs
+       Text only: with public.url the item also showed on every file in Finder (a file
+       is a file:// URL) and only said "That isn't a YouTube link". Links still arrive
+       as text. -->
   <key>NSServices</key>
   <array>
     <dict>
       <key>NSMenuItem</key>    <dict><key>default</key><string>Open in ytmini</string></dict>
       <key>NSMessage</key>     <string>openYouTubeLink</string>
       <key>NSPortName</key>    <string>ytmini</string>
-      <key>NSSendTypes</key>   <array><string>public.url</string><string>public.utf8-plain-text</string></array>
+      <key>NSSendTypes</key>   <array><string>public.utf8-plain-text</string></array>
       <key>NSRequiredContext</key> <dict/>
     </dict>
   </array>
