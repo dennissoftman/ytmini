@@ -3647,22 +3647,7 @@ impl App {
         let last = sync.mark;
         let (tx, ctx, cookies) = (self.tx.clone(), ctx.clone(), self.cookies.clone());
         std::thread::spawn(move || {
-            let r = (|| {
-                let s = signin::find(&src.id, &src.profile)?;
-                if !s.reads_silently() {
-                    return None;
-                }
-                let now = s.browser_mark().ok()??;
-                let changed = match last {
-                    Some(m) => m != now.all,
-                    None => signin::jar_mark(&cookies) != Some(now.google),
-                };
-                // on failure (e.g. signed out there) keep ours and look again later
-                if changed && s.export_cookies(&cookies).is_err() {
-                    return None;
-                }
-                Some((now.all, changed))
-            })();
+            let r = signin::follow(&src.id, &src.profile, last, &cookies);
             let _ = tx.send(Msg::BrowserSynced(r));
             ctx.request_repaint();
         });

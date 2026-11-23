@@ -98,6 +98,28 @@ pub fn jar_mark(jar: &Path) -> Option<u64> {
     rotation_mark(rows.into_iter(), &["google.com"])
 }
 
+/// One look at the browser profile the session came from (`App::follow_browser`):
+/// if it rotated its sign-in cookies since `last` (its [`BrowserMark::all`]
+/// at the previous look) or, at the first look, its google.com ones differ
+/// from those in `jar`, import them into `jar` again. Returns the new mark
+/// and whether it imported; None if the profile can't be read without a
+/// prompt, or reading or importing failed (ours is kept then).
+pub fn follow(id: &str, profile: &Path, last: Option<u64>, jar: &Path) -> Option<(u64, bool)> {
+    let s = find(id, profile)?;
+    if !s.reads_silently() {
+        return None;
+    }
+    let now = s.browser_mark().ok()??;
+    let changed = match last {
+        Some(m) => m != now.all,
+        None => jar_mark(jar) != Some(now.google),
+    };
+    if changed && s.export_cookies(jar).is_err() {
+        return None;
+    }
+    Some((now.all, changed))
+}
+
 /// One browser profile with a cookie database.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Session {
@@ -1082,6 +1104,43 @@ mod rotation_tests {
             browser.is_some() && browser.map(|b| b.google) == ours
         );
         assert!(browser.is_some());
+    }
+
+    /// End to end against the signed-in Firefox/Safari, in a scratch config
+    /// dir (never the real one): a stale copy is replaced, a fresh one left
+    /// alone, and the imported session signs in. Prints no cookie contents.
+    /// `YTMINI_CONFIG_DIR=<scratch> cargo test -- --ignored live_follow`
+    #[test]
+    #[ignore]
+    fn live_follow() {
+        let cfg =
+            std::env::var_os("YTMINI_CONFIG_DIR").expect("set YTMINI_CONFIG_DIR to a scratch dir");
+        let jar = std::path::Path::new(&cfg).join("cookies.txt");
+        let s = sessions()
+            .into_iter()
+            .find(|s| s.reads_silently() && s.has_login().unwrap_or(false))
+            .expect("a signed-in Firefox or Safari profile");
+        std::fs::write(
+            &jar,
+            "# Netscape HTTP Cookie File\n.google.com\tTRUE\t/\tTRUE\t0\t__Secure-1PSIDTS\tstale\n",
+        )
+        .unwrap();
+        let (mark, imported) = follow(s.id, &s.profile, None, &jar).expect("first look");
+        assert!(imported, "a stale copy is imported again");
+        assert_eq!(jar_mark(&jar), s.browser_mark().unwrap().map(|m| m.google));
+        let (again, imported) = follow(s.id, &s.profile, None, &jar).expect("second look");
+        assert!(!imported, "an up-to-date copy is left alone");
+        let (_, imported) = follow(s.id, &s.profile, Some(mark), &jar).expect("third look");
+        assert!(
+            !imported && again == mark,
+            "no rotation since the last look"
+        );
+        crate::innertube::check_session(&jar).expect("the imported session signs in");
+        eprintln!(
+            "{}: stale copy replaced, fresh copy kept, session signs in",
+            s.browser
+        );
+        let _ = std::fs::remove_file(&jar);
     }
 
     #[test]
