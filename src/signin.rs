@@ -29,6 +29,75 @@ const SIGN_IN_URL: &str =
 /// Cookies Google sets only for a signed-in session.
 const LOGIN_COOKIES: &[&str] = &["SAPISID", "__Secure-3PAPISID", "LOGIN_INFO"];
 
+/// Google's rotating sign-in cookies. A browser with a YouTube tab open
+/// replaces them every few minutes, and the values it replaced stop working
+/// soon after, for ytmini's copy too (yt-dlp's FAQ describes the same).
+const ROTATING: &[&str] = &["__Secure-1PSIDTS", "__Secure-3PSIDTS"];
+
+/// A fingerprint of the rotating cookies set for `hosts`: a hash of their
+/// values, so the values themselves never leave the function that read them.
+fn rotation_mark<'a>(
+    rows: impl Iterator<Item = (&'a str, &'a str, &'a str)>,
+    hosts: &[&str],
+) -> Option<u64> {
+    use sha2::{Digest, Sha256};
+    let mut picked: Vec<_> = rows
+        .filter(|(host, name, _)| {
+            ROTATING.contains(name) && hosts.contains(&host.trim_start_matches('.'))
+        })
+        .collect();
+    if picked.is_empty() {
+        return None;
+    }
+    picked.sort();
+    let mut h = Sha256::new();
+    for (host, name, value) in picked {
+        h.update(host.trim_start_matches('.').as_bytes());
+        h.update([0]);
+        h.update(name.as_bytes());
+        h.update([0]);
+        h.update(value.as_bytes());
+        h.update([0]);
+    }
+    Some(u64::from_be_bytes(h.finalize()[..8].try_into().ok()?))
+}
+
+/// The browser's rotating cookies: for google.com, which only an import
+/// changes in ytmini's copy, and for google.com and youtube.com together,
+/// which only the browser changes in its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BrowserMark {
+    pub google: u64,
+    pub all: u64,
+}
+
+fn browser_mark_of<'a>(
+    rows: impl Iterator<Item = (&'a str, &'a str, &'a str)> + Clone,
+) -> Option<BrowserMark> {
+    Some(BrowserMark {
+        google: rotation_mark(rows.clone(), &["google.com"])?,
+        all: rotation_mark(rows, &["google.com", "youtube.com"])?,
+    })
+}
+
+/// [`rotation_mark`] of the google.com cookies in ytmini's own cookies.txt
+/// (compare with [`BrowserMark::google`]).
+pub fn jar_mark(jar: &Path) -> Option<u64> {
+    let text = std::fs::read_to_string(jar).ok()?;
+    let rows: Vec<(&str, &str, &str)> = text
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l
+                .strip_prefix("#HttpOnly_")
+                .unwrap_or(l)
+                .split('\t')
+                .collect();
+            (f.len() >= 7).then(|| (f[0], f[5], f[6]))
+        })
+        .collect();
+    rotation_mark(rows.into_iter(), &["google.com"])
+}
+
 /// One browser profile with a cookie database.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Session {
@@ -237,6 +306,44 @@ impl Session {
                 .context("reading cookie names")?
         };
         Ok(n > 0)
+    }
+
+    /// Can ytmini read this profile's cookies again without a prompt?
+    /// (Chromium browsers on macOS ask for Keychain access.)
+    pub fn reads_silently(&self) -> bool {
+        self.firefox || self.safari
+    }
+
+    /// [`rotation_mark`] of this profile's cookies right now. Only for
+    /// profiles that [`reads_silently`](Self::reads_silently).
+    pub fn browser_mark(&self) -> Result<Option<BrowserMark>> {
+        if self.safari {
+            let rows = safari_cookies(&self.db)?;
+            return Ok(browser_mark_of(
+                rows.iter()
+                    .map(|c| (c.host.as_str(), c.name.as_str(), c.value.as_str())),
+            ));
+        }
+        anyhow::ensure!(
+            self.firefox,
+            "{} can't be read without a prompt",
+            self.browser
+        );
+        let dir = crate::yt::config_dir()?.join("signin-mark");
+        let _cleanup = RemoveOnDrop(dir.clone());
+        let db = self.snapshot_to(&dir)?;
+        let conn = rusqlite::Connection::open(&db)?;
+        let mut st = conn.prepare(
+            "select host, name, value from moz_cookies \
+             where name in ('__Secure-1PSIDTS', '__Secure-3PSIDTS')",
+        )?;
+        let rows: Vec<(String, String, String)> = st
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(browser_mark_of(
+            rows.iter()
+                .map(|(h, n, v)| (h.as_str(), n.as_str(), v.as_str())),
+        ))
     }
 
     /// Open Google sign-in in this browser and profile (joins the running
@@ -919,5 +1026,83 @@ mod live {
             assert!(crate::yt::logged_in(&out));
             let _ = std::fs::remove_file(out);
         }
+    }
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+
+    #[test]
+    fn mark_follows_only_the_rotating_google_cookies() {
+        let a = [
+            (".google.com", "__Secure-1PSIDTS", "one"),
+            (".google.com", "__Secure-3PSIDTS", "three"),
+            (".youtube.com", "__Secure-1PSIDTS", "yt"),
+            (".google.com", "SID", "sid"),
+        ];
+        let m = browser_mark_of(a.iter().copied()).unwrap();
+        // order and other cookies don't matter
+        let mut b = a;
+        b.reverse();
+        b[0].2 = "other sid";
+        assert_eq!(browser_mark_of(b.iter().copied()), Some(m));
+        // a google.com rotation changes both marks
+        let mut c = a;
+        c[0].2 = "rotated";
+        let mc = browser_mark_of(c.iter().copied()).unwrap();
+        assert!(mc.google != m.google && mc.all != m.all);
+        // a youtube.com one only the combined mark
+        let mut d = a;
+        d[2].2 = "yt rotated";
+        let md = browser_mark_of(d.iter().copied()).unwrap();
+        assert!(md.google == m.google && md.all != m.all);
+        assert_eq!(
+            browser_mark_of([(".google.com", "SID", "x")].into_iter()),
+            None
+        );
+    }
+
+    /// Read-only, against the signed-in browser: prints only whether the
+    /// browser's mark matches ours. `cargo test -- --ignored live_browser_mark`
+    #[test]
+    #[ignore]
+    fn live_browser_mark() {
+        let s = sessions()
+            .into_iter()
+            .find(|s| s.reads_silently() && s.has_login().unwrap_or(false));
+        let s = s.expect("a signed-in Firefox or Safari profile");
+        let browser = s.browser_mark().unwrap();
+        let ours = jar_mark(&crate::yt::cookie_file().unwrap());
+        eprintln!(
+            "{}: browser mark found {}, ours found {}, same {}",
+            s.browser,
+            browser.is_some(),
+            ours.is_some(),
+            browser.is_some() && browser.map(|b| b.google) == ours
+        );
+        assert!(browser.is_some());
+    }
+
+    #[test]
+    fn jar_mark_reads_cookies_txt() {
+        let jar = std::env::temp_dir().join(format!("ytmini-mark-{}.txt", std::process::id()));
+        std::fs::write(
+            &jar,
+            "# Netscape HTTP Cookie File\n\n\
+             #HttpOnly_.google.com\tTRUE\t/\tTRUE\t0\t__Secure-1PSIDTS\tone\n\
+             .google.com\tTRUE\t/\tTRUE\t0\t__Secure-3PSIDTS\tthree\n",
+        )
+        .unwrap();
+        let want = rotation_mark(
+            [
+                (".google.com", "__Secure-1PSIDTS", "one"),
+                (".google.com", "__Secure-3PSIDTS", "three"),
+            ]
+            .into_iter(),
+            &["google.com"],
+        );
+        assert_eq!(jar_mark(&jar), want);
+        let _ = std::fs::remove_file(&jar);
     }
 }

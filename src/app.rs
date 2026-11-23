@@ -171,6 +171,9 @@ enum Msg {
     NowPlayingArt(String, Vec<u8>),
     /// Silent session refresh finished: (browser label, browser id, profile) or error.
     SessionRefreshed(Result<(String, String, std::path::PathBuf), String>),
+    /// Browser check finished: the browser's rotation mark and whether its
+    /// cookies were imported again; None when it couldn't be read.
+    BrowserSynced(Option<(u64, bool)>),
     /// Watch later add (true) / remove finished for a video id.
     WatchLater(bool, String, Result<String, String>),
 }
@@ -411,6 +414,7 @@ pub struct App {
     session_refresh: SessionRefresh,
     /// Last background "still signed in?" probe.
     session_checked: std::time::Instant,
+    browser_sync: BrowserSync,
     /// Now Playing: last published state and when, the channel name and
     /// thumbnail of what's playing.
     np_last: Option<(crate::nowplaying::Info, std::time::Instant)>,
@@ -592,6 +596,7 @@ impl App {
             save: None,
             session_refresh: SessionRefresh::Idle,
             session_checked: std::time::Instant::now(),
+            browser_sync: BrowserSync::default(),
             np_last: None,
             np_artist: String::new(),
             np_art: None,
@@ -1190,6 +1195,7 @@ impl App {
                             }
                             self.screen = Screen::Main;
                             self.tabs.clear(); // new account/cookies: drop everything cached
+                            self.browser_sync.mark = None;
                             self.status = Some((t("Signed in — cookies imported.").into(), false));
                             self.load(ctx, self.active.clone(), true);
                             self.prefetch_tabs(ctx);
@@ -1199,8 +1205,18 @@ impl App {
                 }
                 Msg::SignInCheck(r) => self.on_signin_check(ctx, r),
                 Msg::Status(text, is_err) => self.status = Some((text, is_err)),
+                Msg::BrowserSynced(r) => {
+                    self.browser_sync.busy = false;
+                    if let Some((mark, synced)) = r {
+                        self.browser_sync.mark = Some(mark);
+                        if synced && std::env::var_os("YTMINI_DEBUG").is_some() {
+                            eprintln!("[session] browser rotated its sign-in; imported again");
+                        }
+                    }
+                }
                 Msg::SessionRefreshed(r) => {
                     self.session_refresh = SessionRefresh::Done(std::time::Instant::now());
+                    self.browser_sync.mark = None; // compare afresh with the new import
                     match r {
                         Ok((label, id, profile)) => {
                             self.settings.signin_source =
@@ -3059,6 +3075,19 @@ const AUTOPLAY_WAIT: f32 = 5.0;
 /// How often to check, while the window is in front, that we're still signed in.
 const SESSION_PROBE: Duration = Duration::from_secs(30 * 60);
 
+/// Following the browser's session: see `App::follow_browser`.
+#[derive(Default)]
+struct BrowserSync {
+    /// When the last check started (None: not yet this run).
+    checked: Option<std::time::Instant>,
+    /// The browser's rotation mark at the last check.
+    mark: Option<u64>,
+    busy: bool,
+}
+
+/// How often to look whether the browser rotated its sign-in cookies.
+const BROWSER_SYNC: Duration = Duration::from_secs(5 * 60);
+
 enum SessionRefresh {
     Idle,
     Running,
@@ -3567,6 +3596,7 @@ impl App {
         if crate::innertube::take_session_lost() {
             self.auto_refresh_session(ctx);
         }
+        self.follow_browser(ctx);
         if let Some((text, true)) = &self.status {
             if text.contains(crate::innertube::SESSION_EXPIRED) {
                 self.status = Some((
@@ -3591,6 +3621,51 @@ impl App {
                 }
             });
         }
+    }
+
+    /// A browser with a YouTube tab open replaces its rotating sign-in
+    /// cookies every few minutes, and the replaced values soon stop working:
+    /// a session imported from it expired within ~20 minutes. So every few
+    /// minutes, look whether the browser has rotated them since the last look
+    /// (or, at the first look, differs from ours) and import them again,
+    /// quietly. Only browsers that read without a prompt (Firefox, Safari);
+    /// the others still refresh once the session is found expired.
+    fn follow_browser(&mut self, ctx: &egui::Context) {
+        let sync = &mut self.browser_sync;
+        if sync.busy
+            || sync.checked.is_some_and(|t| t.elapsed() < BROWSER_SYNC)
+            || matches!(self.session_refresh, SessionRefresh::Running)
+            || !yt::logged_in(&self.cookies)
+        {
+            return;
+        }
+        let Some(src) = self.settings.signin_source.clone() else {
+            return;
+        };
+        sync.checked = Some(std::time::Instant::now());
+        sync.busy = true;
+        let last = sync.mark;
+        let (tx, ctx, cookies) = (self.tx.clone(), ctx.clone(), self.cookies.clone());
+        std::thread::spawn(move || {
+            let r = (|| {
+                let s = signin::find(&src.id, &src.profile)?;
+                if !s.reads_silently() {
+                    return None;
+                }
+                let now = s.browser_mark().ok()??;
+                let changed = match last {
+                    Some(m) => m != now.all,
+                    None => signin::jar_mark(&cookies) != Some(now.google),
+                };
+                // on failure (e.g. signed out there) keep ours and look again later
+                if changed && s.export_cookies(&cookies).is_err() {
+                    return None;
+                }
+                Some((now.all, changed))
+            })();
+            let _ = tx.send(Msg::BrowserSynced(r));
+            ctx.request_repaint();
+        });
     }
 
     fn auto_refresh_session(&mut self, ctx: &egui::Context) {

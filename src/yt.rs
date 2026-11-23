@@ -452,7 +452,7 @@ pub fn wanted_cookie_host(host: &str) -> bool {
 /// any browser-database snapshot left behind by an interrupted sign-in.
 pub fn tidy_cookie_storage() {
     let Ok(dir) = config_dir() else { return };
-    for leftover in ["signin-check", "signin-export"] {
+    for leftover in ["signin-check", "signin-export", "signin-mark"] {
         let _ = fs::remove_dir_all(dir.join(leftover));
     }
     for leftover in ["cookies.txt.new", "cookies.txt.rot"] {
