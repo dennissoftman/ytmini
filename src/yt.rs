@@ -270,14 +270,12 @@ pub fn install_hint() -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// `~/Library/Application Support/ytmini` on macOS, `~/.config/ytmini` on Linux,
-/// `%APPDATA%\ytmini` on Windows.
+/// `%LOCALAPPDATA%\ytmini` on Windows.
 /// `YTMINI_CONFIG_DIR` overrides it (testing a fresh install / signed-out state).
 pub fn config_dir() -> Result<PathBuf> {
     let d = match std::env::var_os("YTMINI_CONFIG_DIR") {
         Some(d) => PathBuf::from(d),
-        None => dirs::config_dir()
-            .context("no config directory on this system")?
-            .join("ytmini"),
+        None => default_config_dir()?,
     };
     fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;
     // Holds the session cookies: private to this user.
@@ -287,6 +285,81 @@ pub fn config_dir() -> Result<PathBuf> {
         let _ = fs::set_permissions(&d, fs::Permissions::from_mode(0o700));
     }
     Ok(d)
+}
+
+#[cfg(not(windows))]
+fn default_config_dir() -> Result<PathBuf> {
+    Ok(dirs::config_dir()
+        .context("no config directory on this system")?
+        .join("ytmini"))
+}
+
+/// Windows: `%LOCALAPPDATA%\ytmini`. Up to 0.3 it was the Roaming
+/// `%APPDATA%\ytmini`, which roaming profiles copy to the domain's server,
+/// session cookies included; the first start of a newer version moves it.
+#[cfg(windows)]
+fn default_config_dir() -> Result<PathBuf> {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let local = dirs::data_local_dir()
+        .context("no local app data folder")?
+        .join("ytmini");
+    let roaming = dirs::config_dir().map(|d| d.join("ytmini"));
+    Ok(DIR
+        .get_or_init(|| match roaming {
+            Some(old) => move_config(&old, &local),
+            None => local,
+        })
+        .clone())
+}
+
+/// Moves the config folder from `old` to `new` and returns the folder to use.
+/// `new` may already hold the cache of older versions (`thumbs`, `lists`),
+/// which is dropped. Anything else in `new` means it was moved before, so
+/// `new` is used and `old` (written by an older version since?) left alone.
+/// If moving fails (a file in use, another drive), `old` stays in use and
+/// the next start tries again: the settings are never left in neither place.
+#[cfg_attr(not(windows), allow(dead_code))] // unit-tested on every platform
+fn move_config(old: &Path, new: &Path) -> PathBuf {
+    if !old.is_dir() {
+        return new.to_path_buf();
+    }
+    for cache in ["thumbs", "lists"] {
+        let _ = fs::remove_dir_all(new.join(cache));
+    }
+    let _ = fs::remove_dir(new); // only if now empty
+    if new.exists() {
+        return new.to_path_buf();
+    }
+    if let Some(parent) = new.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if fs::rename(old, new).is_ok() {
+        return new.to_path_buf();
+    }
+    // Another volume (redirected folders) or something in use: copy, then
+    // switch over only once the copy is complete.
+    let tmp = new.with_extension("moving");
+    let _ = fs::remove_dir_all(&tmp);
+    if copy_dir(old, &tmp).is_ok() && fs::rename(&tmp, new).is_ok() {
+        let _ = fs::remove_dir_all(old);
+        return new.to_path_buf();
+    }
+    let _ = fs::remove_dir_all(&tmp);
+    old.to_path_buf()
+}
+
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &dest)?;
+        } else {
+            fs::copy(entry.path(), &dest)?;
+        }
+    }
+    Ok(())
 }
 
 /// A private, throwaway copy of the session cookies for one yt-dlp run
@@ -1658,6 +1731,50 @@ mod tests {
             Some(1794887000)
         );
         assert_eq!(url_expiry("/path/file.webm"), None);
+    }
+
+    #[test]
+    fn config_moves_to_the_new_place() {
+        let base = std::env::temp_dir().join(format!("ytmini-move-{}", std::process::id()));
+        let (old, new) = (base.join("Roaming/ytmini"), base.join("Local/ytmini"));
+        let _ = fs::remove_dir_all(&base);
+
+        // nothing to move
+        assert_eq!(move_config(&old, &new), new);
+
+        // first start after the update: old cache in `new` is dropped
+        fs::create_dir_all(old.join("bin/yt-dlp")).unwrap();
+        fs::write(old.join("cookies.txt"), "jar").unwrap();
+        fs::write(old.join("bin/yt-dlp/yt-dlp.exe"), "exe").unwrap();
+        fs::create_dir_all(new.join("thumbs")).unwrap();
+        fs::write(new.join("thumbs/a.jpg"), "x").unwrap();
+        fs::create_dir_all(new.join("lists")).unwrap();
+        assert_eq!(move_config(&old, &new), new);
+        assert!(!old.exists());
+        assert_eq!(fs::read_to_string(new.join("cookies.txt")).unwrap(), "jar");
+        assert!(new.join("bin/yt-dlp/yt-dlp.exe").is_file());
+        assert!(!new.join("thumbs").exists());
+
+        // moved before, and an older version recreated `old`: keep `new`
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("cookies.txt"), "older").unwrap();
+        assert_eq!(move_config(&old, &new), new);
+        assert_eq!(fs::read_to_string(new.join("cookies.txt")).unwrap(), "jar");
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn config_copy_keeps_everything() {
+        let base = std::env::temp_dir().join(format!("ytmini-copy-{}", std::process::id()));
+        let (a, b) = (base.join("a"), base.join("b"));
+        fs::create_dir_all(a.join("x/y")).unwrap();
+        fs::write(a.join("x/y/z.txt"), "z").unwrap();
+        fs::write(a.join("top.json"), "{}").unwrap();
+        copy_dir(&a, &b).unwrap();
+        assert_eq!(fs::read_to_string(b.join("x/y/z.txt")).unwrap(), "z");
+        assert_eq!(fs::read_to_string(b.join("top.json")).unwrap(), "{}");
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

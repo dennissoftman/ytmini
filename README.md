@@ -111,8 +111,8 @@ installed and the app still starts if libmpv is missing.
 
 | | macOS | Windows | Linux |
 |---|---|---|---|
-| Settings, session, logs, yt-dlp/deno | `~/Library/Application Support/ytmini/` | `%APPDATA%\ytmini\` | `~/.config/ytmini/` |
-| Cache (thumbnails, lists) | `~/Library/Caches/ytmini/` | `%LOCALAPPDATA%\ytmini\` | `~/.cache/ytmini/` |
+| Settings, session, logs, yt-dlp/deno | `~/Library/Application Support/ytmini/` | `%LOCALAPPDATA%\ytmini\` | `~/.config/ytmini/` |
+| Cache (thumbnails, lists) | `~/Library/Caches/ytmini/` | `%LOCALAPPDATA%\ytmini\cache\` | `~/.cache/ytmini/` |
 
 ## Privacy
 

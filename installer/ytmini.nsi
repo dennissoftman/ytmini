@@ -1,7 +1,8 @@
 ; ytmini's Windows installer (NSIS 3, built on macOS by scripts/build_windows.sh).
 ; Per-user install: no admin prompt, goes to %LOCALAPPDATA%\Programs\ytmini.
 ; Run again over an existing install and it offers to update it in place
-; (settings and sign-in live in %APPDATA%\ytmini and are left alone).
+; (settings and sign-in live in %LOCALAPPDATA%\ytmini, before 0.4 in
+; %APPDATA%\ytmini, and are left alone).
 ; Defines passed in: VERSION (0.1.0), BUILD (git hash), STAGE (folder with
 ; ytmini.exe, libmpv-2.dll, license files), ROOT (repo), OUTFILE.
 
@@ -209,11 +210,18 @@ Section "Uninstall"
     Delete "$SMPROGRAMS\${APP}.lnk"
     Delete "$DESKTOP\${APP}.lnk"
     DeleteRegKey HKCU "${UNINST_KEY}"
-    RMDir /r "$LOCALAPPDATA\${APP}" ; thumbnails and other caches
+    ; thumbnails and other caches (before 0.4 directly in $LOCALAPPDATA\ytmini)
+    RMDir /r "$LOCALAPPDATA\${APP}\cache"
+    RMDir /r "$LOCALAPPDATA\${APP}\thumbs"
+    RMDir /r "$LOCALAPPDATA\${APP}\lists"
+    RMDir "$LOCALAPPDATA\${APP}" ; only if nothing else is left
 
-    ; sign-in cookies, settings, yt-dlp/deno: kept unless asked (silent: kept)
-    ${If} ${FileExists} "$APPDATA\${APP}\*.*"
+    ; sign-in cookies, settings, yt-dlp/deno: kept unless asked (silent: kept).
+    ; $LOCALAPPDATA\ytmini since 0.4, the Roaming $APPDATA\ytmini before.
+    ${If} ${FileExists} "$LOCALAPPDATA\${APP}\*.*"
+    ${OrIf} ${FileExists} "$APPDATA\${APP}\*.*"
         MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 "$(RemoveData)" /SD IDNO IDNO keep
+        RMDir /r "$LOCALAPPDATA\${APP}"
         RMDir /r "$APPDATA\${APP}"
         keep:
     ${EndIf}

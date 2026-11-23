@@ -45,5 +45,5 @@ body:
     id: logs
     attributes:
       label: Crash log
-      description: "If ytmini crashed: the newest `logs/crash-*.log` in ytmini's settings folder (macOS `~/Library/Application Support/ytmini/`, Windows `%APPDATA%\\ytmini\\`)."
+      description: "If ytmini crashed: the newest `logs/crash-*.log` in ytmini's settings folder (macOS `~/Library/Application Support/ytmini/`, Windows `%LOCALAPPDATA%\\ytmini\\`)."
       render: text

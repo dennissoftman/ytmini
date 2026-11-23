@@ -3,7 +3,7 @@
 //! fetching a fresh one).
 //!
 //! Lives in the OS cache dir (`~/Library/Caches/ytmini` on macOS,
-//! `~/.cache/ytmini` on Linux, `%LOCALAPPDATA%\ytmini` on Windows), so the OS
+//! `~/.cache/ytmini` on Linux, `%LOCALAPPDATA%\ytmini\cache` on Windows), so the OS
 //! may also purge it. Eviction is LRU by file mtime (touched on every hit):
 //! first anything older than the retention period, then oldest-first until
 //! under the size cap.
@@ -41,8 +41,11 @@ impl Limits {
 pub fn root() -> Option<PathBuf> {
     // A separate profile (YTMINI_CONFIG_DIR) gets its own cache too, so it
     // never shows the real profile's cached feed, history or thumbnails.
+    // On Windows the config folder is in %LOCALAPPDATA% too (the OS cache
+    // folder), so the cache is a subfolder of it rather than its neighbour.
     let d = match std::env::var_os("YTMINI_CONFIG_DIR") {
         Some(_) => crate::yt::config_dir().ok()?.join("cache"),
+        None if cfg!(windows) => crate::yt::config_dir().ok()?.join("cache"),
         None => dirs::cache_dir()?.join("ytmini"),
     };
     fs::create_dir_all(d.join("thumbs")).ok()?;
