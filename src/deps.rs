@@ -5,9 +5,12 @@
 //! anything is executed, and swapped in atomically. yt-dlp's sums file must
 //! also carry a valid signature by its release key (src/pgpsig.rs).
 //!
-//! yt-dlp: on macOS/Linux we use the *unpacked* (`.zip`) build. The single-file
+//! yt-dlp: we use the *unpacked* (`.zip`) build everywhere. The single-file
 //! build unpacks itself to a temp dir on every launch, and macOS then scans
 //! those fresh files each time — measured 13 s per call vs 0.26 s unpacked.
+//! Only the unpacked build has the challenge solver files the fast stream
+//! lookup needs (src/native.rs); Windows used the single-file build up to 0.3,
+//! and the daily check replaces it (its checksum differs from the zip's).
 //! The unpacked build can't self-update, so we check the release's checksum
 //! file daily and replace it when it changes. YouTube breaks old yt-dlp
 //! versions often, so staying current matters more than pinning.
@@ -54,7 +57,10 @@ impl Dep {
     }
 
     fn asset(self) -> Option<Asset> {
-        let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+        self.asset_for(std::env::consts::OS, std::env::consts::ARCH)
+    }
+
+    fn asset_for(self, os: &str, arch: &str) -> Option<Asset> {
         match self {
             Dep::YtDlp => {
                 let base = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
@@ -64,8 +70,9 @@ impl Dep {
                     ("linux", "aarch64") => {
                         ("yt-dlp_linux_aarch64.zip", "yt-dlp_linux_aarch64", true)
                     }
-                    ("windows", "aarch64") => ("yt-dlp_arm64.exe", "yt-dlp.exe", false),
-                    ("windows", _) => ("yt-dlp.exe", "yt-dlp.exe", false),
+                    ("windows", "aarch64") => ("yt-dlp_win_arm64.zip", "yt-dlp_arm64.exe", true),
+                    ("windows", "x86") => ("yt-dlp_win_x86.zip", "yt-dlp.exe", true),
+                    ("windows", _) => ("yt-dlp_win.zip", "yt-dlp.exe", true),
                     _ => return None,
                 };
                 Some(Asset {
@@ -360,6 +367,16 @@ fn mark_checked(dep: Dep) {
     }
 }
 
+/// A yt-dlp installed by ytmini ≤ 0.3 on Windows: the single-file build,
+/// without the challenge solver files. Replaced at the next start rather
+/// than at the next daily check.
+pub fn single_file_ytdlp() -> bool {
+    let Some(dir) = Dep::YtDlp.dir() else {
+        return false;
+    };
+    Dep::YtDlp.managed().is_some() && !dir.join("_internal").is_dir()
+}
+
 /// Has it been longer than `every` since we last checked for an update?
 pub fn check_due(dep: Dep, every: Duration) -> bool {
     let age = check_stamp(dep)
@@ -390,6 +407,25 @@ mod tests {
         assert!(y.url.ends_with(&y.sums_name));
         let d = Dep::Deno.asset().expect("deno asset");
         assert!(d.sums_url.ends_with(".sha256sum"));
+    }
+
+    /// Every yt-dlp download we use is listed in the signed sums file.
+    #[test]
+    fn ytdlp_assets_are_in_the_signed_sums() {
+        let sums = include_str!("testdata/yt-dlp-SHA2-256SUMS");
+        for (os, arch) in [
+            ("macos", "aarch64"),
+            ("macos", "x86_64"),
+            ("linux", "x86_64"),
+            ("linux", "aarch64"),
+            ("windows", "x86_64"),
+            ("windows", "x86"),
+            ("windows", "aarch64"),
+        ] {
+            let a = Dep::YtDlp.asset_for(os, arch).unwrap();
+            assert!(a.zip && a.signed, "{os} {arch}");
+            assert!(parse_sha(sums, &a.sums_name).is_some(), "{}", a.sums_name);
+        }
     }
 
     /// Live: hits GitHub. `cargo test -- --ignored deps_live`

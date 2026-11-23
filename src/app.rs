@@ -689,7 +689,8 @@ impl App {
                 }
                 let update_due = !self.deps.update_tried
                     && t.ytdlp_managed
-                    && deps::check_due(Dep::YtDlp, Duration::from_secs(24 * 3600));
+                    && (deps::check_due(Dep::YtDlp, Duration::from_secs(24 * 3600))
+                        || deps::single_file_ytdlp());
                 self.tools = Some(t);
                 if !need.is_empty() {
                     self.run_deps_job(ctx, need, false);
