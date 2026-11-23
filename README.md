@@ -68,7 +68,8 @@ unknown publisher: click **More info → Run anyway**.
 
 On first launch ytmini downloads [yt-dlp](https://github.com/yt-dlp/yt-dlp)
 and [deno](https://deno.com) from their official GitHub releases (checksums
-verified) and keeps yt-dlp up to date.
+verified; for yt-dlp also its signature, against yt-dlp's release key built
+into ytmini) and keeps yt-dlp up to date.
 
 ### Signing in
 

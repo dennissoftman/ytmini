@@ -27,6 +27,7 @@ sha2 = "0.11.1"
 arboard = { version = "3.7", default-features = false }
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
 zip = { version = "9.6.0", default-features = false, features = ["deflate"] }
+rsa = { version = "0.10.0", default-features = false, features = ["std", "pkcs1v15"] }
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 tray-icon = "0.26.1"

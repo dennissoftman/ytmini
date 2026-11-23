@@ -2,7 +2,8 @@
 //!
 //! Both are downloaded from their official GitHub releases into
 //! `<config dir>/bin/`, verified against the published SHA-256 sums before
-//! anything is executed, and swapped in atomically.
+//! anything is executed, and swapped in atomically. yt-dlp's sums file must
+//! also carry a valid signature by its release key (src/pgpsig.rs).
 //!
 //! yt-dlp: on macOS/Linux we use the *unpacked* (`.zip`) build. The single-file
 //! build unpacks itself to a temp dir on every launch, and macOS then scans
@@ -39,6 +40,9 @@ struct Asset {
     /// Executable path inside the install dir.
     exe: &'static str,
     zip: bool,
+    /// The sums file has a detached signature (`<sums_url>.sig`) by a key
+    /// pinned in the app (yt-dlp only; deno doesn't sign its releases).
+    signed: bool,
 }
 
 impl Dep {
@@ -70,6 +74,7 @@ impl Dep {
                     sums_name: file.into(),
                     exe,
                     zip,
+                    signed: true,
                 })
             }
             Dep::Deno => {
@@ -90,6 +95,7 @@ impl Dep {
                     sums_name: file,
                     exe: if cfg!(windows) { "deno.exe" } else { "deno" },
                     zip: true,
+                    signed: false,
                 })
             }
         }
@@ -131,15 +137,26 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
-/// Expected SHA-256 for this platform's asset, from the release's sums file.
+/// Expected SHA-256 for this platform's asset, from the release's sums file
+/// (for yt-dlp, only after its signature checks out against the pinned key).
 fn expected_sha(agent: &ureq::Agent, asset: &Asset) -> Result<String> {
-    let text = agent
-        .get(&asset.sums_url)
-        .call()
-        .context("fetching checksums")?
-        .body_mut()
-        .read_to_string()
-        .context("reading checksums")?;
+    let fetch = |url: &str| -> Result<Vec<u8>> {
+        Ok(agent
+            .get(url)
+            .call()?
+            .body_mut()
+            .with_config()
+            .limit(1024 * 1024)
+            .read_to_vec()?)
+    };
+    let sums = fetch(&asset.sums_url).context("fetching checksums")?;
+    if asset.signed {
+        let sig =
+            fetch(&format!("{}.sig", asset.sums_url)).context("fetching checksum signature")?;
+        crate::pgpsig::verify_ytdlp(&sums, &sig)
+            .context("the checksum file isn't signed by yt-dlp's release key; download not used")?;
+    }
+    let text = String::from_utf8(sums).context("reading checksums")?;
     parse_sha(&text, &asset.sums_name)
         .with_context(|| format!("{} not listed in checksums", asset.sums_name))
 }
@@ -398,6 +415,20 @@ mod live_install {
         let v = version(&exe).unwrap();
         eprintln!("installed {v}");
         assert!(v.starts_with("deno "), "{v}");
+    }
+
+    /// Full yt-dlp install (signature, checksum, unpack) into a scratch
+    /// config dir: `cargo test -- --ignored deps_install_ytdlp_scratch`
+    #[test]
+    #[ignore]
+    fn deps_install_ytdlp_scratch() {
+        let dir = std::env::temp_dir().join(format!("ytmini-deps-{}", std::process::id()));
+        std::env::set_var("YTMINI_CONFIG_DIR", &dir);
+        let exe = install(Dep::YtDlp, &|_| {}).unwrap();
+        assert!(exe.starts_with(&dir));
+        let v = version(&exe).unwrap();
+        eprintln!("installed yt-dlp {v}");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
 

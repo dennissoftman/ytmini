@@ -20,6 +20,7 @@ mod links;
 mod mpv;
 mod native;
 mod nowplaying;
+mod pgpsig;
 mod player;
 mod positions;
 mod resolver;
