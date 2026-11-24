@@ -4561,6 +4561,7 @@ dependencies = [
  "sys-locale",
  "tray-icon",
  "ureq",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

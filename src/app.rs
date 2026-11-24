@@ -521,6 +521,14 @@ impl App {
         crate::i18n::set(settings.language);
         crate::i18n::set_region(settings.region.clone());
         let (tray_tx, tray_rx) = channel();
+        {
+            // launched again (Windows): come back as if "Show ytmini" was chosen
+            let (tx, ctx) = (tray_tx.clone(), ctx.clone());
+            crate::single::on_show(move || {
+                let _ = tx.send(TrayEvent::Show);
+                ctx.request_repaint();
+            });
+        }
         let tray = Tray::new(ctx, tray_tx).ok();
         let limits = Arc::new(Limits::new(settings.cache_mb, settings.cache_days));
         let mut app = App {
@@ -5726,6 +5734,7 @@ impl App {
         self.hidden = false;
         tray::set_dock_visible(true);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         if let Some(p) = &mut self.embedded {
             p.set_background(self.mini);

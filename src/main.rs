@@ -26,6 +26,7 @@ mod positions;
 mod resolver;
 mod settings;
 mod signin;
+mod single;
 mod sponsorblock;
 mod storyboard;
 mod textlinks;
@@ -53,6 +54,11 @@ fn main() -> eframe::Result {
     // `--check-solver`: the session-free part of it (daily CI)
     if args.first().map(String::as_str) == Some("--check-solver") {
         std::process::exit(native::check_solver());
+    }
+
+    // Windows: already running (maybe in the tray)? Show that one instead.
+    if !single::claim() {
+        return Ok(());
     }
 
     #[cfg(target_os = "linux")]
