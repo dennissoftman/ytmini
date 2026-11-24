@@ -3106,7 +3106,7 @@ enum GoogleAction {
 impl App {
     fn quick_action(&mut self, ctx: &egui::Context, q: Quick, v: &Video) {
         let url = if v.is_playlist {
-            format!("https://www.youtube.com/playlist?list={}", v.id)
+            yt::playlist_url(&v.id)
         } else {
             v.url()
         };

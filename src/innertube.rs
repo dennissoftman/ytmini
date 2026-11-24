@@ -1555,6 +1555,8 @@ impl AnonHome {
 
 pub struct Pager {
     is_feed: bool,
+    /// A Mix: one page, the watch page's list panel (not its related videos).
+    mix: bool,
     /// Home while signed out (see [`AnonHome`]).
     anon: Option<AnonHome>,
     client: Client,
@@ -1583,7 +1585,11 @@ impl Pager {
                 None => browse(MUSIC_CHANNEL),
             },
             Source::Topic { token, .. } => ("browse", json!({ "continuation": token })),
-            Source::Playlist { id, .. } => browse(&format!("VL{id}")),
+            // a Mix only exists next to a video: the watch page's list panel
+            Source::Playlist { id, .. } => match crate::yt::mix_seed(id) {
+                Some(v) => ("next", json!({ "videoId": v, "playlistId": id })),
+                None => browse(&format!("VL{id}")),
+            },
             // "EgIQAQ==": videos only (no channels, shorts shelves, …)
             Source::Search(q) => ("search", json!({ "query": q, "params": "EgIQAQ%3D%3D" })),
             Source::Channel { url, .. } | Source::ChannelPlaylists { url, .. } => {
@@ -1606,6 +1612,7 @@ impl Pager {
             }
         };
         Ok(Pager {
+            mix: endpoint == "next",
             is_feed: matches!(source, Source::Feed),
             anon: (matches!(source, Source::Feed) && !client.signed_in()).then(AnonHome::new),
             client,
@@ -1645,7 +1652,18 @@ impl Pager {
         }
         let mut out = Vec::new();
         let mut token = None;
-        collect(&r, &mut out, &mut token);
+        if self.mix {
+            let panel = r.pointer("/contents/twoColumnWatchNextResults/playlist/playlist/contents");
+            for x in panel.and_then(Value::as_array).into_iter().flatten() {
+                if let Some(v) = x.get("playlistPanelVideoRenderer").and_then(renderer) {
+                    if !out.iter().any(|o: &Video| o.id == v.id) {
+                        out.push(v);
+                    }
+                }
+            }
+        } else {
+            collect(&r, &mut out, &mut token);
+        }
         let token = token.map(|(_, t)| t);
         if let Some((name, url)) = &self.channel {
             for v in out
@@ -2204,4 +2222,28 @@ mod signed_out_live {
             eprintln!("{src:?}: {n:?}");
         }
     }
+}
+
+/// `cargo test --release -- --ignored mix_lists`: a Mix lists its own videos
+/// (signed out; the Mix id defaults to one checked on 2026-11-24).
+#[cfg(test)]
+#[test]
+#[ignore]
+fn mix_lists() {
+    let id = std::env::var("YTMINI_MIX").unwrap_or_else(|_| "RDoEFFqSEYAww".into());
+    let src = crate::yt::Source::Playlist {
+        id: id.clone(),
+        title: "Mix".into(),
+    };
+    let mut p = Pager::new(std::path::Path::new("/nonexistent/cookies.txt"), &src).unwrap();
+    let page = p.next_page().unwrap().unwrap();
+    for v in &page {
+        println!("{} {:?} {:?} {:?}", v.id, v.title, v.channel, v.duration);
+    }
+    assert!(page.len() >= 10, "only {} items", page.len());
+    assert_eq!(page[0].id, crate::yt::mix_seed(&id).unwrap());
+    assert!(page
+        .iter()
+        .all(|v| v.title.is_some() && v.duration.is_some()));
+    assert!(p.next_page().unwrap().is_none(), "a Mix is one page");
 }

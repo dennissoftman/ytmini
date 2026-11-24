@@ -781,12 +781,34 @@ impl Source {
             Source::ChannelPlaylists { url, .. } => {
                 format!("{}/playlists", url.trim_end_matches('/'))
             }
-            Source::Playlist { id, .. } => format!("https://www.youtube.com/playlist?list={id}"),
+            Source::Playlist { id, .. } => playlist_url(id),
             Source::Downloads => String::new(), // local; never fetched
             Source::Topic { .. } => ":ytrec".into(), // native only; yt-dlp has no categories
             // native only too; YouTube's own Music channel instead
             Source::Music => "https://www.youtube.com/channel/UC-9-kyTW8ZkZNDHQJ6FgpwQ".into(),
         }
+    }
+}
+
+/// A Mix (YouTube's endless "RD…" radio list) starts from a video:
+/// `RD<id>` or `RDAMVM<id>` → that video's id. YouTube won't show a Mix as a
+/// playlist page ("This playlist type is unviewable"), only next to a video.
+pub fn mix_seed(list: &str) -> Option<&str> {
+    let rest = list
+        .strip_prefix("RDAMVM")
+        .or_else(|| list.strip_prefix("RD"))?;
+    (rest.len() == 11
+        && rest
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+    .then_some(rest)
+}
+
+/// Link to a playlist; a Mix opens from its first video.
+pub fn playlist_url(list: &str) -> String {
+    match mix_seed(list) {
+        Some(v) => format!("https://www.youtube.com/watch?v={v}&list={list}"),
+        None => format!("https://www.youtube.com/playlist?list={list}"),
     }
 }
 
@@ -1703,6 +1725,31 @@ pub fn last_player_error() -> Option<String> {
             l.contains("error") || l.contains("failed")
         })
         .map(|l| l.trim().to_string())
+}
+
+#[cfg(test)]
+mod mix_tests {
+    use super::*;
+
+    #[test]
+    fn mixes_open_from_their_video() {
+        assert_eq!(mix_seed("RDoEFFqSEYAww"), Some("oEFFqSEYAww"));
+        assert_eq!(mix_seed("RDAMVMoEFFqSEYAww"), Some("oEFFqSEYAww"));
+        assert_eq!(mix_seed("RDMM"), None);
+        assert_eq!(
+            mix_seed("RDCLAK5uy_kmPRjHDECIcuVwnKsx2Ng7fyNgFKWNJFs"),
+            None
+        );
+        assert_eq!(mix_seed("PLoEFFqSEYAww"), None);
+        assert_eq!(
+            playlist_url("RDoEFFqSEYAww"),
+            "https://www.youtube.com/watch?v=oEFFqSEYAww&list=RDoEFFqSEYAww"
+        );
+        assert_eq!(
+            playlist_url("PLabc"),
+            "https://www.youtube.com/playlist?list=PLabc"
+        );
+    }
 }
 
 #[cfg(test)]
