@@ -6004,10 +6004,14 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // Red close button → hide to the menu bar (Cmd+Q / tray "Quit" really quit).
+        // A close request while already hidden isn't the button: it's the installer
+        // (`taskkill`) or Windows asking us to quit. Ignoring it got us force-killed,
+        // which leaves a dead icon in the notification area.
         if ctx.input(|i| i.viewport().close_requested())
             && self.tray.is_some()
             && self.settings.close_to_tray
             && !self.quitting
+            && !self.hidden
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             // A video waits, paused, for the window to come back; a song plays on.
@@ -6154,6 +6158,8 @@ impl eframe::App for App {
         if self.smoke.is_none() && self.settings != self.saved_settings {
             self.settings.save();
         }
+        // Take the icon down now rather than whenever the app gets dropped.
+        self.tray.take();
     }
 }
 
