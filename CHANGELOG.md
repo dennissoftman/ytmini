@@ -4,6 +4,32 @@ Entries after 0.2.0 are written by
 [release-please](https://github.com/googleapis/release-please) from
 Conventional Commits. Earlier versions were summarised by hand.
 
+## [0.4.0](https://github.com/dennissoftman/ytmini/compare/v0.3.0...v0.4.0) (2026-11-24)
+
+
+### Features
+
+* playlists get Play all and Shuffle, and a Mix keeps going like on YouTube ([5c2eb5f](https://github.com/dennissoftman/ytmini/commit/5c2eb5faa543bf70195a3aac748f10f661f4efca))
+* yt-dlp downloads must be signed by yt-dlp's release key ([5510a38](https://github.com/dennissoftman/ytmini/commit/5510a382c28af167129e9457ae9d7fa10e01e941))
+
+
+### Bug Fixes
+
+* channel Mixes and My Mix open too, not only a video's Mix ([ee8b36c](https://github.com/dennissoftman/ytmini/commit/ee8b36c6c9db84671158f6b54386cfc8696f7bf4))
+* closing the window pauses a video; songs keep playing in the tray ([1ce6286](https://github.com/dennissoftman/ytmini/commit/1ce62866ed017708c3e5eddf1fc4eef02ebfb0ef))
+* macOS: "Open in ytmini" no longer shows on files in Finder ([912fc91](https://github.com/dennissoftman/ytmini/commit/912fc91b8d48bdfe1152fe01d8666746090cb610))
+* Mixes open instead of "This playlist type is unviewable" ([0a27960](https://github.com/dennissoftman/ytmini/commit/0a279600bb5a9e0b821f5bec865c0c173a8a6eb1))
+* playlists load past their first 100 videos ([5ea257b](https://github.com/dennissoftman/ytmini/commit/5ea257b35f376ab148e527152dfc2fb8b7487484))
+* the session no longer expires while Firefox or Safari has YouTube open ([8921504](https://github.com/dennissoftman/ytmini/commit/892150407b6ba12b123891766ced45bdf1234fc8))
+* Windows: launching ytmini again brings back the running window ([b8259e3](https://github.com/dennissoftman/ytmini/commit/b8259e31026ec39e52234b058613a9795dec7a70))
+* Windows: no dead tray icon left behind after installing or uninstalling ([a302bd6](https://github.com/dennissoftman/ytmini/commit/a302bd64051c500bd8bdb9e84466858b49208800))
+* Windows: sign-in and settings move out of the roaming profile ([0cb257c](https://github.com/dennissoftman/ytmini/commit/0cb257c8bfafd11ee000f7ea5d3da8393cf8e477))
+
+
+### Performance
+
+* Windows: videos start through the fast stream lookup ([499eb6e](https://github.com/dennissoftman/ytmini/commit/499eb6e1186656658cd762a9093574fa808ee7d1))
+
 ## [0.3.0](https://github.com/dennissoftman/ytmini/compare/v0.2.0...v0.3.0) (2026-11-22)
 
 
