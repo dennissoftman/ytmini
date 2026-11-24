@@ -1744,13 +1744,17 @@ fn collect(v: &Value, out: &mut Vec<Video>, token: &mut Option<(bool, String)>) 
                     | "compactVideoRenderer" => renderer(x),
                     // kept and marked; the app hides them unless "Show Shorts" is on
                     "shortsLockupViewModel" => short(x),
-                    "continuationItemRenderer" => {
+                    // (…ViewModel: the newer layout, on playlist pages since 2026-11)
+                    "continuationItemRenderer" | "continuationItemViewModel" => {
                         // The list's own "more" token comes right after its items;
                         // tokens before any items belong to other sections/tabs.
                         let ours = token.as_ref().is_none_or(|(after_items, _)| !after_items);
-                        if let Some(t) = x
-                            .pointer("/continuationEndpoint/continuationCommand/token")
-                            .and_then(Value::as_str)
+                        if let Some(t) = [
+                            "/continuationEndpoint/continuationCommand/token",
+                            "/continuationCommand/innertubeCommand/continuationCommand/token",
+                        ]
+                        .iter()
+                        .find_map(|p| x.pointer(p).and_then(Value::as_str))
                         {
                             if ours {
                                 *token = Some((!out.is_empty(), t.to_string()));
