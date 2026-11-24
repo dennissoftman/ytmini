@@ -790,9 +790,16 @@ impl Source {
     }
 }
 
-/// A Mix (YouTube's endless "RD…" radio list) starts from a video:
-/// `RD<id>` or `RDAMVM<id>` → that video's id. YouTube won't show a Mix as a
-/// playlist page ("This playlist type is unviewable"), only next to a video.
+/// A Mix: YouTube's endless "RD…" radio list (a video's, a channel's `RDEM…`,
+/// "My Mix" `RDMM`…). YouTube won't show one as a playlist page ("This
+/// playlist type is unviewable"), only on the watch page. `RDCLAK…` are
+/// YouTube Music playlists, which open normally.
+pub fn is_mix(list: &str) -> bool {
+    list.starts_with("RD") && !list.starts_with("RDCLAK")
+}
+
+/// The video a Mix starts from, when its id has one: `RD<id>` or
+/// `RDAMVM<id>` → that video's id.
 pub fn mix_seed(list: &str) -> Option<&str> {
     let rest = list
         .strip_prefix("RDAMVM")
@@ -804,10 +811,12 @@ pub fn mix_seed(list: &str) -> Option<&str> {
     .then_some(rest)
 }
 
-/// Link to a playlist; a Mix opens from its first video.
+/// Link to a playlist; a Mix opens on the watch page (from its first video
+/// when known).
 pub fn playlist_url(list: &str) -> String {
     match mix_seed(list) {
         Some(v) => format!("https://www.youtube.com/watch?v={v}&list={list}"),
+        None if is_mix(list) => format!("https://www.youtube.com/watch?list={list}"),
         None => format!("https://www.youtube.com/playlist?list={list}"),
     }
 }
@@ -1741,6 +1750,12 @@ mod mix_tests {
             None
         );
         assert_eq!(mix_seed("PLoEFFqSEYAww"), None);
+        assert!(is_mix("RDEMsBn0Fb4RLMoh3GyBi_bivQ") && is_mix("RDMM") && is_mix("RDoEFFqSEYAww"));
+        assert!(!is_mix("RDCLAK5uy_kmPRjHDECIcuVwnKsx2Ng7fyNgFKWNJFs") && !is_mix("PLabc"));
+        assert_eq!(
+            playlist_url("RDEMsBn0Fb4RLMoh3GyBi_bivQ"),
+            "https://www.youtube.com/watch?list=RDEMsBn0Fb4RLMoh3GyBi_bivQ"
+        );
         assert_eq!(
             playlist_url("RDoEFFqSEYAww"),
             "https://www.youtube.com/watch?v=oEFFqSEYAww&list=RDoEFFqSEYAww"

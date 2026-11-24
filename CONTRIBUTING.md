@@ -237,9 +237,11 @@ playing.
 - Playlists: playing from one makes it the queue, and the queue grows as the
   playlist's tab loads more. Play all / Shuffle on the playlist page; Shuffle
   loads the playlist (up to 2000) and mixes later pages in at random.
-- A Mix (`RD…`) can't be opened as a playlist page. It's read from the watch
-  page's list next to its first video, then stretch by stretch from its last
-  video, up to 500 videos.
+- A Mix (`RD…` except YouTube Music's `RDCLAK…`) can't be opened as a
+  playlist page. It's read from the watch page's list (next to its first
+  video when the id has one: `RD<video id>`), then stretch by stretch from
+  its last video, up to 500 videos. yt-dlp can't open Mixes without a video
+  id (`RDEM…`, `RDMM`), so those need the native route.
 - Home starts with the last stopped video, so it can be continued.
 - The title is an overlay at the top of the player, as on YouTube.
 - An expired session is refreshed from the browser it came from as soon as

@@ -3529,7 +3529,7 @@ impl App {
                             .tabs
                             .get(&self.active)
                             .is_some_and(|t| t.videos.iter().any(|v| !v.is_playlist));
-                        let mix = yt::mix_seed(id).is_some();
+                        let mix = yt::is_mix(id);
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             // a Mix is endless and already varied: no Shuffle
                             if !mix

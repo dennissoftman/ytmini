@@ -1557,6 +1557,8 @@ impl AnonHome {
 struct Mix {
     list: String,
     seen: std::collections::HashSet<String>,
+    /// Its videos in the order they came.
+    order: Vec<String>,
     /// The last video of the latest stretch: the next one starts there.
     last: Option<String>,
 }
@@ -1602,11 +1604,15 @@ impl Pager {
                 None => browse(MUSIC_CHANNEL),
             },
             Source::Topic { token, .. } => ("browse", json!({ "continuation": token })),
-            // a Mix only exists next to a video: the watch page's list panel
-            Source::Playlist { id, .. } => match crate::yt::mix_seed(id) {
-                Some(v) => ("next", json!({ "videoId": v, "playlistId": id })),
-                None => browse(&format!("VL{id}")),
-            },
+            // a Mix only exists on the watch page: its list panel
+            Source::Playlist { id, .. } if crate::yt::is_mix(id) => {
+                let mut body = json!({ "playlistId": id });
+                if let Some(v) = crate::yt::mix_seed(id) {
+                    body["videoId"] = json!(v);
+                }
+                ("next", body)
+            }
+            Source::Playlist { id, .. } => browse(&format!("VL{id}")),
             // "EgIQAQ==": videos only (no channels, shorts shelves, …)
             Source::Search(q) => ("search", json!({ "query": q, "params": "EgIQAQ%3D%3D" })),
             Source::Channel { url, .. } | Source::ChannelPlaylists { url, .. } => {
@@ -1635,6 +1641,7 @@ impl Pager {
                 Source::Playlist { id, .. } if endpoint == "next" => Some(Mix {
                     list: id.clone(),
                     seen: Default::default(),
+                    order: Vec::new(),
                     last: None,
                 }),
                 _ => None,
@@ -1696,19 +1703,36 @@ impl Pager {
         }
         let mut out = Vec::new();
         let mut token = None;
-        if let Some(m) = &mut self.mix {
-            let panel = r.pointer("/contents/twoColumnWatchNextResults/playlist/playlist/contents");
-            let mut last = None;
-            for x in panel.and_then(Value::as_array).into_iter().flatten() {
-                if let Some(v) = x.get("playlistPanelVideoRenderer").and_then(renderer) {
-                    last = Some(v.id.clone());
-                    if m.seen.insert(v.id.clone()) {
-                        out.push(v);
+        if self.mix.is_some() {
+            let mut r = r;
+            for attempt in 1..=3 {
+                let Some(m) = self.mix.as_mut() else { break };
+                let panel =
+                    r.pointer("/contents/twoColumnWatchNextResults/playlist/playlist/contents");
+                let mut last = None;
+                for x in panel.and_then(Value::as_array).into_iter().flatten() {
+                    if let Some(v) = x.get("playlistPanelVideoRenderer").and_then(renderer) {
+                        last = Some(v.id.clone());
+                        if m.seen.insert(v.id.clone()) {
+                            m.order.push(v.id.clone());
+                            out.push(v);
+                        }
                     }
                 }
+                if !out.is_empty() {
+                    m.last = last;
+                    break;
+                }
+                // Only repeats. Sometimes that's just this stretch: try from an
+                // earlier video before calling it the end (an empty page ends it).
+                m.last = None;
+                let from = m.order.len().checked_sub(1 + 6 * attempt);
+                let (Some(i), true) = (from, attempt < 3 && !first) else {
+                    break;
+                };
+                let body = json!({ "videoId": m.order[i], "playlistId": m.list });
+                r = self.client.post("next", body)?;
             }
-            // nothing new: the Mix has come round (an empty page ends the list)
-            m.last = if out.is_empty() { None } else { last };
         } else {
             collect(&r, &mut out, &mut token);
         }
@@ -2291,12 +2315,14 @@ fn mix_lists() {
     let mut p = Pager::new(std::path::Path::new("/nonexistent/cookies.txt"), &src).unwrap();
     let page = p.next_page().unwrap().unwrap();
     println!("title: {:?}", p.title);
-    assert!(p.title.as_deref().is_some_and(|t| t.starts_with("Mix")));
+    assert!(p.title.as_deref().is_some_and(|t| t.contains("Mix")));
     for v in &page {
         println!("{} {:?} {:?} {:?}", v.id, v.title, v.channel, v.duration);
     }
     assert!(page.len() >= 10, "only {} items", page.len());
-    assert_eq!(page[0].id, crate::yt::mix_seed(&id).unwrap());
+    if let Some(seed) = crate::yt::mix_seed(&id) {
+        assert_eq!(page[0].id, seed);
+    }
     assert!(page
         .iter()
         .all(|v| v.title.is_some() && v.duration.is_some()));
