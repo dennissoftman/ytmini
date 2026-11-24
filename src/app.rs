@@ -6010,6 +6010,13 @@ impl eframe::App for App {
             && !self.quitting
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            // A video waits, paused, for the window to come back; a song plays on.
+            // (Minimising and the tray's own hide keep everything playing.)
+            if !self.playing_song() {
+                if let Some(p) = self.embedded.as_mut().filter(|p| !p.paused && !p.eof) {
+                    p.toggle_pause();
+                }
+            }
             self.hide_to_tray(&ctx);
         }
         if self.pending_link.is_some()

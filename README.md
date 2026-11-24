@@ -40,8 +40,8 @@ playlists in a quick, quiet window, with mpv doing the playback.
 - **Up next**: a queue you can reorder, autoplay, and YouTube's related videos.
 - **Music**: songs are recognised, get song-only suggestions, keep playing in a
   small card when you go back, and get an automatic EQ preset per genre.
-- **Background play**: minimise or close to the tray and audio keeps going,
-  autoplay included.
+- **Background play**: minimise and audio keeps going, autoplay included.
+  Closing the window to the tray keeps songs playing and pauses videos.
 - **Extras**: [SponsorBlock](https://sponsor.ajay.app) segment skipping,
   [DeArrow](https://dearrow.ajay.app) titles and thumbnails (experimental),
   downloads, comments (read-only), like / subscribe / save to playlist,
