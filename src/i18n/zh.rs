@@ -2,7 +2,7 @@
 
 pub const T: &[(&str, &str)] = &[
     ("A YouTube link is on your clipboard", "剪贴板中有 YouTube 链接"),
-    ("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.", "正在播放的视频将仅以音频继续播放。可从菜单栏图标或按 ⌘Q 退出。"),
+    ("A song keeps playing; a video pauses. Quit from the menu-bar icon or with ⌘Q.", "歌曲会继续播放，视频会暂停。可从菜单栏图标或按 ⌘Q 退出。"),
     ("Account & updates", "账户与更新"),
     ("Add to queue", "添加到队列"),
     ("Add videos I watch to my YouTube history", "将我观看的视频添加到 YouTube 历史记录"),
@@ -299,7 +299,7 @@ pub const T: &[(&str, &str)] = &[
     ("Show more", "展开"),
     ("Same as Windows ({})", "与 Windows 相同（{}）"),
     ("Closing the window keeps ytmini in the system tray", "关闭窗口后将 ytmini 保留在系统托盘中"),
-    ("A playing video continues as audio only. Quit from the tray icon.", "正在播放的视频将仅以音频继续播放。可从托盘图标退出。"),
+    ("A song keeps playing; a video pauses. Quit from the tray icon.", "歌曲会继续播放，视频会暂停。可从托盘图标退出。"),
     ("Refresh (Ctrl+R)", "刷新 (Ctrl+R)"),
     ("Show in Explorer", "在资源管理器中显示"),
     ("Show in folder", "在文件夹中显示"),
@@ -327,4 +327,6 @@ pub const T: &[(&str, &str)] = &[
     ("Equalizer: Auto picks a preset for the song's genre; a preset you pick is kept for the artist", "均衡器：自动模式按歌曲曲风选择预设；你手动选择的预设会为该艺人保留"),
     ("Auto EQ for songs (a preset for the genre)", "为歌曲自动均衡（按曲风选择预设）"),
     ("The genre comes from Deezer: ytmini sends it the artist and song name only. A preset you pick in the player's EQ menu is kept for that artist.", "曲风来自 Deezer：ytmini 只发送艺人和歌曲名。在播放器 EQ 菜单中选择的预设会为该艺人保留。"),
+    ("Play all", "全部播放"),
+    ("Shuffle", "随机播放"),
 ];

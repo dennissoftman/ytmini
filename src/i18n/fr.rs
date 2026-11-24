@@ -2,7 +2,7 @@
 
 pub const T: &[(&str, &str)] = &[
     ("A YouTube link is on your clipboard", "Un lien YouTube se trouve dans le presse-papiers"),
-    ("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.", "Une vidéo en cours de lecture continue en audio seul. Quittez depuis l’icône de la barre des menus ou avec ⌘Q."),
+    ("A song keeps playing; a video pauses. Quit from the menu-bar icon or with ⌘Q.", "Une chanson continue, une vidéo est mise en pause. Quittez depuis l’icône de la barre des menus ou avec ⌘Q."),
     ("Account & updates", "Compte et mises à jour"),
     ("Add to queue", "Ajouter à la file d’attente"),
     ("Add videos I watch to my YouTube history", "Ajouter les vidéos regardées à mon historique YouTube"),
@@ -299,7 +299,7 @@ pub const T: &[(&str, &str)] = &[
     ("Show more", "Plus"),
     ("Same as Windows ({})", "Comme Windows ({})"),
     ("Closing the window keeps ytmini in the system tray", "La fermeture de la fenêtre laisse ytmini dans la zone de notification"),
-    ("A playing video continues as audio only. Quit from the tray icon.", "Une vidéo en cours de lecture continue en audio seul. Quittez depuis l’icône de la zone de notification."),
+    ("A song keeps playing; a video pauses. Quit from the tray icon.", "Une chanson continue, une vidéo est mise en pause. Quittez depuis l’icône de la zone de notification."),
     ("Refresh (Ctrl+R)", "Actualiser (Ctrl+R)"),
     ("Show in Explorer", "Afficher dans l’Explorateur"),
     ("Show in folder", "Afficher dans le dossier"),
@@ -327,4 +327,6 @@ pub const T: &[(&str, &str)] = &[
     ("Equalizer: Auto picks a preset for the song's genre; a preset you pick is kept for the artist", "Égaliseur : Auto choisit un préréglage selon le genre du morceau ; celui que vous choisissez est gardé pour l’artiste"),
     ("Auto EQ for songs (a preset for the genre)", "Égaliseur auto pour les morceaux (un préréglage selon le genre)"),
     ("The genre comes from Deezer: ytmini sends it the artist and song name only. A preset you pick in the player's EQ menu is kept for that artist.", "Le genre vient de Deezer : ytmini ne lui envoie que l’artiste et le titre. Le préréglage choisi dans le menu EQ du lecteur est gardé pour cet artiste."),
+    ("Play all", "Tout lire"),
+    ("Shuffle", "Lecture aléatoire"),
 ];

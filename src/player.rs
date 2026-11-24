@@ -380,6 +380,10 @@ impl Embedded {
         if profile.fast {
             opts.push(("profile", "fast".into()));
         }
+        // dev: silent test runs
+        if std::env::var_os("YTMINI_MUTE").is_some() {
+            opts.push(("mute", "yes".into()));
+        }
         // dev: a full, timestamped mpv log (never set in normal use)
         if let Some(f) = std::env::var_os("YTMINI_MPV_LOG") {
             opts.push(("log-file", f.to_string_lossy().into_owned()));

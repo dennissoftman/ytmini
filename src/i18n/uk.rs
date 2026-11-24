@@ -2,7 +2,7 @@
 
 pub const T: &[(&str, &str)] = &[
     ("A YouTube link is on your clipboard", "У буфері обміну посилання YouTube"),
-    ("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.", "Відео, що відтворюється, продовжить грати як аудіо. Щоб вийти, скористайтеся значком у рядку меню або ⌘Q."),
+    ("A song keeps playing; a video pauses. Quit from the menu-bar icon or with ⌘Q.", "Пісня гратиме далі, а відео стане на паузу. Щоб вийти, скористайтеся значком у рядку меню або ⌘Q."),
     ("Account & updates", "Обліковий запис і оновлення"),
     ("Add to queue", "Додати до черги"),
     ("Add videos I watch to my YouTube history", "Додавати переглянуті відео до історії YouTube"),
@@ -299,7 +299,7 @@ pub const T: &[(&str, &str)] = &[
     ("Show more", "Ще"),
     ("Same as Windows ({})", "Як у Windows ({})"),
     ("Closing the window keeps ytmini in the system tray", "Після закриття вікна ytmini лишається в області сповіщень"),
-    ("A playing video continues as audio only. Quit from the tray icon.", "Відео, що відтворюється, продовжить грати як аудіо. Щоб вийти, скористайтеся значком в області сповіщень."),
+    ("A song keeps playing; a video pauses. Quit from the tray icon.", "Пісня гратиме далі, а відео стане на паузу. Щоб вийти, скористайтеся значком в області сповіщень."),
     ("Refresh (Ctrl+R)", "Оновити (Ctrl+R)"),
     ("Show in Explorer", "Показати у Провіднику"),
     ("Show in folder", "Показати в теці"),
@@ -327,4 +327,6 @@ pub const T: &[(&str, &str)] = &[
     ("Equalizer: Auto picks a preset for the song's genre; a preset you pick is kept for the artist", "Еквалайзер: «Авто» підбирає пресет за жанром пісні; вибраний вручну пресет запам’ятовується для виконавця"),
     ("Auto EQ for songs (a preset for the genre)", "Авто-еквалайзер для пісень (пресет за жанром)"),
     ("The genre comes from Deezer: ytmini sends it the artist and song name only. A preset you pick in the player's EQ menu is kept for that artist.", "Жанр береться з Deezer: ytmini надсилає туди лише виконавця й назву пісні. Пресет, вибраний у меню EQ плеєра, запам’ятовується для цього виконавця."),
+    ("Play all", "Відтворити все"),
+    ("Shuffle", "Перемішати"),
 ];

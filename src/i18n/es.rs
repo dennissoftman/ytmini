@@ -2,7 +2,7 @@
 
 pub const T: &[(&str, &str)] = &[
     ("A YouTube link is on your clipboard", "Hay un enlace de YouTube en el portapapeles"),
-    ("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.", "Un vídeo en reproducción continúa solo como audio. Sal desde el icono de la barra de menús o con ⌘Q."),
+    ("A song keeps playing; a video pauses. Quit from the menu-bar icon or with ⌘Q.", "Una canción sigue sonando; un vídeo se pausa. Sal desde el icono de la barra de menús o con ⌘Q."),
     ("Account & updates", "Cuenta y actualizaciones"),
     ("Add to queue", "Añadir a la cola"),
     ("Add videos I watch to my YouTube history", "Añadir los vídeos que veo a mi historial de YouTube"),
@@ -299,7 +299,7 @@ pub const T: &[(&str, &str)] = &[
     ("Show more", "Mostrar más"),
     ("Same as Windows ({})", "Igual que Windows ({})"),
     ("Closing the window keeps ytmini in the system tray", "Al cerrar la ventana, ytmini sigue en la bandeja del sistema"),
-    ("A playing video continues as audio only. Quit from the tray icon.", "Un vídeo en reproducción continúa solo como audio. Sal desde el icono de la bandeja."),
+    ("A song keeps playing; a video pauses. Quit from the tray icon.", "Una canción sigue sonando; un vídeo se pausa. Sal desde el icono de la bandeja."),
     ("Refresh (Ctrl+R)", "Actualizar (Ctrl+R)"),
     ("Show in Explorer", "Mostrar en el Explorador"),
     ("Show in folder", "Mostrar en la carpeta"),
@@ -327,4 +327,6 @@ pub const T: &[(&str, &str)] = &[
     ("Equalizer: Auto picks a preset for the song's genre; a preset you pick is kept for the artist", "Ecualizador: Auto elige un preajuste según el género de la canción; el que elijas tú se guarda para el artista"),
     ("Auto EQ for songs (a preset for the genre)", "EQ automático para canciones (un preajuste según el género)"),
     ("The genre comes from Deezer: ytmini sends it the artist and song name only. A preset you pick in the player's EQ menu is kept for that artist.", "El género viene de Deezer: ytmini solo le envía el artista y el nombre de la canción. El preajuste que elijas en el menú EQ del reproductor se guarda para ese artista."),
+    ("Play all", "Reproducir todo"),
+    ("Shuffle", "Aleatorio"),
 ];

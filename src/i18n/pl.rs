@@ -2,7 +2,7 @@
 
 pub const T: &[(&str, &str)] = &[
     ("A YouTube link is on your clipboard", "W schowku jest link do YouTube"),
-    ("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.", "Odtwarzany film będzie grał dalej jako dźwięk. Aby zakończyć, użyj ikony na pasku menu lub ⌘Q."),
+    ("A song keeps playing; a video pauses. Quit from the menu-bar icon or with ⌘Q.", "Utwór gra dalej, a film zostaje wstrzymany. Aby zakończyć, użyj ikony na pasku menu lub ⌘Q."),
     ("Account & updates", "Konto i uaktualnienia"),
     ("Add to queue", "Dodaj do kolejki"),
     ("Add videos I watch to my YouTube history", "Dodawaj oglądane filmy do historii YouTube"),
@@ -299,7 +299,7 @@ pub const T: &[(&str, &str)] = &[
     ("Show more", "Pokaż więcej"),
     ("Same as Windows ({})", "Jak w Windows ({})"),
     ("Closing the window keeps ytmini in the system tray", "Po zamknięciu okna ytmini pozostaje w zasobniku systemowym"),
-    ("A playing video continues as audio only. Quit from the tray icon.", "Odtwarzany film będzie grał dalej jako dźwięk. Aby zakończyć, użyj ikony w zasobniku."),
+    ("A song keeps playing; a video pauses. Quit from the tray icon.", "Utwór gra dalej, a film zostaje wstrzymany. Aby zakończyć, użyj ikony w zasobniku."),
     ("Refresh (Ctrl+R)", "Odśwież (Ctrl+R)"),
     ("Show in Explorer", "Pokaż w Eksploratorze"),
     ("Show in folder", "Pokaż w folderze"),
@@ -327,4 +327,6 @@ pub const T: &[(&str, &str)] = &[
     ("Equalizer: Auto picks a preset for the song's genre; a preset you pick is kept for the artist", "Korektor: Auto dobiera preset do gatunku utworu; preset wybrany ręcznie zostaje dla wykonawcy"),
     ("Auto EQ for songs (a preset for the genre)", "Auto EQ dla utworów (preset do gatunku)"),
     ("The genre comes from Deezer: ytmini sends it the artist and song name only. A preset you pick in the player's EQ menu is kept for that artist.", "Gatunek pochodzi z Deezera: ytmini wysyła tylko wykonawcę i tytuł utworu. Preset wybrany w menu EQ odtwarzacza zostaje dla tego wykonawcy."),
+    ("Play all", "Odtwórz wszystko"),
+    ("Shuffle", "Losowo"),
 ];

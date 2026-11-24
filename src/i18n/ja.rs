@@ -2,7 +2,7 @@
 
 pub const T: &[(&str, &str)] = &[
     ("A YouTube link is on your clipboard", "クリップボードに YouTube のリンクがあります"),
-    ("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.", "再生中のビデオはオーディオのみで再生を続けます。メニューバーのアイコンまたは ⌘Q で終了します。"),
+    ("A song keeps playing; a video pauses. Quit from the menu-bar icon or with ⌘Q.", "曲は再生を続け、ビデオは一時停止します。メニューバーのアイコンまたは ⌘Q で終了します。"),
     ("Account & updates", "アカウントとアップデート"),
     ("Add to queue", "キューに追加"),
     ("Add videos I watch to my YouTube history", "視聴したビデオを YouTube の履歴に追加"),
@@ -299,7 +299,7 @@ pub const T: &[(&str, &str)] = &[
     ("Show more", "もっと見る"),
     ("Same as Windows ({})", "Windows と同じ ({})"),
     ("Closing the window keeps ytmini in the system tray", "ウインドウを閉じても ytmini を通知領域に残す"),
-    ("A playing video continues as audio only. Quit from the tray icon.", "再生中のビデオはオーディオのみで再生を続けます。通知領域のアイコンから終了します。"),
+    ("A song keeps playing; a video pauses. Quit from the tray icon.", "曲は再生を続け、ビデオは一時停止します。通知領域のアイコンから終了します。"),
     ("Refresh (Ctrl+R)", "更新 (Ctrl+R)"),
     ("Show in Explorer", "エクスプローラーで表示"),
     ("Show in folder", "フォルダで表示"),
@@ -327,4 +327,6 @@ pub const T: &[(&str, &str)] = &[
     ("Equalizer: Auto picks a preset for the song's genre; a preset you pick is kept for the artist", "イコライザ: 自動では曲のジャンルに合うプリセットを選びます。手動で選んだプリセットはそのアーティストに適用されます"),
     ("Auto EQ for songs (a preset for the genre)", "曲に自動 EQ を使う (ジャンルに合うプリセット)"),
     ("The genre comes from Deezer: ytmini sends it the artist and song name only. A preset you pick in the player's EQ menu is kept for that artist.", "ジャンルは Deezer から取得します。ytmini が送るのはアーティスト名と曲名だけです。プレーヤーの EQ メニューで選んだプリセットはそのアーティストに保存されます。"),
+    ("Play all", "すべて再生"),
+    ("Shuffle", "シャッフル"),
 ];

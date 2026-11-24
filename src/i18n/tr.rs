@@ -2,7 +2,7 @@
 
 pub const T: &[(&str, &str)] = &[
     ("A YouTube link is on your clipboard", "Panoda bir YouTube bağlantısı var"),
-    ("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.", "Oynatılan video yalnızca ses olarak devam eder. Menü çubuğu simgesinden veya ⌘Q ile çıkın."),
+    ("A song keeps playing; a video pauses. Quit from the menu-bar icon or with ⌘Q.", "Şarkı çalmaya devam eder, video duraklatılır. Menü çubuğu simgesinden veya ⌘Q ile çıkın."),
     ("Account & updates", "Hesap ve güncellemeler"),
     ("Add to queue", "Sıraya ekle"),
     ("Add videos I watch to my YouTube history", "İzlediğim videoları YouTube geçmişime ekle"),
@@ -299,7 +299,7 @@ pub const T: &[(&str, &str)] = &[
     ("Show more", "Daha fazla göster"),
     ("Same as Windows ({})", "Windows ile aynı ({})"),
     ("Closing the window keeps ytmini in the system tray", "Pencereyi kapatmak ytmini’yi sistem tepsisinde tutar"),
-    ("A playing video continues as audio only. Quit from the tray icon.", "Oynatılan video yalnızca ses olarak devam eder. Tepsi simgesinden çıkın."),
+    ("A song keeps playing; a video pauses. Quit from the tray icon.", "Şarkı çalmaya devam eder, video duraklatılır. Tepsi simgesinden çıkın."),
     ("Refresh (Ctrl+R)", "Yenile (Ctrl+R)"),
     ("Show in Explorer", "Dosya Gezgini’nde göster"),
     ("Show in folder", "Klasörde göster"),
@@ -327,4 +327,6 @@ pub const T: &[(&str, &str)] = &[
     ("Equalizer: Auto picks a preset for the song's genre; a preset you pick is kept for the artist", "Ekolayzır: Otomatik, şarkının türüne uygun bir ön ayar seçer; sizin seçtiğiniz ön ayar sanatçı için saklanır"),
     ("Auto EQ for songs (a preset for the genre)", "Şarkılar için otomatik EQ (türe uygun ön ayar)"),
     ("The genre comes from Deezer: ytmini sends it the artist and song name only. A preset you pick in the player's EQ menu is kept for that artist.", "Tür bilgisi Deezer'dan gelir: ytmini yalnızca sanatçı ve şarkı adını gönderir. Oynatıcının EQ menüsünde seçtiğiniz ön ayar o sanatçı için saklanır."),
+    ("Play all", "Tümünü oynat"),
+    ("Shuffle", "Karıştır"),
 ];

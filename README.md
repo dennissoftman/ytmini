@@ -38,6 +38,7 @@ playlists in a quick, quiet window, with mpv doing the playback.
   quality that follows battery and Low Power Mode, YouTube's keyboard
   shortcuts, fullscreen.
 - **Up next**: a queue you can reorder, autoplay, and YouTube's related videos.
+  Playlists have Play all and Shuffle, and a Mix keeps going like on YouTube.
 - **Music**: songs are recognised, get song-only suggestions, keep playing in a
   small card when you go back, and get an automatic EQ preset per genre.
 - **Background play**: minimise and audio keeps going, autoplay included.

@@ -1553,10 +1553,27 @@ impl AnonHome {
     }
 }
 
+/// Where an endless Mix has got to.
+struct Mix {
+    list: String,
+    seen: std::collections::HashSet<String>,
+    /// The last video of the latest stretch: the next one starts there.
+    last: Option<String>,
+}
+
+impl Mix {
+    /// Enough for hours of play; stops a scrolled grid from fetching forever.
+    const MAX: usize = 500;
+}
+
 pub struct Pager {
     is_feed: bool,
-    /// A Mix: one page, the watch page's list panel (not its related videos).
-    mix: bool,
+    /// A Mix: the watch page's list panel (not its related videos), page
+    /// after page.
+    mix: Option<Mix>,
+    /// A playlist's own name, from its first page (a link only gives the id).
+    pub title: Option<String>,
+    wants_title: bool,
     /// Home while signed out (see [`AnonHome`]).
     anon: Option<AnonHome>,
     client: Client,
@@ -1612,7 +1629,16 @@ impl Pager {
             }
         };
         Ok(Pager {
-            mix: endpoint == "next",
+            title: None,
+            wants_title: matches!(source, Source::Playlist { .. }),
+            mix: match source {
+                Source::Playlist { id, .. } if endpoint == "next" => Some(Mix {
+                    list: id.clone(),
+                    seen: Default::default(),
+                    last: None,
+                }),
+                _ => None,
+            },
             is_feed: matches!(source, Source::Feed),
             anon: (matches!(source, Source::Feed) && !client.signed_in()).then(AnonHome::new),
             client,
@@ -1634,10 +1660,15 @@ impl Pager {
         if let Some(home) = &mut self.anon {
             return home.next_page(&self.client);
         }
-        let body = match (&self.first, &self.token) {
-            (Some(b), _) => b.clone(),
-            (None, Some(t)) => json!({ "continuation": t }),
-            (None, None) => return Ok(None),
+        let body = match (&self.first, &self.token, &self.mix) {
+            (Some(b), _, _) => b.clone(),
+            (None, Some(t), _) => json!({ "continuation": t }),
+            // a Mix goes on from its last video: YouTube lists the next stretch
+            (None, None, Some(m)) if m.seen.len() < Mix::MAX => match &m.last {
+                Some(v) => json!({ "videoId": v, "playlistId": m.list }),
+                None => return Ok(None),
+            },
+            (None, None, _) => return Ok(None),
         };
         let first = !self.started;
         let r = self.client.post(self.endpoint, body)?; // on error, the same page can be retried
@@ -1650,17 +1681,34 @@ impl Pager {
                 *HOME_CHIPS.lock().unwrap_or_else(|e| e.into_inner()) = chips;
             }
         }
+        if first && self.wants_title {
+            self.title = [
+                "/contents/twoColumnWatchNextResults/playlist/playlist/title",
+                "/metadata/playlistMetadataRenderer/title",
+                "/microformat/microformatDataRenderer/title",
+                "/header/pageHeaderRenderer/pageTitle",
+            ]
+            .iter()
+            .find_map(|p| r.pointer(p).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string);
+        }
         let mut out = Vec::new();
         let mut token = None;
-        if self.mix {
+        if let Some(m) = &mut self.mix {
             let panel = r.pointer("/contents/twoColumnWatchNextResults/playlist/playlist/contents");
+            let mut last = None;
             for x in panel.and_then(Value::as_array).into_iter().flatten() {
                 if let Some(v) = x.get("playlistPanelVideoRenderer").and_then(renderer) {
-                    if !out.iter().any(|o: &Video| o.id == v.id) {
+                    last = Some(v.id.clone());
+                    if m.seen.insert(v.id.clone()) {
                         out.push(v);
                     }
                 }
             }
+            // nothing new: the Mix has come round (an empty page ends the list)
+            m.last = if out.is_empty() { None } else { last };
         } else {
             collect(&r, &mut out, &mut token);
         }
@@ -2224,7 +2272,8 @@ mod signed_out_live {
     }
 }
 
-/// `cargo test --release -- --ignored mix_lists`: a Mix lists its own videos
+/// `cargo test --release -- --ignored mix_lists`: a Mix lists its own videos,
+/// and more after them
 /// (signed out; the Mix id defaults to one checked on 2026-11-24).
 #[cfg(test)]
 #[test]
@@ -2237,6 +2286,8 @@ fn mix_lists() {
     };
     let mut p = Pager::new(std::path::Path::new("/nonexistent/cookies.txt"), &src).unwrap();
     let page = p.next_page().unwrap().unwrap();
+    println!("title: {:?}", p.title);
+    assert!(p.title.as_deref().is_some_and(|t| t.starts_with("Mix")));
     for v in &page {
         println!("{} {:?} {:?} {:?}", v.id, v.title, v.channel, v.duration);
     }
@@ -2245,5 +2296,45 @@ fn mix_lists() {
     assert!(page
         .iter()
         .all(|v| v.title.is_some() && v.duration.is_some()));
-    assert!(p.next_page().unwrap().is_none(), "a Mix is one page");
+    let more = p.next_page().unwrap().unwrap();
+    println!("-- next stretch: {} new", more.len());
+    for v in &more {
+        println!("{} {:?}", v.id, v.title);
+    }
+    assert!(!more.is_empty(), "a Mix goes on");
+    assert!(more.iter().all(|v| !page.iter().any(|o| o.id == v.id)));
+    let mut total = page.len() + more.len();
+    for _ in 0..8 {
+        match p.next_page().unwrap() {
+            Some(v) if !v.is_empty() => total += v.len(),
+            _ => break,
+        }
+    }
+    println!("-- {total} videos after 10 stretches");
+}
+
+/// `cargo test --release -- --ignored playlist_title`: a playlist opened by id
+/// (as from a link) learns its name (signed out).
+#[cfg(test)]
+#[test]
+#[ignore]
+fn playlist_title() {
+    let src = crate::yt::Source::Playlist {
+        id: "PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI".into(),
+        title: "Playlist".into(),
+    };
+    let mut p = Pager::new(std::path::Path::new("/nonexistent/cookies.txt"), &src).unwrap();
+    assert!(!p.next_page().unwrap().unwrap().is_empty());
+    println!("title: {:?}", p.title);
+    assert_eq!(p.title.as_deref(), Some("Popular Music Videos"));
+    let mut n = 0;
+    while let Some(page) = p.next_page().unwrap() {
+        if page.is_empty() {
+            break;
+        }
+        n += page.len();
+        println!("page +{} (token {})", page.len(), p.token.is_some());
+    }
+    println!("after the first page: {n}");
+    assert!(n > 0, "a playlist pages on past its first 100 videos");
 }

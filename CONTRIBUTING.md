@@ -116,7 +116,9 @@ cargo fmt --check && cargo clippy --release --all-targets -- -D warnings
 - The NSIS installer (`installer/ytmini.nsi`, strings in
   `installer/strings.nsh`) installs per user to
   `%LOCALAPPDATA%\Programs\ytmini`, offers "Update" over an older version,
-  and asks before deleting user data on uninstall. `makensis` needs
+  and asks before deleting user data on uninstall. It closes a running
+  ytmini with `taskkill` (a close request; ytmini quits even from the tray)
+  and only forces it if that fails. `makensis` needs
   `LC_ALL=en_US.UTF-8` on macOS.
 
 ## Testing without touching your own account
@@ -187,6 +189,9 @@ A comma-separated script that starts a few seconds after launch:
 | `minimize` / `tray` | minimize / close to tray |
 | `end` | jump to the end (tests autoplay) |
 | `shot:<file.png>` | in-app screenshot (macOS `screencapture` gives black frames) |
+| `list:<playlist id>` | open a playlist page (a Mix too) |
+| `playall` / `shuffle` | Play all / Shuffle on that page |
+| `next` | Next (tests the queue) |
 
 ```bash
 YTMINI_NO_HISTORY=1 YTMINI_DEBUG=1 \
@@ -205,6 +210,7 @@ playing.
 | `YTMINI_DEBUG=1` | timing and state lines on stderr |
 | `YTMINI_NO_HISTORY=1` | don't report playback to your watch history; don't save resume points or the continue card |
 | `YTMINI_MPV_LOG=<file>` | full mpv log (check the `af` chain for EQ) |
+| `YTMINI_MUTE=1` | start the player muted (silent test runs) |
 | `YTMINI_CONFIG_DIR=<dir>` | separate profile with its own cache (fresh install, signed out) |
 | `YTMINI_LANG=ru` | UI language, for screenshots |
 | `YTMINI_HL` / `YTMINI_GL` | YouTube language / region override |
@@ -220,8 +226,20 @@ playing.
 - Music is detected from YouTube's own music badge and the YouTube Music
   player's `musicVideoType`. Songs get song-only suggestions. Back collapses
   a song to a compact card; the video stops decoding and audio keeps playing.
-- Closing to the tray keeps audio only. Autoplay works while minimized or in
-  the tray.
+- Closing the window to the tray pauses a video and keeps a song playing
+  (audio only). Minimising keeps everything playing; autoplay works while
+  minimized or in the tray. A close request while already hidden (the
+  installer's `taskkill`, Windows) quits, so ytmini is never force-killed and
+  leaves no dead tray icon.
+- Windows: one ytmini per config folder. A second launch signals the first
+  (a named event, `src/single.rs`) to show its window, then exits. Test runs
+  (`--smoke-test`, `YTMINI_PLAY_SEQ`, `YTMINI_NO_HISTORY`) don't take part.
+- Playlists: playing from one makes it the queue, and the queue grows as the
+  playlist's tab loads more. Play all / Shuffle on the playlist page; Shuffle
+  loads the playlist (up to 2000) and mixes later pages in at random.
+- A Mix (`RD…`) can't be opened as a playlist page. It's read from the watch
+  page's list next to its first video, then stretch by stretch from its last
+  video, up to 500 videos.
 - Home starts with the last stopped video, so it can be continued.
 - The title is an overlay at the top of the player, as on YouTube.
 - An expired session is refreshed from the browser it came from as soon as

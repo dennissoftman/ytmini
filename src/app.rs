@@ -174,6 +174,8 @@ enum Msg {
     /// Browser check finished: the browser's rotation mark and whether its
     /// cookies were imported again; None when it couldn't be read.
     BrowserSynced(Option<(u64, bool)>),
+    /// A playlist's name, read from its first page: (playlist id, name).
+    ListTitle(String, String),
     /// Watch later add (true) / remove finished for a video id.
     WatchLater(bool, String, Result<String, String>),
 }
@@ -358,6 +360,13 @@ pub struct App {
     related: (String, Vec<Video>),
     /// The list the queue context came from, for the panel's heading.
     queue_label: String,
+    /// The tab the queue came from (a playlist, Watch later): the queue grows
+    /// as that tab loads more, so playback doesn't stop at the loaded part.
+    queue_src: Option<Source>,
+    /// Shuffled (Shuffle on a playlist page): later pages go in at random.
+    queue_shuffle: bool,
+    /// Playlist names YouTube gave us, by id (a link only carries the id).
+    list_titles: HashMap<String, String>,
     /// When the current video ended (autoplay countdown), and whether the
     /// countdown was cancelled for it.
     eof_at: Option<std::time::Instant>,
@@ -433,7 +442,8 @@ pub struct App {
     /// dev (`YTMINI_PLAY_SEQ=id,id,…`): videos to play one after another,
     /// each once the current one has played 4 s (start-up timing). Steps
     /// `back` (as if Back were clicked), `wait:<s>`, `expand`, `pause`, `seek:<s>`, `tray`, `minimize`, `end` (seek to the last
-    /// 2 s) and `shot:<png path>` too.
+    /// 2 s), `shot:<png path>`, `list:<playlist id>` (open it), `playall`, `shuffle`
+    /// and `next` too.
     play_seq: Vec<String>,
     /// dev: a `wait:<s>` step holds the sequence until then.
     play_seq_wait: Option<std::time::Instant>,
@@ -574,6 +584,9 @@ impl App {
             related_err: None,
             related: (String::new(), Vec::new()),
             queue_label: String::new(),
+            queue_src: None,
+            queue_shuffle: false,
+            list_titles: HashMap::new(),
             eof_at: None,
             autoplay_cancelled: false,
             smoke: None,
@@ -942,6 +955,12 @@ impl App {
                         }
                     }
                     send(chunk, first, true, exhausted);
+                    if first {
+                        if let (Source::Playlist { id, .. }, Some(name)) = (&source, feed.title()) {
+                            let _ = tx.send(Msg::ListTitle(id.clone(), name));
+                            ctx.request_repaint();
+                        }
+                    }
                     first = false;
                     if exhausted {
                         return;
@@ -1362,6 +1381,12 @@ impl App {
                         p.segments = segs;
                     }
                 }
+                Msg::ListTitle(id, name) => {
+                    if matches!(&self.queue_src, Some(Source::Playlist { id: q, .. }) if *q == id) {
+                        self.queue_label = name.clone();
+                    }
+                    self.list_titles.insert(id, name);
+                }
                 Msg::WatchLater(add, id, r) => {
                     match r {
                         Ok(msg) => self.status = Some((msg, false)),
@@ -1415,6 +1440,7 @@ impl App {
         } else {
             Vec::new()
         };
+        (self.queue_src, self.queue_shuffle) = (None, false); // the caller says otherwise
         self.played.clear();
         self.play(v);
     }
@@ -1451,6 +1477,93 @@ impl App {
     /// Back keeps it playing in the bar.)
     fn playing_song(&self) -> bool {
         self.playing_id().is_some_and(|id| self.songs.contains(id))
+    }
+
+    /// Keep a playlist queue going past what was loaded when it started: take
+    /// what the playlist's tab has loaded since, and ask it for more when only
+    /// a few are left (a Mix never runs out). Shuffled, the whole playlist is
+    /// fetched and later videos go in at random among those still to come.
+    fn grow_queue(&mut self, ctx: &egui::Context) {
+        let (Some(src), Some(pos)) = (self.queue_src.clone(), self.queue_pos) else {
+            return;
+        };
+        let Some(tab) = self.tabs.get(&src) else {
+            return;
+        };
+        let known: HashSet<&str> = self.queue_ctx.iter().map(|v| v.id.as_str()).collect();
+        let fresh: Vec<Video> = tab
+            .videos
+            .iter()
+            .filter(|v| !v.is_playlist && !known.contains(v.id.as_str()))
+            .cloned()
+            .collect();
+        let idle = !tab.loading && !tab.exhausted && tab.error.is_none();
+        let known_len = self.queue_ctx.len();
+        for v in fresh {
+            if self.queue_shuffle {
+                let at = pos + 1 + rand_below(self.queue_ctx.len() - pos);
+                self.queue_ctx.insert(at, v);
+            } else {
+                self.queue_ctx.push(v);
+            }
+        }
+        let left = self.queue_ctx.len() - pos - 1;
+        if std::env::var_os("YTMINI_DEBUG").is_some() && self.queue_ctx.len() != known_len {
+            eprintln!("queue: {} (at {pos}, {left} to come)", self.queue_ctx.len());
+        }
+        let want = if self.queue_shuffle {
+            self.queue_ctx.len() < SHUFFLE_MAX
+        } else {
+            left < 5
+        };
+        if want && idle {
+            self.load_more(ctx, src);
+        }
+    }
+
+    /// A list's name for headings: a playlist's own name once YouTube gave it.
+    fn list_label(&self, src: &Source) -> String {
+        match src {
+            Source::Playlist { id, .. } => self
+                .list_titles
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| src.label()),
+            _ => src.label(),
+        }
+    }
+
+    /// Play all / Shuffle on a playlist page.
+    fn play_list(&mut self, src: Source, title: String, shuffle: bool) {
+        let mut list: Vec<Video> = self
+            .tabs
+            .get(&src)
+            .map(|t| {
+                t.videos
+                    .iter()
+                    .filter(|v| !v.is_playlist)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if shuffle {
+            for i in (1..list.len()).rev() {
+                list.swap(i, rand_below(i + 1));
+            }
+        }
+        let Some(first) = list.first().cloned() else {
+            return;
+        };
+        if std::env::var_os("YTMINI_DEBUG").is_some() {
+            let ids: Vec<&str> = list.iter().take(5).map(|v| v.id.as_str()).collect();
+            eprintln!(
+                "play list: {} videos, shuffle {shuffle}, starts {ids:?}",
+                list.len()
+            );
+        }
+        self.queue_label = title;
+        self.play_from(list, &first);
+        (self.queue_src, self.queue_shuffle) = (Some(src), shuffle);
     }
 
     fn go_next(&mut self) {
@@ -2460,6 +2573,7 @@ impl App {
         let mut want_branding: Vec<String> = Vec::new();
         let mut clicked_list: Vec<Video> = Vec::new();
         let mut clicked_label = String::new();
+        let mut clicked_src: Option<Source> = None;
         let mut want_topics: Vec<(String, String)> = Vec::new();
         let mut open_topic: Option<Source> = None;
         let mut show_all = false;
@@ -2949,7 +3063,8 @@ impl App {
                     clicked_label = if std::ptr::eq(list, &shorts) {
                         t("Shorts").to_string()
                     } else {
-                        source.label()
+                        clicked_src = Some(source.clone());
+                        self.list_label(&source)
                     };
                 }
             }
@@ -2968,6 +3083,7 @@ impl App {
             } else {
                 self.queue_label = clicked_label;
                 self.play_from(clicked_list, &v);
+                self.queue_src = clicked_src;
             }
         }
         if let Some(v) = open_channel {
@@ -3075,6 +3191,16 @@ impl SettingsTab {
             SettingsTab::Account => t("Account & updates"),
         }
     }
+}
+
+/// Shuffle fetches the playlist up to this many videos (YouTube's own cap is 5000).
+const SHUFFLE_MAX: usize = 2000;
+
+/// A random number below `n` (> 0); good enough for shuffling.
+fn rand_below(n: usize) -> usize {
+    use std::hash::BuildHasher;
+    let x = std::collections::hash_map::RandomState::new().hash_one(std::time::Instant::now());
+    (x % n.max(1) as u64) as usize
 }
 
 /// Seconds the "Up next" card waits before playing the next video.
@@ -3370,6 +3496,7 @@ impl App {
         let ctx = ui.ctx().clone();
         let mut back = false;
         let mut switch: Option<Source> = None;
+        let mut play_all: Option<(String, bool)> = None;
         egui::Panel::top("page")
             .frame(egui::Frame::new().fill(bg()).inner_margin(Margin {
                 left: 16,
@@ -3388,7 +3515,7 @@ impl App {
                     }
                     ui.add_space(10.0);
                     let (kind, title) = match &self.active {
-                        Source::Playlist { title, .. } => (t("Playlist"), title.clone()),
+                        Source::Playlist { .. } => (t("Playlist"), self.list_label(&self.active)),
                         other => (t("Channel"), other.label()),
                     };
                     ui.label(RichText::new(kind).small().color(accent()));
@@ -3396,6 +3523,30 @@ impl App {
                         egui::Label::new(RichText::new(title).size(20.0).strong().color(text()))
                             .truncate(),
                     );
+                    if let Source::Playlist { id, .. } = &self.active {
+                        let title = self.list_label(&self.active);
+                        let has_videos = self
+                            .tabs
+                            .get(&self.active)
+                            .is_some_and(|t| t.videos.iter().any(|v| !v.is_playlist));
+                        let mix = yt::mix_seed(id).is_some();
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            // a Mix is endless and already varied: no Shuffle
+                            if !mix
+                                && ui
+                                    .add_enabled(has_videos, egui::Button::new(t("Shuffle")))
+                                    .clicked()
+                            {
+                                play_all = Some((title.clone(), true));
+                            }
+                            if ui
+                                .add_enabled(has_videos, egui::Button::new(t("Play all")))
+                                .clicked()
+                            {
+                                play_all = Some((title.clone(), false));
+                            }
+                        });
+                    }
                     if let Source::Channel { url, name } | Source::ChannelPlaylists { url, name } =
                         &self.active
                     {
@@ -3428,6 +3579,9 @@ impl App {
         if let Some(s) = switch {
             self.active = s.clone(); // sibling view: replace, don't stack
             self.load(&ctx, s, false);
+        }
+        if let Some((title, shuffle)) = play_all {
+            self.play_list(self.active.clone(), title, shuffle);
         }
     }
 
@@ -5139,10 +5293,10 @@ impl App {
                                 section(ui, t("Window"));
                                 if cfg!(target_os = "macos") {
                                     ui.checkbox(&mut s.close_to_tray, t("Closing the window keeps ytmini in the menu bar"));
-                                    ui.label(RichText::new(t("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.")).small().color(text_dim()));
+                                    ui.label(RichText::new(t("A song keeps playing; a video pauses. Quit from the menu-bar icon or with ⌘Q.")).small().color(text_dim()));
                                 } else {
                                     ui.checkbox(&mut s.close_to_tray, t("Closing the window keeps ytmini in the system tray"));
-                                    ui.label(RichText::new(t("A playing video continues as audio only. Quit from the tray icon.")).small().color(text_dim()));
+                                    ui.label(RichText::new(t("A song keeps playing; a video pauses. Quit from the tray icon.")).small().color(text_dim()));
                                 }
                                 ui.add_space(10.0);
                             }
@@ -5909,6 +6063,7 @@ impl eframe::App for App {
         self.poll_player();
         self.update_screen_cap(ctx);
         self.handle_tray(ctx);
+        self.grow_queue(ctx);
         self.track_positions(ctx);
         self.poll_signin(ctx);
         self.poll_links(ctx);
@@ -6055,6 +6210,9 @@ impl eframe::App for App {
             }
         }
         self.prepare_next(&ctx);
+        if !self.play_seq.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(250)); // dev driver: keep ticking
+        }
         // (after 6 s, like a person picking a video: start-up work is done)
         if !self.play_seq.is_empty()
             && self.tools.is_some()
@@ -6078,6 +6236,19 @@ impl eframe::App for App {
                 }
             } else if step == "tray" {
                 self.hide_to_tray(&ctx);
+            } else if let Some(id) = step.strip_prefix("list:") {
+                self.open_page(
+                    &ctx,
+                    Source::Playlist {
+                        id: id.to_string(),
+                        title: id.to_string(),
+                    },
+                );
+            } else if step == "playall" || step == "shuffle" {
+                let title = self.list_label(&self.active);
+                self.play_list(self.active.clone(), title, step == "shuffle");
+            } else if step == "next" {
+                self.go_next();
             } else if let Some(secs) = step.strip_prefix("wait:").and_then(|t| t.parse().ok()) {
                 self.play_seq_wait =
                     Some(std::time::Instant::now() + Duration::from_secs_f64(secs));
@@ -6201,6 +6372,14 @@ impl Feed {
     }
 
     /// Videos already in hand (no waiting for the next one).
+    /// A playlist's name from its first page, if the native route had one.
+    fn title(&self) -> Option<String> {
+        match self {
+            Feed::Native { pager, .. } => pager.title.clone(),
+            Feed::Ytdlp(_) => None,
+        }
+    }
+
     fn buffered(&self) -> bool {
         matches!(self, Feed::Native { buf, .. } if !buf.is_empty())
     }

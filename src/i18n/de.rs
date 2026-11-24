@@ -2,7 +2,7 @@
 
 pub const T: &[(&str, &str)] = &[
     ("A YouTube link is on your clipboard", "In der Zwischenablage ist ein YouTube-Link"),
-    ("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.", "Ein laufendes Video wird als reines Audio fortgesetzt. Beenden über das Symbol in der Menüleiste oder mit ⌘Q."),
+    ("A song keeps playing; a video pauses. Quit from the menu-bar icon or with ⌘Q.", "Ein Song läuft weiter, ein Video wird pausiert. Beenden über das Symbol in der Menüleiste oder mit ⌘Q."),
     ("Account & updates", "Account & Updates"),
     ("Add to queue", "Zur Warteschlange hinzufügen"),
     ("Add videos I watch to my YouTube history", "Angesehene Videos zu meinem YouTube-Verlauf hinzufügen"),
@@ -299,7 +299,7 @@ pub const T: &[(&str, &str)] = &[
     ("Show more", "Mehr anzeigen"),
     ("Same as Windows ({})", "Wie Windows ({})"),
     ("Closing the window keeps ytmini in the system tray", "Beim Schließen des Fensters bleibt ytmini im Infobereich der Taskleiste"),
-    ("A playing video continues as audio only. Quit from the tray icon.", "Ein laufendes Video wird als reines Audio fortgesetzt. Beenden über das Symbol im Infobereich."),
+    ("A song keeps playing; a video pauses. Quit from the tray icon.", "Ein Song läuft weiter, ein Video wird pausiert. Beenden über das Symbol im Infobereich."),
     ("Refresh (Ctrl+R)", "Aktualisieren (Strg+R)"),
     ("Show in Explorer", "Im Explorer zeigen"),
     ("Show in folder", "Im Ordner anzeigen"),
@@ -327,4 +327,6 @@ pub const T: &[(&str, &str)] = &[
     ("Equalizer: Auto picks a preset for the song's genre; a preset you pick is kept for the artist", "Equalizer: Auto wählt ein Preset für das Genre des Songs; ein selbst gewähltes Preset gilt für den Künstler"),
     ("Auto EQ for songs (a preset for the genre)", "Auto-EQ für Songs (ein Preset passend zum Genre)"),
     ("The genre comes from Deezer: ytmini sends it the artist and song name only. A preset you pick in the player's EQ menu is kept for that artist.", "Das Genre kommt von Deezer: ytmini sendet nur Künstler und Songtitel. Ein im EQ-Menü des Players gewähltes Preset gilt für diesen Künstler."),
+    ("Play all", "Alle abspielen"),
+    ("Shuffle", "Zufällig"),
 ];

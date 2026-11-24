@@ -2,7 +2,7 @@
 
 pub const T: &[(&str, &str)] = &[
     ("A YouTube link is on your clipboard", "클립보드에 YouTube 링크가 있습니다"),
-    ("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.", "재생 중인 비디오는 오디오로만 계속 재생됩니다. 메뉴 막대 아이콘이나 ⌘Q로 종료하십시오."),
+    ("A song keeps playing; a video pauses. Quit from the menu-bar icon or with ⌘Q.", "노래는 계속 재생되고 비디오는 일시 정지됩니다. 메뉴 막대 아이콘이나 ⌘Q로 종료하십시오."),
     ("Account & updates", "계정 및 업데이트"),
     ("Add to queue", "대기열에 추가"),
     ("Add videos I watch to my YouTube history", "시청한 비디오를 YouTube 기록에 추가"),
@@ -299,7 +299,7 @@ pub const T: &[(&str, &str)] = &[
     ("Show more", "더보기"),
     ("Same as Windows ({})", "Windows와 동일({})"),
     ("Closing the window keeps ytmini in the system tray", "윈도우를 닫아도 ytmini를 알림 영역에 유지"),
-    ("A playing video continues as audio only. Quit from the tray icon.", "재생 중인 비디오는 오디오로만 계속 재생됩니다. 알림 영역 아이콘에서 종료하십시오."),
+    ("A song keeps playing; a video pauses. Quit from the tray icon.", "노래는 계속 재생되고 비디오는 일시 정지됩니다. 알림 영역 아이콘에서 종료하십시오."),
     ("Refresh (Ctrl+R)", "새로 고침(Ctrl+R)"),
     ("Show in Explorer", "파일 탐색기에서 보기"),
     ("Show in folder", "폴더에서 보기"),
@@ -327,4 +327,6 @@ pub const T: &[(&str, &str)] = &[
     ("Equalizer: Auto picks a preset for the song's genre; a preset you pick is kept for the artist", "이퀄라이저: 자동은 곡의 장르에 맞는 프리셋을 고릅니다. 직접 고른 프리셋은 해당 아티스트에 유지됩니다"),
     ("Auto EQ for songs (a preset for the genre)", "노래에 자동 EQ 사용(장르에 맞는 프리셋)"),
     ("The genre comes from Deezer: ytmini sends it the artist and song name only. A preset you pick in the player's EQ menu is kept for that artist.", "장르는 Deezer에서 가져옵니다. ytmini는 아티스트와 곡 이름만 보냅니다. 플레이어의 EQ 메뉴에서 고른 프리셋은 해당 아티스트에 유지됩니다."),
+    ("Play all", "모두 재생"),
+    ("Shuffle", "셔플"),
 ];

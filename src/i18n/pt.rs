@@ -2,7 +2,7 @@
 
 pub const T: &[(&str, &str)] = &[
     ("A YouTube link is on your clipboard", "Há um link do YouTube na área de transferência"),
-    ("A playing video continues as audio only. Quit from the menu-bar icon or with ⌘Q.", "Um vídeo em reprodução continua só com áudio. Encerre pelo ícone da barra de menus ou com ⌘Q."),
+    ("A song keeps playing; a video pauses. Quit from the menu-bar icon or with ⌘Q.", "Uma música continua tocando; um vídeo é pausado. Encerre pelo ícone da barra de menus ou com ⌘Q."),
     ("Account & updates", "Conta e atualizações"),
     ("Add to queue", "Adicionar à fila"),
     ("Add videos I watch to my YouTube history", "Adicionar os vídeos que assisto ao meu histórico do YouTube"),
@@ -299,7 +299,7 @@ pub const T: &[(&str, &str)] = &[
     ("Show more", "Mostrar mais"),
     ("Same as Windows ({})", "Igual ao Windows ({})"),
     ("Closing the window keeps ytmini in the system tray", "Fechar a janela mantém o ytmini na bandeja do sistema"),
-    ("A playing video continues as audio only. Quit from the tray icon.", "Um vídeo em reprodução continua só com áudio. Encerre pelo ícone da bandeja."),
+    ("A song keeps playing; a video pauses. Quit from the tray icon.", "Uma música continua tocando; um vídeo é pausado. Encerre pelo ícone da bandeja."),
     ("Refresh (Ctrl+R)", "Atualizar (Ctrl+R)"),
     ("Show in Explorer", "Mostrar no Explorador de Arquivos"),
     ("Show in folder", "Mostrar na pasta"),
@@ -327,4 +327,6 @@ pub const T: &[(&str, &str)] = &[
     ("Equalizer: Auto picks a preset for the song's genre; a preset you pick is kept for the artist", "Equalizador: Auto escolhe um preset pelo gênero da música; o que você escolher fica para o artista"),
     ("Auto EQ for songs (a preset for the genre)", "EQ automático para músicas (um preset pelo gênero)"),
     ("The genre comes from Deezer: ytmini sends it the artist and song name only. A preset you pick in the player's EQ menu is kept for that artist.", "O gênero vem do Deezer: o ytmini envia só o artista e o nome da música. O preset escolhido no menu EQ do player fica para esse artista."),
+    ("Play all", "Reproduzir tudo"),
+    ("Shuffle", "Aleatório"),
 ];
