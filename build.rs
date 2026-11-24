@@ -48,6 +48,11 @@ fn main() {
             return;
         }
     }
+    // releases set YTMINI_REQUIRE_ICON: no icon there is a broken build
+    println!("cargo:rerun-if-env-changed=YTMINI_REQUIRE_ICON");
+    if std::env::var_os("YTMINI_REQUIRE_ICON").is_some() {
+        panic!("no resource compiler (llvm-rc / rc.exe) for the exe icon");
+    }
     println!("cargo:warning=no resource compiler (llvm-rc / rc.exe): ytmini.exe gets no icon");
 }
 
