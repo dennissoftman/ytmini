@@ -1508,6 +1508,16 @@ pub fn screen_cap(width_px: f32, height_px: f32) -> u32 {
         .unwrap_or(360)
 }
 
+/// mpv's `hwdec`: hardware decoding where mpv trusts it. `YTMINI_HWDEC`
+/// overrides it (dev: `no`, `nvdec-copy`, `d3d11va-copy`… to compare
+/// decoders when a GPU draws artifacts).
+pub fn hwdec() -> String {
+    std::env::var("YTMINI_HWDEC")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "auto-safe".into())
+}
+
 /// Concrete mpv settings for one playback.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Profile {
@@ -1612,7 +1622,7 @@ pub fn play(
         ))
         .arg(format!("--ytdl-format={}", profile.ytdl_format))
         // mpv defaults to software decoding; hardware decoding is the biggest battery win.
-        .arg("--hwdec=auto-safe")
+        .arg(format!("--hwdec={}", hwdec()))
         .arg("--force-window=immediate")
         .arg("--keep-open=no")
         .arg(format!("--input-ipc-server={}", ipc_path().display()))

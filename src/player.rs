@@ -355,7 +355,7 @@ impl Embedded {
         let mut opts: Vec<(&str, String)> = vec![
             ("vo", "libmpv".into()),
             // mpv defaults to software decoding; hardware decoding is the biggest battery win.
-            ("hwdec", "auto-safe".into()),
+            ("hwdec", yt::hwdec()),
             ("ytdl", "yes".into()),
             ("ytdl-format", profile.ytdl_format.clone()),
             (
