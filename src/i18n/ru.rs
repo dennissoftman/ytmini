@@ -29,6 +29,7 @@ pub const T: &[(&str, &str)] = &[
     ("Compact", "Компактно"),
     ("Components", "Компоненты"),
     ("Copy", "Скопировать"),
+    ("Copy link at {}", "Копировать ссылку на {}"),
     ("Copy link", "Скопировать ссылку"),
     ("Couldn't add to YouTube history: {}", "Не удалось добавить в историю YouTube: {}"),
     ("Couldn't open the browser: {}", "Не удалось открыть браузер: {}"),

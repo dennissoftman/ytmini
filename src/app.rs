@@ -5053,6 +5053,11 @@ impl App {
             eq_pick = act.eq_pick;
             toggle_fs |= act.toggle_fullscreen;
             quality = act.quality;
+            if let Some(url) = act.copy_link {
+                self.clip_seen = url.clone(); // our own copy: don't offer it back
+                ctx.copy_text(url);
+                self.status = Some((t("Link copied.").into(), false));
+            }
             if act.open_in_window {
                 open_in_window = Some(Video {
                     id: p.id.clone(),

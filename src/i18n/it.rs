@@ -29,6 +29,7 @@ pub const T: &[(&str, &str)] = &[
     ("Compact", "Compatta"),
     ("Components", "Componenti"),
     ("Copy", "Copia"),
+    ("Copy link at {}", "Copia link a {}"),
     ("Copy link", "Copia link"),
     ("Couldn't add to YouTube history: {}", "Impossibile aggiungere alla cronologia di YouTube: {}"),
     ("Couldn't open the browser: {}", "Impossibile aprire il browser: {}"),

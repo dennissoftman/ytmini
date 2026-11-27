@@ -29,6 +29,7 @@ pub const T: &[(&str, &str)] = &[
     ("Compact", "작게"),
     ("Components", "구성 요소"),
     ("Copy", "복사"),
+    ("Copy link at {}", "{}부터 링크 복사"),
     ("Copy link", "링크 복사"),
     ("Couldn't add to YouTube history: {}", "YouTube 기록에 추가할 수 없음: {}"),
     ("Couldn't open the browser: {}", "브라우저를 열 수 없음: {}"),

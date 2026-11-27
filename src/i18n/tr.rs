@@ -29,6 +29,7 @@ pub const T: &[(&str, &str)] = &[
     ("Compact", "Sıkışık"),
     ("Components", "Bileşenler"),
     ("Copy", "Kopyala"),
+    ("Copy link at {}", "Bağlantıyı {} konumunda kopyala"),
     ("Copy link", "Bağlantıyı kopyala"),
     ("Couldn't add to YouTube history: {}", "YouTube geçmişine eklenemedi: {}"),
     ("Couldn't open the browser: {}", "Tarayıcı açılamadı: {}"),

@@ -29,6 +29,7 @@ pub const T: &[(&str, &str)] = &[
     ("Compact", "紧凑"),
     ("Components", "组件"),
     ("Copy", "拷贝"),
+    ("Copy link at {}", "复制 {} 处的链接"),
     ("Copy link", "拷贝链接"),
     ("Couldn't add to YouTube history: {}", "无法添加到 YouTube 历史记录：{}"),
     ("Couldn't open the browser: {}", "无法打开浏览器：{}"),

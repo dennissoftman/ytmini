@@ -29,6 +29,7 @@ pub const T: &[(&str, &str)] = &[
     ("Compact", "コンパクト"),
     ("Components", "コンポーネント"),
     ("Copy", "コピー"),
+    ("Copy link at {}", "{} からのリンクをコピー"),
     ("Copy link", "リンクをコピー"),
     ("Couldn't add to YouTube history: {}", "YouTube の履歴に追加できませんでした: {}"),
     ("Couldn't open the browser: {}", "ブラウザを開けませんでした: {}"),

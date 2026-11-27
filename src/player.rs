@@ -1186,6 +1186,8 @@ pub struct Actions {
     pub controls_visible: bool,
     /// A choice in the EQ menu.
     pub eq_pick: Option<crate::eq::Pick>,
+    /// "Copy link" from the video's right-click menu.
+    pub copy_link: Option<String>,
 }
 
 pub struct ViewCtx<'a> {
@@ -1273,6 +1275,23 @@ impl Embedded {
         }
 
         self.gestures(&ctx, &resp, area, &painter, &mut act);
+
+        // right click: share the video, from the start or from here
+        if !self.id.is_empty() {
+            let pos = self.pos;
+            resp.context_menu(|ui| {
+                let url = watch_url(&self.id, None);
+                if ui.button(t("Copy link")).clicked() {
+                    act.copy_link = Some(url);
+                }
+                if pos >= 1.0 {
+                    let label = tf("Copy link at {}", &[&fmt_time(pos)]);
+                    if ui.button(label).clicked() {
+                        act.copy_link = Some(watch_url(&self.id, Some(pos)));
+                    }
+                }
+            });
+        }
 
         // Overlays: loading, error, end
         let center = area.center();
@@ -2269,6 +2288,15 @@ fn trim_num(x: f64) -> String {
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
+/// The video's YouTube link, optionally starting at `at` seconds.
+fn watch_url(id: &str, at: Option<f64>) -> String {
+    let url = format!("https://www.youtube.com/watch?v={id}");
+    match at {
+        Some(t) => format!("{url}&t={}s", t.floor() as u64),
+        None => url,
+    }
+}
+
 /// The error line to show for an mpv log message, or `None` to keep `prev`.
 /// When the ytdl hook fails, mpv logs yt-dlp's own `ERROR: …` first and then
 /// a generic "youtube-dl failed: …": the first one says what went wrong.
@@ -2302,7 +2330,19 @@ fn members_only(err: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{log_error, members_only};
+    use super::{log_error, members_only, watch_url};
+
+    #[test]
+    fn share_links() {
+        assert_eq!(
+            watch_url("-RaHk6ckrEI", None),
+            "https://www.youtube.com/watch?v=-RaHk6ckrEI"
+        );
+        assert_eq!(
+            watch_url("-RaHk6ckrEI", Some(83.9)),
+            "https://www.youtube.com/watch?v=-RaHk6ckrEI&t=83s"
+        );
+    }
 
     #[test]
     fn members_only_videos_are_recognised() {
