@@ -792,12 +792,10 @@ impl App {
                     self.settings.update_notified = Some(rel.version.clone());
                     let title = tf("ytmini {} is available", &[&rel.version]);
                     let body = t("Open ytmini to update.");
-                    match &self.tray {
-                        Some(tray) => tray.notify(&title, body),
-                        None => {
-                            #[cfg(target_os = "macos")]
-                            crate::notify::show(&title, body);
-                        }
+                    if let Some(tray) = &self.tray {
+                        tray.notify(&title, body);
+                    } else if cfg!(target_os = "macos") {
+                        crate::notify::show_without_tray(&title, body);
                     }
                 }
                 self.update.found = Some(rel);
