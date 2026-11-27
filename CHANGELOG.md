@@ -4,6 +4,24 @@ Entries after 0.2.0 are written by
 [release-please](https://github.com/googleapis/release-please) from
 Conventional Commits. Earlier versions were summarised by hand.
 
+## [0.5.2](https://github.com/dennissoftman/ytmini/compare/v0.5.1...v0.5.2) (2026-11-27)
+
+
+### Features
+
+* right-click the playing video to copy its link, from the start or from the current moment ([29361e2](https://github.com/dennissoftman/ytmini/commit/29361e210bf00eff2670804f85ed9f5740e5accb))
+
+
+### Bug Fixes
+
+* "Copy link" copies the link, and copy and paste work in text fields ([8f2c319](https://github.com/dennissoftman/ytmini/commit/8f2c3191cf53484750bd5532940c17624d4a5a8a))
+* no more square blocks in fast-moving video on Windows with NVIDIA graphics ([8d581d5](https://github.com/dennissoftman/ytmini/commit/8d581d5294e4cae1da68fcaf8c5c55a8c4e630cc))
+
+
+### Miscellaneous
+
+* release 0.5.2 ([2831858](https://github.com/dennissoftman/ytmini/commit/28318580f2ac9a11ce48ddd2b8f57f4d543eff34))
+
 ## [0.5.1](https://github.com/dennissoftman/ytmini/compare/v0.5.0...v0.5.1) (2026-11-27)
 
 
