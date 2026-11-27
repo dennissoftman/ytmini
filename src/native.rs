@@ -112,10 +112,19 @@ fn player() -> Result<(String, Arc<String>, u64)> {
         p.checked = Instant::now();
         return Ok((p.id.clone(), p.code.clone(), p.sts));
     }
+    // The TV variant, as yt-dlp uses: its solver can't run the main
+    // variant of some players (b485e332: "addOnDisposeCallback is not a
+    // function"). The main one only if the TV script can't be fetched.
     let code = get_text(
         &agent,
-        &format!("https://www.youtube.com/s/player/{id}/player_ias.vflset/en_US/base.js"),
-    )?;
+        &format!("https://www.youtube.com/s/player/{id}/tv-player-ias.vflset/tv-player-ias.js"),
+    )
+    .or_else(|_| {
+        get_text(
+            &agent,
+            &format!("https://www.youtube.com/s/player/{id}/player_ias.vflset/en_US/base.js"),
+        )
+    })?;
     let sts = signature_timestamp(&code).context("no signatureTimestamp in the player")?;
     if debug() {
         eprintln!("native: player {id} (sts {sts})");
