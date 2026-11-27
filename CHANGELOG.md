@@ -4,6 +4,23 @@ Entries after 0.2.0 are written by
 [release-please](https://github.com/googleapis/release-please) from
 Conventional Commits. Earlier versions were summarised by hand.
 
+## [0.5.1](https://github.com/dennissoftman/ytmini/compare/v0.5.0...v0.5.1) (2026-11-27)
+
+
+### Features
+
+* members-only videos you can't watch no longer show up in Home, Subscriptions and search ([b99f582](https://github.com/dennissoftman/ytmini/commit/b99f5823c0acd5dcfda88e3156195b518ee8b578))
+
+
+### Bug Fixes
+
+* when a video can't be opened, the player shows yt-dlp's reason instead of "youtube-dl failed" ([e2e65a1](https://github.com/dennissoftman/ytmini/commit/e2e65a1e0bd3ab635178ea16bf97b44fc4989171))
+
+
+### Miscellaneous
+
+* release 0.5.1 ([f626b70](https://github.com/dennissoftman/ytmini/commit/f626b70e2a65546aca3214eb27f3de06ae9a3903))
+
 ## [0.5.0](https://github.com/dennissoftman/ytmini/compare/v0.4.1...v0.5.0) (2026-11-27)
 
 
