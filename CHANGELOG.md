@@ -4,6 +4,13 @@ Entries after 0.2.0 are written by
 [release-please](https://github.com/googleapis/release-please) from
 Conventional Commits. Earlier versions were summarised by hand.
 
+## [0.4.1](https://github.com/dennissoftman/ytmini/compare/v0.4.0...v0.4.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* videos load quickly again with YouTube's new player ([e0bf510](https://github.com/dennissoftman/ytmini/commit/e0bf51053d003b8f77c703e25e2a41afcb218b60))
+
 ## [0.4.0](https://github.com/dennissoftman/ytmini/compare/v0.3.0...v0.4.0) (2026-11-24)
 
 
