@@ -133,4 +133,10 @@ mod imp {
     pub fn init(_on_click: impl Fn() + Send + Sync + 'static) {}
 }
 
+/// macOS without a menu-bar icon; elsewhere notifications go through the tray.
+pub fn show_without_tray(_title: &str, _body: &str) {
+    #[cfg(target_os = "macos")]
+    imp::show(_title, _body);
+}
+
 pub use imp::*;
