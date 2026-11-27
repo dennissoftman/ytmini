@@ -4,6 +4,13 @@ Entries after 0.2.0 are written by
 [release-please](https://github.com/googleapis/release-please) from
 Conventional Commits. Earlier versions were summarised by hand.
 
+## [0.5.0](https://github.com/dennissoftman/ytmini/compare/v0.4.1...v0.5.0) (2026-11-27)
+
+
+### Features
+
+* ytmini tells you about new versions and updates itself when you agree ([f33b1ec](https://github.com/dennissoftman/ytmini/commit/f33b1ecece155d6207a8803bce2d88bc109bfa14))
+
 ## [0.4.1](https://github.com/dennissoftman/ytmini/compare/v0.4.0...v0.4.1) (2026-11-27)
 
 
