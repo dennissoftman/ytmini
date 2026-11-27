@@ -642,10 +642,10 @@ impl Embedded {
                 mpv::EVENT_LOG_MESSAGE => {
                     // SAFETY: LOG_MESSAGE data is an mpv_event_log_message.
                     let m = unsafe { &*(ev.data as *const mpv::EventLogMessage) };
-                    let text = mpv::c_to_string(m.text).trim().to_string();
-                    if !text.is_empty() {
-                        self.last_log_error =
-                            Some(format!("{}: {text}", mpv::c_to_string(m.prefix)));
+                    let prefix = mpv::c_to_string(m.prefix);
+                    let text = mpv::c_to_string(m.text);
+                    if let Some(e) = log_error(self.last_log_error.as_deref(), &prefix, &text) {
+                        self.last_log_error = Some(e);
                     }
                 }
                 mpv::EVENT_SHUTDOWN => self.error = Some("mpv shut down".into()),
@@ -2261,4 +2261,58 @@ pub fn fmt_time(t: f64) -> String {
 fn trim_num(x: f64) -> String {
     let s = format!("{x:.2}");
     s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// The error line to show for an mpv log message, or `None` to keep `prev`.
+/// When the ytdl hook fails, mpv logs yt-dlp's own `ERROR: …` first and then
+/// a generic "youtube-dl failed: …": the first one says what went wrong.
+fn log_error(prev: Option<&str>, prefix: &str, text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if prefix == "ytdl_hook" {
+        if let Some(e) = text
+            .lines()
+            .rev()
+            .find_map(|l| l.trim().strip_prefix("ERROR:"))
+        {
+            return Some(format!("yt-dlp: {}", e.trim()));
+        }
+        if text.starts_with("youtube-dl failed") && prev.is_some_and(|p| p.starts_with("yt-dlp: "))
+        {
+            return None;
+        }
+    }
+    Some(format!("{prefix}: {text}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_error;
+
+    #[test]
+    fn ytdl_failure_shows_ytdlps_reason() {
+        let e = log_error(
+            None,
+            "ytdl_hook",
+            "WARNING: [youtube] slow\nERROR: [youtube] abc: Video unavailable\n",
+        );
+        assert_eq!(
+            e.as_deref(),
+            Some("yt-dlp: [youtube] abc: Video unavailable")
+        );
+        let generic = "youtube-dl failed: unexpected error occurred";
+        assert_eq!(log_error(e.as_deref(), "ytdl_hook", generic), None);
+        // without a reason from yt-dlp, the generic line is all there is
+        assert_eq!(
+            log_error(None, "ytdl_hook", generic).as_deref(),
+            Some("ytdl_hook: youtube-dl failed: unexpected error occurred")
+        );
+        assert_eq!(
+            log_error(None, "ffmpeg", " 403 Forbidden ").as_deref(),
+            Some("ffmpeg: 403 Forbidden")
+        );
+        assert_eq!(log_error(Some("x"), "ffmpeg", "  "), None);
+    }
 }
