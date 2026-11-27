@@ -107,6 +107,12 @@ struct DepsState {
 }
 
 enum Msg {
+    /// ytmini update check: a newer release (or none); `manual` from Settings.
+    UpdateChecked(Result<Option<crate::update::Release>, String>, bool),
+    /// Time for the daily update check.
+    UpdateTick,
+    UpdateProgress(f32),
+    UpdateDownloaded(Result<crate::update::Ready, String>),
     Related(String, Vec<Video>),
     /// YouTube Music says this video is a song.
     Song(String),
@@ -463,6 +469,7 @@ pub struct App {
     hidden: bool,
     quitting: bool,
     deps: DepsState,
+    update: UpdateUi,
 
     positions: Positions,
     /// The video you last stopped partway through: first on Home, to
@@ -472,6 +479,25 @@ pub struct App {
     nav_back: Vec<Source>,
     signin: Option<SignIn>,
     last_ext_poll: std::time::Instant,
+}
+
+/// ytmini's own updates (banner, Settings).
+#[derive(Default)]
+struct UpdateUi {
+    checking: bool,
+    /// Result of the last check from Settings (up to date / failed).
+    note: Option<(String, bool)>,
+    /// A newer release.
+    found: Option<crate::update::Release>,
+    /// Download progress (0–1) while downloading.
+    progress: Option<f32>,
+    /// Downloaded and verified: "Restart" finishes it.
+    ready: Option<crate::update::Ready>,
+    error: Option<String>,
+    /// "Later": no banner until the next check finds something.
+    later: bool,
+    /// The "What's new" dialog is open.
+    dialog: bool,
 }
 
 /// `--smoke-test <id>`: drives the embedded player through play → seek → back →
@@ -535,6 +561,14 @@ impl App {
             // launched again (Windows): come back as if "Show ytmini" was chosen
             let (tx, ctx) = (tray_tx.clone(), ctx.clone());
             crate::single::on_show(move || {
+                let _ = tx.send(TrayEvent::Show);
+                ctx.request_repaint();
+            });
+        }
+        {
+            // clicking the update notification (macOS) shows the window
+            let (tx, ctx) = (tray_tx.clone(), ctx.clone());
+            crate::notify::init(move || {
                 let _ = tx.send(TrayEvent::Show);
                 ctx.request_repaint();
             });
@@ -641,6 +675,7 @@ impl App {
             hidden: false,
             quitting: false,
             deps: DepsState::default(),
+            update: UpdateUi::default(),
             positions: Positions::load(),
             last_stopped: yt::config_dir()
                 .ok()
@@ -698,7 +733,296 @@ impl App {
             ctx2.request_repaint();
         });
         app.check_tools(ctx);
+        crate::update::cleanup();
+        let testing_update = std::env::var_os("YTMINI_UPDATE_FROM").is_some();
+        if app.smoke.is_none() && (app.play_seq.is_empty() || testing_update) {
+            // shortly after launch, then daily
+            let (tx, ctx2) = (app.tx.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                let mut wait = Duration::from_secs(10);
+                loop {
+                    std::thread::sleep(wait);
+                    if tx.send(Msg::UpdateTick).is_err() {
+                        return;
+                    }
+                    ctx2.request_repaint();
+                    wait = crate::update::CHECK_EVERY;
+                }
+            });
+        }
         app
+    }
+
+    /// Look for a newer ytmini in the background (`manual`: from Settings).
+    fn check_for_update(&mut self, ctx: &egui::Context, manual: bool) {
+        if self.update.checking || self.update.progress.is_some() || self.update.ready.is_some() {
+            return;
+        }
+        self.update.checking = true;
+        if manual {
+            self.update.note = None;
+        }
+        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let r = crate::update::check().map_err(|e| crate::crashlog::redact(&format!("{e:#}")));
+            let _ = tx.send(Msg::UpdateChecked(r, manual));
+            ctx.request_repaint();
+        });
+    }
+
+    fn on_update_checked(
+        &mut self,
+        r: Result<Option<crate::update::Release>, String>,
+        manual: bool,
+    ) {
+        self.update.checking = false;
+        match r {
+            Ok(Some(rel)) => {
+                if manual {
+                    // asked by hand: show it even after "Later"
+                    self.update.later = false;
+                }
+                let new = self.update.found.as_ref() != Some(&rel);
+                if new {
+                    self.update.later = false;
+                    self.update.error = None;
+                }
+                if !manual && self.settings.update_notified.as_deref() != Some(rel.version.as_str())
+                {
+                    self.settings.update_notified = Some(rel.version.clone());
+                    let title = tf("ytmini {} is available", &[&rel.version]);
+                    let body = t("Open ytmini to update.");
+                    match &self.tray {
+                        Some(tray) => tray.notify(&title, body),
+                        None => {
+                            #[cfg(target_os = "macos")]
+                            crate::notify::show(&title, body);
+                        }
+                    }
+                }
+                self.update.found = Some(rel);
+            }
+            Ok(None) => {
+                if manual {
+                    self.update.note = Some((t("ytmini is up to date").into(), false));
+                }
+            }
+            Err(e) => {
+                if std::env::var_os("YTMINI_DEBUG").is_some() {
+                    eprintln!("[update] check failed: {e}");
+                }
+                if manual {
+                    self.update.note = Some((tf("Couldn't check for updates: {}", &[&e]), true));
+                }
+            }
+        }
+    }
+
+    /// "Update": download and verify in the background.
+    fn start_update(&mut self, ctx: &egui::Context) {
+        let Some(rel) = self.update.found.clone() else {
+            return;
+        };
+        if crate::update::install_blocker().is_some() {
+            let _ = open_url(&rel.page);
+            return;
+        }
+        if self.update.progress.is_some() {
+            return;
+        }
+        self.update.progress = Some(0.0);
+        self.update.error = None;
+        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let report = |p: f32| {
+                let _ = tx.send(Msg::UpdateProgress(p));
+                ctx.request_repaint();
+            };
+            let r = crate::update::download(&rel, &report)
+                .map_err(|e| crate::crashlog::redact(&format!("{e:#}")));
+            let _ = tx.send(Msg::UpdateDownloaded(r));
+            ctx.request_repaint();
+        });
+    }
+
+    /// "Restart now": hand over to the new version (or the installer) and quit.
+    fn finish_update(&mut self, ctx: &egui::Context) {
+        let Some(ready) = self.update.ready.clone() else {
+            return;
+        };
+        match crate::update::finish(&ready) {
+            Ok(()) => {
+                self.quitting = true;
+                if self.hidden {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(e) => self.update.error = Some(crate::crashlog::redact(&format!("{e:#}"))),
+        }
+    }
+
+    /// The update banner under the search bar: Update (opens the dialog
+    /// with what's new) or Later.
+    fn ui_update_banner(&mut self, ui: &mut egui::Ui) {
+        let Some(rel) = self.update.found.clone() else {
+            return;
+        };
+        if self.update.later {
+            return;
+        }
+        let (mut open, mut restart, mut later) = (false, false, false);
+        egui::Panel::top("update")
+            .frame(
+                egui::Frame::new()
+                    .fill(panel())
+                    .inner_margin(Margin::symmetric(16, 8)),
+            )
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    if let Some(p) = self.update.progress {
+                        ui.spinner();
+                        ui.label(
+                            RichText::new(tf(
+                                "Downloading ytmini {}… {}%",
+                                &[&rel.version, &((p * 100.0) as u32)],
+                            ))
+                            .color(text()),
+                        );
+                        return;
+                    }
+                    if self.update.ready.is_some() {
+                        ui.label(
+                            RichText::new(tf(
+                                "ytmini {} is ready. Restart to finish updating.",
+                                &[&rel.version],
+                            ))
+                            .color(text()),
+                        );
+                        restart = ui.add(accent_btn(t("Restart now"))).clicked();
+                    } else {
+                        ui.label(
+                            RichText::new(tf("ytmini {} is available", &[&rel.version]))
+                                .color(text()),
+                        );
+                        open = ui.add(accent_btn(update_label())).clicked();
+                    }
+                    later = ui.button(t("Later")).clicked();
+                });
+            });
+        if open {
+            self.update.dialog = true;
+        }
+        if restart {
+            let ctx = ui.ctx().clone();
+            self.finish_update(&ctx);
+        }
+        if later {
+            self.update.later = true;
+            self.update.dialog = false;
+        }
+    }
+
+    /// What's new in the release, and the button that installs it.
+    fn ui_update_dialog(&mut self, ctx: &egui::Context) {
+        if !self.update.dialog {
+            return;
+        }
+        let Some(rel) = self.update.found.clone() else {
+            self.update.dialog = false;
+            return;
+        };
+        let mut open = true;
+        let (mut update, mut restart, mut close, mut page) = (false, false, false, false);
+        egui::Window::new(t("What's new"))
+            .id(egui::Id::unique("update_dialog"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .order(egui::Order::Foreground)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                ui.label(
+                    RichText::new(tf("ytmini {} is available", &[&rel.version]))
+                        .strong()
+                        .color(text()),
+                );
+                ui.label(
+                    RichText::new(tf("Version {}", &[&crate::update::current()]))
+                        .small()
+                        .color(text_dim()),
+                );
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical()
+                    .max_height(280.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for line in rel.notes.lines() {
+                            if line.is_empty() {
+                                ui.add_space(4.0);
+                            } else if line.starts_with('•') {
+                                ui.add(egui::Label::new(RichText::new(line).color(text())).wrap());
+                            } else {
+                                ui.label(RichText::new(line).strong().color(text()));
+                            }
+                        }
+                    });
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if let Some(p) = self.update.progress {
+                        ui.spinner();
+                        ui.label(
+                            RichText::new(tf(
+                                "Downloading ytmini {}… {}%",
+                                &[&rel.version, &((p * 100.0) as u32)],
+                            ))
+                            .color(text_dim()),
+                        );
+                    } else if let Some(e) = &self.update.error {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(tf("Couldn't update: {}", &[e]))
+                                    .color(crate::theme::err()),
+                            )
+                            .wrap(),
+                        );
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if self.update.progress.is_some() {
+                        return;
+                    }
+                    if self.update.ready.is_some() {
+                        restart = ui.add(accent_btn(t("Restart now"))).clicked();
+                        close = ui.button(t("Later")).clicked();
+                    } else if self.update.error.is_some() {
+                        page = ui.add(accent_btn(t("Download page"))).clicked();
+                        close = ui.button(t("Cancel")).clicked();
+                    } else {
+                        update = ui.add(accent_btn(update_label())).clicked();
+                        close = ui.button(t("Cancel")).clicked();
+                    }
+                });
+            });
+        if update {
+            self.start_update(ctx); // opens the release page where we can't install
+            if crate::update::install_blocker().is_some() {
+                close = true;
+            }
+        }
+        if restart {
+            self.finish_update(ctx);
+        }
+        if page {
+            let _ = open_url(&rel.page);
+            close = true;
+        }
+        if close || !open {
+            self.update.dialog = false;
+            self.update.error = None;
+        }
     }
 
     fn check_tools(&mut self, ctx: &egui::Context) {
@@ -1204,6 +1528,27 @@ impl App {
                     }
                 }
                 Msg::Versions(v) => self.deps.versions = v,
+                Msg::UpdateChecked(r, manual) => self.on_update_checked(r, manual),
+                Msg::UpdateTick => {
+                    if self.settings.update_check {
+                        self.check_for_update(ctx, false);
+                    }
+                }
+                Msg::UpdateProgress(p) => {
+                    if self.update.progress.is_some() {
+                        self.update.progress = Some(p);
+                    }
+                }
+                Msg::UpdateDownloaded(r) => {
+                    self.update.progress = None;
+                    match r {
+                        Ok(ready) => {
+                            self.update.ready = Some(ready);
+                            self.update.later = false;
+                        }
+                        Err(e) => self.update.error = Some(e),
+                    }
+                }
                 Msg::ExternalProgress(id, pos, dur) => self.positions.update(&id, pos, dur),
                 Msg::Switched(r) => {
                     if let Err(e) = r {
@@ -2494,6 +2839,8 @@ impl App {
                     });
                 });
             });
+
+        self.ui_update_banner(ui);
 
         // ----- status bar -----
         let active_loading = self.tabs.get(&self.active).is_some_and(|t| t.loading);
@@ -5126,6 +5473,7 @@ impl App {
         let mut reimport = false;
         let mut refresh_session = false;
         let mut check_updates = false;
+        let (mut check_app_update, mut finish_update) = (false, false);
         let mut clear_downloads = false;
         let before_quality = self.settings.quality;
         let signed_in = self.signed_in();
@@ -5476,6 +5824,29 @@ impl App {
                                     check_updates = true;
                                 }
                             });
+                            ui.add_space(10.0);
+                            section(ui, "ytmini");
+                            ui.label(RichText::new(tf("Version {}", &[&env!("CARGO_PKG_VERSION")])).color(text_dim()));
+                            ui.checkbox(&mut s.update_check, t("Check for ytmini updates automatically"));
+                            ui.horizontal(|ui| {
+                                if self.update.checking {
+                                    ui.spinner();
+                                    ui.label(RichText::new(t("Checking…")).small());
+                                } else if self.update.ready.is_some() {
+                                    if ui.add(accent_btn(t("Restart now"))).clicked() {
+                                        finish_update = true;
+                                    }
+                                } else if self.update.progress.is_none() && ui.button(t("Check for ytmini updates")).clicked() {
+                                    check_app_update = true;
+                                }
+                            });
+                            if let Some(rel) = &self.update.found {
+                                if self.update.ready.is_none() {
+                                    ui.label(RichText::new(tf("ytmini {} is available", &[&rel.version])).small().color(accent()));
+                                }
+                            } else if let Some((note, err)) = &self.update.note {
+                                ui.label(RichText::new(note).small().color(if *err { crate::theme::err() } else { text_dim() }));
+                            }
                         }
                     }
                     });
@@ -5501,6 +5872,12 @@ impl App {
         }
         if check_updates {
             self.run_deps_job(ctx, vec![Dep::YtDlp], true);
+        }
+        if check_app_update {
+            self.check_for_update(ctx, true);
+        }
+        if finish_update {
+            self.finish_update(ctx);
         }
         if clear_downloads {
             self.load(ctx, Source::Downloads, true);
@@ -6265,6 +6642,8 @@ impl eframe::App for App {
                 if let Some(p) = &mut self.embedded {
                     p.seek_absolute(t, true);
                 }
+            } else if step == "update" {
+                self.update.dialog = true;
             } else if step == "minimize" {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             } else if step == "end" {
@@ -6319,6 +6698,7 @@ impl eframe::App for App {
             self.ui_settings(&ctx);
         }
         self.ui_save_dialog(&ctx);
+        self.ui_update_dialog(&ctx);
     }
 
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
@@ -7567,6 +7947,15 @@ fn logo(ui: &mut egui::Ui, h: f32) {
     let pos = rect.center() - g.size() / 2.0;
     p.galley(pos, g.clone(), Color32::WHITE);
     p.galley(pos + Vec2::new(h * 0.012, 0.0), g, Color32::WHITE); // faux-bold
+}
+
+/// "Update" where ytmini installs it, "Download" where the release page opens.
+fn update_label() -> &'static str {
+    if crate::update::install_blocker().is_none() {
+        t("Update")
+    } else {
+        t("Download")
+    }
 }
 
 fn accent_btn(label: &str) -> egui::Button<'_> {

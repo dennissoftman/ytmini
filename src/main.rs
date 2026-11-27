@@ -19,6 +19,7 @@ mod innertube;
 mod links;
 mod mpv;
 mod native;
+mod notify;
 mod nowplaying;
 mod pgpsig;
 mod player;
@@ -33,6 +34,7 @@ mod textlinks;
 mod theme;
 mod thumbs;
 mod tray;
+mod update;
 mod yt;
 
 fn main() -> eframe::Result {
@@ -54,6 +56,10 @@ fn main() -> eframe::Result {
     // `--check-solver`: the session-free part of it (daily CI)
     if args.first().map(String::as_str) == Some("--check-solver") {
         std::process::exit(native::check_solver());
+    }
+    // `--check-update [--install]`: look for a new ytmini (and install it)
+    if args.first().map(String::as_str) == Some("--check-update") {
+        std::process::exit(update::self_check(args.iter().any(|a| a == "--install")));
     }
 
     // Windows: already running (maybe in the tray)? Show that one instead.

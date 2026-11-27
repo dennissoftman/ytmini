@@ -100,6 +100,10 @@ pub struct Settings {
     pub muted_channels: Vec<String>,
     /// Hide videos whose title contains any of these (case-insensitive).
     pub muted_words: Vec<String>,
+    /// Look for new ytmini releases (at launch and daily).
+    pub update_check: bool,
+    /// The release the system notification was shown for (once per release).
+    pub update_notified: Option<String>,
 }
 
 impl Settings {
@@ -167,6 +171,8 @@ impl Default for Settings {
             hide_watched: false,
             muted_channels: Vec::new(),
             muted_words: Vec::new(),
+            update_check: true,
+            update_notified: None,
         }
     }
 }

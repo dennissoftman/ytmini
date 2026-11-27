@@ -29,6 +29,7 @@ VIAddVersionKey /LANG=0 "LegalCopyright" "The ytmini authors"
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 !include "nsDialogs.nsh"
+!include "FileFunc.nsh"
 
 Var OldVersion   ; installed version, empty on a fresh install
 Var WelcomeTitle
@@ -95,6 +96,17 @@ Function .onInit
     StrCpy $HadShortcut 0
     ${If} ${FileExists} "$DESKTOP\${APP}.lnk"
         StrCpy $HadShortcut 1
+    ${EndIf}
+FunctionEnd
+
+; ytmini's updater runs `setup.exe /S /relaunch`: start the new version
+; once it's installed.
+Function .onInstSuccess
+    ${GetParameters} $0
+    ClearErrors
+    ${GetOptions} $0 "/relaunch" $1
+    ${IfNot} ${Errors}
+        Exec '"$INSTDIR\ytmini.exe"'
     ${EndIf}
 FunctionEnd
 

@@ -89,6 +89,14 @@ mod imp {
                 self.last_label = Some(label);
             }
         }
+
+        /// A system notification (a balloon from this icon on Windows).
+        pub fn notify(&self, title: &str, body: &str) {
+            #[cfg(windows)]
+            crate::notify::show_on(self._icon.window_handle(), title, body);
+            #[cfg(target_os = "macos")]
+            crate::notify::show(title, body);
+        }
     }
 
     /// 22pt menu-bar glyph at 2× (44 px): rounded-rect outline with a play
@@ -175,6 +183,7 @@ mod imp {
             Err("no tray support on this platform".into())
         }
         pub fn set_playing(&mut self, _paused: Option<bool>) {}
+        pub fn notify(&self, _title: &str, _body: &str) {}
     }
 
     pub fn set_dock_visible(_visible: bool) {}

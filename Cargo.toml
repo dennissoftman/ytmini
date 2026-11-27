@@ -27,6 +27,7 @@ sha2 = "0.11.1"
 arboard = { version = "3.7", default-features = false }
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
 zip = { version = "9.6.0", default-features = false, features = ["deflate"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 rsa = { version = "0.10.0", default-features = false, features = ["std", "pkcs1v15"] }
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
@@ -39,9 +40,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 objc2-media-player = { version = "0.3", default-features = false, features = ["std", "block2", "MPRemoteCommandCenter", "MPRemoteCommand", "MPRemoteCommandEvent", "MPNowPlayingInfoCenter", "MPMediaItem", "MPMediaItemCollection", "MPMediaEntity", "objc2-app-kit", "objc2-core-foundation"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
 block2 = "0.6"
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotification", "UNNotificationTrigger"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 secret-service = { version = "5.2.0", features = ["rt-async-io-crypto-rust"] }

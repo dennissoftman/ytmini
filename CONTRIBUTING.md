@@ -83,6 +83,13 @@ secrets exist (otherwise it ships an ad-hoc signed app):
 | `MACOS_CERTIFICATE_PASSWORD` | the `.p12` export password |
 | `APPLE_API_KEY` | an App Store Connect API key (`AuthKey_….p8` contents, Developer access) for `notarytool` |
 | `APPLE_API_KEY_ID`, `APPLE_API_ISSUER` | that key's ID and issuer ID |
+| `UPDATE_SIGNING_KEY` | the Ed25519 private key (PEM) that signs `SHA256SUMS.txt` for the in-app updater |
+
+The in-app updater (`src/update.rs`) installs a release only if its
+`SHA256SUMS.txt.sig` checks out against the public key pinned in the app,
+and on macOS only if the new app carries the same Developer ID team. Without
+`UPDATE_SIGNING_KEY` the release still publishes, but apps offer only its
+download page.
 
 `bundle.sh` signs with `CODESIGN_IDENTITY` when it's set: every bundled
 library, the mpv helper and the app, with the hardened runtime and
@@ -192,6 +199,7 @@ A comma-separated script that starts a few seconds after launch:
 | `list:<playlist id>` | open a playlist page (a Mix too) |
 | `playall` / `shuffle` | Play all / Shuffle on that page |
 | `next` | Next (tests the queue) |
+| `update` | open the update dialog (with `YTMINI_UPDATE_FROM`) |
 
 ```bash
 YTMINI_NO_HISTORY=1 YTMINI_DEBUG=1 \
@@ -218,6 +226,17 @@ playing.
 | `YTMINI_NO_NATIVE=1` | skip the native stream lookup |
 | `YTMINI_X11=1` | Linux: use X11 instead of Wayland (automatic in WSL) |
 | `YTMINI_IMPORT=1` | allow Keychain cookie import in sign-in tests |
+| `YTMINI_UPDATE_FROM=0.4.0` | pretend to be that version (the updater offers the latest release) |
+| `YTMINI_UPDATE_URL=<url>` | take releases from a mirror: `<url>/latest.json` (GitHub's release JSON) and the files next to it |
+
+### Checking the updater
+
+`ytmini --check-update` prints what the updater sees (exit 10: an update is
+available); `--check-update --install` also downloads, verifies and installs
+it, then starts the new version. Test it on a copy of the app outside
+`~/Applications`, with `YTMINI_CONFIG_DIR=<scratch dir>`,
+`YTMINI_UPDATE_FROM` and a local mirror (`python3 -m http.server`) whose
+`SHA256SUMS.txt.sig` you sign with the update key.
 
 ## Design decisions
 
@@ -246,3 +265,9 @@ playing.
 - The title is an overlay at the top of the player, as on YouTube.
 - An expired session is refreshed from the browser it came from as soon as
   any request notices, without asking.
+- Updates: checked at launch and daily (Settings can turn that off). A
+  new release shows a banner (Update · Later) and, once per release, a
+  system notification. Update opens "What's new" (the changelog) and installs
+  only when the user agrees: macOS swaps the app and restarts it, Windows
+  runs the installer silently (`/S /relaunch`). Linux and copies we can't
+  replace get the release page instead.

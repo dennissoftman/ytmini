@@ -270,3 +270,19 @@ jobs:
           sha256sum ytmini-* ytmini_* > SHA256SUMS.txt
           cat SHA256SUMS.txt
           gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber SHA256SUMS.txt
+      # The in-app updater installs only what this key signed (src/update.rs).
+      - name: Sign SHA256SUMS.txt for the updater
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          cd assets
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "::warning::UPDATE_SIGNING_KEY isn't set: apps will offer only the download page for this release"
+            exit 0
+          fi
+          key="$RUNNER_TEMP/update-signing.pem"
+          (umask 077; printf '%s\n' "$UPDATE_SIGNING_KEY" > "$key")
+          openssl pkeyutl -sign -rawin -inkey "$key" -in SHA256SUMS.txt -out SHA256SUMS.txt.sig
+          rm -f "$key"
+          test "$(stat -c %s SHA256SUMS.txt.sig)" = 64
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber SHA256SUMS.txt.sig

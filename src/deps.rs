@@ -170,7 +170,7 @@ fn expected_sha(agent: &ureq::Agent, asset: &Asset) -> Result<String> {
 
 /// The hash for `name` in a sums file: `<hash>  <name>` lines, or the
 /// PowerShell `Hash : <HASH>` form deno uses for its Windows builds.
-fn parse_sha(text: &str, name: &str) -> Option<String> {
+pub(crate) fn parse_sha(text: &str, name: &str) -> Option<String> {
     let is_sha = |h: &str| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit());
     text.lines()
         .find_map(|l| {
