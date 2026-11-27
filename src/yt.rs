@@ -1511,12 +1511,23 @@ pub fn screen_cap(width_px: f32, height_px: f32) -> u32 {
 /// mpv's `hwdec`: hardware decoding where mpv trusts it. `YTMINI_HWDEC`
 /// overrides it (dev: `no`, `nvdec-copy`, `d3d11va-copy`… to compare
 /// decoders when a GPU draws artifacts).
+///
+/// Windows: decoded frames are copied back to the CPU. The libmpv OpenGL
+/// renderer can't take D3D11 frames there, so `auto-safe` lands on NVDEC's
+/// CUDA→OpenGL interop, which showed sharp square blocks on fast motion in
+/// 4K VP9 (RTX 4080, driver 32.0.16.1088). Both copy modes are clean and
+/// cost a few percent CPU.
 pub fn hwdec() -> String {
     std::env::var("YTMINI_HWDEC")
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "auto-safe".into())
+        .unwrap_or_else(|| DEFAULT_HWDEC.into())
 }
+
+#[cfg(windows)]
+const DEFAULT_HWDEC: &str = "d3d11va-copy,nvdec-copy,auto-safe";
+#[cfg(not(windows))]
+const DEFAULT_HWDEC: &str = "auto-safe";
 
 /// Concrete mpv settings for one playback.
 #[derive(Clone, Debug, PartialEq, Eq)]
