@@ -1852,9 +1852,18 @@ mod tests {
     #[cfg(unix)]
     fn cookie_copy_private() {
         use std::os::unix::fs::PermissionsExt;
-        let src = std::env::temp_dir().join(format!("ytmini-cc-{}.txt", std::process::id()));
+        let _lock = CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // a scratch config dir: the copy goes to <config>/run
+        let dir = std::env::temp_dir().join(format!("ytmini-cc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // SAFETY: tests touching YTMINI_CONFIG_DIR hold CONFIG_DIR_LOCK.
+        unsafe { std::env::set_var("YTMINI_CONFIG_DIR", &dir) };
+        let src = dir.join("cookies.txt");
         fs::write(&src, b"# Netscape HTTP Cookie File\n").unwrap();
-        let c = CookieCopy::new(&src).unwrap();
+        let c = CookieCopy::new(&src);
+        unsafe { std::env::remove_var("YTMINI_CONFIG_DIR") };
+        let c = c.unwrap();
         let p = c.path().to_path_buf();
         assert_ne!(p, src);
         assert_eq!(fs::read(&p).unwrap(), fs::read(&src).unwrap());
@@ -1864,7 +1873,7 @@ mod tests {
         );
         drop(c);
         assert!(!p.exists());
-        let _ = fs::remove_file(src);
+        let _ = fs::remove_dir_all(dir);
     }
 
     fn v(d: Option<f64>) -> Video {
@@ -2189,14 +2198,22 @@ mod watch_later_live {
     }
 }
 
+/// Tests that point `YTMINI_CONFIG_DIR` (process-wide) at a scratch folder
+/// hold this, or a parallel test would write into the other's folder.
+#[cfg(test)]
+pub static CONFIG_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tidy_tests {
     #[test]
     fn tidy_keeps_only_google_and_youtube() {
+        let _lock = super::CONFIG_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("ytmini-tidy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("signin-export")).unwrap();
-        // SAFETY: only this test reads YTMINI_CONFIG_DIR in this process's test run.
+        // SAFETY: tests touching YTMINI_CONFIG_DIR hold CONFIG_DIR_LOCK.
         unsafe { std::env::set_var("YTMINI_CONFIG_DIR", &dir) };
         let jar = "# Netscape HTTP Cookie File\n\n\
             .youtube.com\tTRUE\t/\tTRUE\t0\tSID\tfake\n\
