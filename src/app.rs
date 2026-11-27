@@ -7284,6 +7284,20 @@ fn video_card(
         }
         painter.galley(badge.min + Vec2::new(4.0 + note, 2.0), g, Color32::WHITE);
     }
+    // members-only: YouTube's green tag, top left
+    if v.members_only {
+        let g = painter.layout_no_wrap(
+            format!("★ {}", t("Members only")),
+            FontId::proportional(11.0),
+            Color32::WHITE,
+        );
+        let b = egui::Rect::from_min_size(
+            thumb.left_top() + Vec2::new(8.0, 8.0),
+            g.size() + Vec2::new(8.0, 4.0),
+        );
+        painter.rect_filled(b, 4, Color32::from_rgb(0x1E, 0x7D, 0x32));
+        painter.galley(b.min + Vec2::new(4.0, 2.0), g, Color32::WHITE);
+    }
 
     // title (max 2 lines)
     let text_w = rect.width() - 2.0 * m.pad;

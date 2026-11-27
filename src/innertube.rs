@@ -1975,6 +1975,18 @@ fn lockup(x: &Value) -> Option<Video> {
                 .and_then(Value::as_str)
                 == Some("MUSIC")
         });
+        v.unplayable = badges.iter().any(|b| {
+            b.pointer("/icon/sources/0/clientResource/imageName")
+                .and_then(Value::as_str)
+                == Some("PLAY_DISABLED")
+        });
+        let mut meta = Vec::new();
+        if let Some(m) = x.get("metadata") {
+            find_all(m, "badgeViewModel", &mut meta);
+        }
+        v.members_only = meta
+            .iter()
+            .any(|b| b.get("badgeStyle").and_then(Value::as_str) == Some("BADGE_MEMBERS_ONLY"));
     }
     Some(v)
 }
@@ -2043,6 +2055,9 @@ fn renderer(x: &Value) -> Option<Video> {
                 .and_then(Value::as_str)
                 == Some("MUSIC")
         });
+    v.members_only = x
+        .get("badges")
+        .is_some_and(|b| b.to_string().contains("BADGE_STYLE_TYPE_MEMBERS_ONLY"));
     v.description = x
         .pointer("/detailedMetadataSnippets/0/snippetText")
         .or_else(|| x.get("descriptionSnippet"))
@@ -2367,4 +2382,39 @@ fn playlist_title() {
     }
     println!("after the first page: {n}");
     assert!(n > 0, "a playlist pages on past its first 100 videos");
+}
+
+#[cfg(test)]
+mod members_only {
+    use serde_json::json;
+
+    /// Shaped like a Home feed lockup for a members-only video the account
+    /// can't play (2026-11).
+    #[test]
+    fn lockup_marks_members_only_and_unplayable() {
+        let badges = |icon: &str| {
+            json!({"overlays": [{"thumbnailBottomOverlayViewModel": {"badges": [
+                {"thumbnailBadgeViewModel": {"text": "3:32"}},
+                {"thumbnailBadgeViewModel": {"icon": {"sources": [{"clientResource": {"imageName": icon}}]}}}
+            ]}}]})
+        };
+        let lockup = |icon: &str, style: &str| {
+            json!({
+                "contentId": "8JRjvy6PfuQ",
+                "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                "contentImage": {"thumbnailViewModel": badges(icon)},
+                "metadata": {"lockupMetadataViewModel": {
+                    "title": {"content": "A video"},
+                    "metadata": {"contentMetadataViewModel": {"metadataRows": [
+                        {"badges": [{"badgeViewModel": {"badgeStyle": style, "badgeText": "Members only"}}]}
+                    ]}}
+                }}
+            })
+        };
+        let v = super::lockup(&lockup("PLAY_DISABLED", "BADGE_MEMBERS_ONLY")).unwrap();
+        assert!(v.members_only && v.unplayable);
+        assert_eq!(v.duration, Some(212.0));
+        let v = super::lockup(&lockup("NONE", "BADGE_DEFAULT")).unwrap();
+        assert!(!v.members_only && !v.unplayable);
+    }
 }

@@ -887,6 +887,8 @@ impl RawEntry {
             is_short: false,
             is_live: false,
             is_music: false,
+            members_only: false,
+            unplayable: false,
         })
     }
 }
@@ -926,6 +928,13 @@ pub struct Video {
     /// A song: YouTube marks it with a music note (only known from the native API).
     #[serde(default)]
     pub is_music: bool,
+    /// For channel members only (YouTube's "Members only" badge).
+    #[serde(default)]
+    pub members_only: bool,
+    /// YouTube says this account can't play it ("Playback unavailable"):
+    /// members-only and not a member (only known from the native API).
+    #[serde(default)]
+    pub unplayable: bool,
 }
 
 impl Video {

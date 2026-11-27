@@ -116,6 +116,8 @@ impl Settings {
         }
         if (v.is_short && !self.show_shorts)
             || (v.is_live && self.hide_live)
+            // members-only for channels you haven't joined: nothing to watch
+            || v.unplayable
             || (feed && watched && self.hide_watched)
         {
             return true;

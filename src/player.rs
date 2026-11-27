@@ -1302,6 +1302,16 @@ impl Embedded {
             }
         }
         if let Some(err) = self.error.clone() {
+            // not ours to fix, and no other player gets past it either
+            let members = members_only(&err);
+            let (title, err) = if members {
+                (
+                    t("This video is for channel members only"),
+                    t("Join the channel on YouTube to watch it.").to_string(),
+                )
+            } else {
+                (t("Couldn't play this video"), err)
+            };
             let r = Rect::from_center_size(center, Vec2::new(area.width().min(560.0), 150.0));
             ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
                 egui::Frame::new()
@@ -1309,11 +1319,7 @@ impl Embedded {
                     .corner_radius(12)
                     .inner_margin(14)
                     .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new(t("Couldn't play this video"))
-                                .strong()
-                                .color(Color32::WHITE),
-                        );
+                        ui.label(egui::RichText::new(title).strong().color(Color32::WHITE));
                         ui.add(
                             egui::Label::new(
                                 egui::RichText::new(err)
@@ -1323,7 +1329,7 @@ impl Embedded {
                             .wrap(),
                         );
                         ui.horizontal(|ui| {
-                            if ui.button(t("Try in separate window")).clicked() {
+                            if !members && ui.button(t("Try in separate window")).clicked() {
                                 act.open_in_window = true;
                             }
                             if ui.button(t("Back")).clicked() {
@@ -2287,9 +2293,27 @@ fn log_error(prev: Option<&str>, prefix: &str, text: &str) -> Option<String> {
     Some(format!("{prefix}: {text}"))
 }
 
+/// YouTube refuses a members-only video to an account that hasn't joined
+/// the channel ("Join this channel to get access to members-only content…",
+/// "…available to this channel's members on level…").
+fn members_only(err: &str) -> bool {
+    err.contains("members-only") || err.contains("channel's members")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::log_error;
+    use super::{log_error, members_only};
+
+    #[test]
+    fn members_only_videos_are_recognised() {
+        assert!(members_only(
+            "yt-dlp: [youtube] 8JRjvy6PfuQ: Join this channel to get access to members-only content like this video, and other exclusive perks."
+        ));
+        assert!(members_only(
+            "yt-dlp: [youtube] x: This video is available to this channel's members on level: Fan"
+        ));
+        assert!(!members_only("yt-dlp: [youtube] x: Video unavailable"));
+    }
 
     #[test]
     fn ytdl_failure_shows_ytdlps_reason() {
